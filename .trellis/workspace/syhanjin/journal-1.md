@@ -213,3 +213,36 @@ Implemented secure versioned settings, Tencent general-invoice OCR preflight and
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: Fix reimport after deletion
+
+**Date**: 2026-08-13
+**Task**: Fix reimport after deletion
+**Branch**: `main`
+
+### Summary
+
+Allow deleted orders and invoices to be reimported; recover only deleted invoices from multi-invoice sources with transactional recovery markers and regression coverage.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ce7da1b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
