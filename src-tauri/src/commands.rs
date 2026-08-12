@@ -540,6 +540,7 @@ mod tests {
         assert_eq!(result.results[0].id, "order-a");
         assert!(!first_image.exists());
         assert!(state.database.order_detail("order-a").await.is_err());
+        assert!(!state.database.hash_exists("order-a").await.unwrap());
         assert!(!result.results[1].deleted);
         assert_eq!(result.results[1].id, "missing");
         assert_eq!(result.results[1].error_code.as_deref(), Some("not_found"));
@@ -584,6 +585,7 @@ mod tests {
         );
         assert!(image.exists());
         assert!(state.database.order_detail("order-a").await.is_ok());
+        assert!(state.database.hash_exists("order-a").await.unwrap());
     }
 
     #[tokio::test]

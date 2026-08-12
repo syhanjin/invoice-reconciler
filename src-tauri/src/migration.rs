@@ -6,7 +6,11 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(M0001Initial), Box::new(M0002Invoices)]
+        vec![
+            Box::new(M0001Initial),
+            Box::new(M0002Invoices),
+            Box::new(M0003InvoiceRecovery),
+        ]
     }
 }
 
@@ -127,6 +131,48 @@ const INVOICE_DOWN_STATEMENTS: &[&str] = &[
     "DROP TABLE IF EXISTS invoice_batches",
 ];
 
+pub struct M0003InvoiceRecovery;
+
+#[async_trait::async_trait]
+impl MigrationName for M0003InvoiceRecovery {
+    fn name(&self) -> &str {
+        "m0003_invoice_recovery"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for M0003InvoiceRecovery {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        for sql in INVOICE_RECOVERY_UP_STATEMENTS {
+            manager
+                .get_connection()
+                .execute(Statement::from_string(backend, *sql))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        for sql in INVOICE_RECOVERY_DOWN_STATEMENTS {
+            manager
+                .get_connection()
+                .execute(Statement::from_string(backend, *sql))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+const INVOICE_RECOVERY_UP_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS invoice_recovery_markers (source_sha256 TEXT NOT NULL, recovery_identity TEXT NOT NULL, recovery_task_id TEXT REFERENCES invoice_tasks(id) ON DELETE SET NULL, deleted_at TEXT NOT NULL, PRIMARY KEY (source_sha256, recovery_identity))",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_recovery_task ON invoice_recovery_markers(recovery_task_id)",
+];
+
+const INVOICE_RECOVERY_DOWN_STATEMENTS: &[&str] =
+    &["DROP TABLE IF EXISTS invoice_recovery_markers"];
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectOptions, ConnectionTrait, DbBackend, Statement, TryGetable};
@@ -159,18 +205,18 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices')",
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery')",
             )
             .await,
-            2
+            3
         );
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name IN ('invoice_batches', 'invoice_tasks', 'invoices', 'invoice_items', 'invoice_source_links')",
+                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name IN ('invoice_batches', 'invoice_tasks', 'invoices', 'invoice_items', 'invoice_source_links', 'invoice_recovery_markers')",
             )
             .await,
-            5
+            6
         );
         assert_eq!(
             scalar(
@@ -258,6 +304,72 @@ mod tests {
             scalar(
                 &database.connection,
                 "SELECT COUNT(*) count FROM seaql_migrations WHERE version = 'm0002_invoices'",
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn resumes_an_interrupted_invoice_recovery_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume-recovery.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(2)).await.unwrap();
+        connection
+            .execute_unprepared(
+                "CREATE TABLE invoice_recovery_markers (source_sha256 TEXT NOT NULL, recovery_identity TEXT NOT NULL, recovery_task_id TEXT REFERENCES invoice_tasks(id) ON DELETE SET NULL, deleted_at TEXT NOT NULL, PRIMARY KEY (source_sha256, recovery_identity))",
+            )
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name = 'invoice_recovery_markers'",
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version = 'm0003_invoice_recovery'",
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrades_m0002_database_without_losing_invoices() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade-recovery.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(2)).await.unwrap();
+        connection.execute_unprepared(
+            "PRAGMA foreign_keys = ON;
+             INSERT INTO invoice_batches (id, status, created_at) VALUES ('legacy-batch', 'completed', '2026-08-12T00:00:00Z');
+             INSERT INTO invoice_tasks (id, batch_id, original_file_name, source_path, source_sha256, media_type, status, retry_count, created_at) VALUES ('legacy-task', 'legacy-batch', 'legacy.pdf', 'invoices/sources/legacy.pdf', 'legacy-hash', 'application/pdf', 'succeeded', 0, '2026-08-12T00:00:00Z');
+             INSERT INTO invoices (id, task_id, type, subtype, type_description, subtype_description, invoice_number, reliable_identity, currency, preview_path, raw_invoice_json, created_at, updated_at) VALUES ('legacy-invoice', 'legacy-task', 3, 'VatSpecialInvoice', '增值税发票', '增值税专用发票', '1001', 'vat|4403|1001', 'CNY', 'invoices/previews/legacy.pdf', '{}', '2026-08-12T00:00:00Z', '2026-08-12T00:00:00Z');"
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM invoices WHERE id = 'legacy-invoice' AND task_id = 'legacy-task'",
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name = 'invoice_recovery_markers'",
             )
             .await,
             1

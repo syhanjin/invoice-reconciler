@@ -10,11 +10,15 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::{AppError, AppResult, CommandResult};
+use crate::invoice_db::PersistInvoicesOutcome;
 use crate::invoice_files::{
     InspectedInvoiceFile, MAX_INVOICE_FILES, copy_invoice_source, inspect_invoice_file,
     resolve_invoice_path,
 };
-use crate::invoice_queue::{emit_update, prepare_previews, remove_previews};
+use crate::invoice_queue::{
+    emit_update, prepare_previews, remove_duplicate_source, remove_previews,
+    remove_unpersisted_previews,
+};
 use crate::models::*;
 use crate::tencent_ocr::parse_response;
 
@@ -219,7 +223,32 @@ async fn create_inner(
             let id = Uuid::now_v7();
             match entry.inspected {
                 Some(info) if entry.status == "valid" => {
-                    if state.database.invoice_hash_exists(&info.hash).await? {
+                    let relative =
+                        copy_invoice_source(&entry.path, &state.app_data_dir, id, &info.extension)
+                            .await?;
+                    let absolute = state.app_data_dir.join(&relative);
+                    let relative = relative.to_string_lossy().replace('\\', "/");
+                    let accepted = state
+                        .database
+                        .create_invoice_source_task(
+                            &id.to_string(),
+                            &batch_id,
+                            &entry.original_file_name,
+                            &relative,
+                            &info.hash,
+                            &info.media_type,
+                            prepared.forced_type,
+                        )
+                        .await;
+                    let accepted = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            let _ = tokio::fs::remove_file(&absolute).await;
+                            return Err(error);
+                        }
+                    };
+                    if !accepted {
+                        let _ = tokio::fs::remove_file(&absolute).await;
                         state
                             .database
                             .create_invoice_task(
@@ -237,26 +266,7 @@ async fn create_inner(
                             .await?;
                         continue;
                     }
-                    let relative =
-                        copy_invoice_source(&entry.path, &state.app_data_dir, id, &info.extension)
-                            .await?;
-                    copied.push(state.app_data_dir.join(&relative));
-                    let relative = relative.to_string_lossy().replace('\\', "/");
-                    state
-                        .database
-                        .create_invoice_task(
-                            &id.to_string(),
-                            &batch_id,
-                            &entry.original_file_name,
-                            Some(&relative),
-                            &info.hash,
-                            &info.media_type,
-                            prepared.forced_type,
-                            "queued",
-                            None,
-                            None,
-                        )
-                        .await?;
+                    copied.push(absolute);
                     scheduled.push(id.to_string());
                 }
                 Some(info) => {
@@ -438,40 +448,50 @@ pub async fn confirm_invoice_split(
                 parsed.warning.as_deref(),
             )
             .await;
-        let existing = match persisted {
+        let outcome = match persisted {
             Ok(value) => value,
             Err(error) => {
                 remove_previews(&state.app_data_dir, &parsed).await;
                 return Err(error);
             }
         };
-        if let Some(existing) = existing {
-            remove_previews(&state.app_data_dir, &parsed).await;
-            state
-                .database
-                .mark_invoice_failed(
-                    &task.id,
-                    "duplicate_invoice",
-                    "相同发票代码和号码已存在",
-                    Some(&request_id),
-                    Some(&raw),
-                    Some(&existing),
-                )
-                .await?;
-            match tokio::fs::remove_file(&source).await {
-                Ok(()) => {
-                    if let Err(error) = state.database.clear_invoice_source_path(&task.id).await {
-                        tracing::warn!(task_id=%task.id,error=%error,"failed to clear reviewed duplicate source path");
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    if let Err(error) = state.database.clear_invoice_source_path(&task.id).await {
-                        tracing::warn!(task_id=%task.id,error=%error,"failed to clear missing reviewed source path");
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(task_id=%task.id,error=%error,"failed to remove reviewed duplicate source");
-                }
+        match outcome {
+            PersistInvoicesOutcome::Inserted { invoice_ids } => {
+                remove_unpersisted_previews(&state.app_data_dir, &parsed, &invoice_ids).await;
+            }
+            PersistInvoicesOutcome::Duplicate {
+                existing_invoice_id,
+            } => {
+                remove_previews(&state.app_data_dir, &parsed).await;
+                state
+                    .database
+                    .mark_invoice_failed(
+                        &task.id,
+                        "duplicate_invoice",
+                        "相同发票代码和号码已存在",
+                        Some(&request_id),
+                        Some(&raw),
+                        Some(&existing_invoice_id),
+                    )
+                    .await?;
+                remove_duplicate_source(&state.database, &task.id, &source).await;
+            }
+            PersistInvoicesOutcome::RecoveryNoMatch {
+                existing_invoice_id,
+            } => {
+                remove_previews(&state.app_data_dir, &parsed).await;
+                state
+                    .database
+                    .mark_invoice_failed(
+                        &task.id,
+                        "recovery_no_match",
+                        "本次识别未找到待补齐的已删除发票，可重新导入后重试",
+                        Some(&request_id),
+                        Some(&raw),
+                        existing_invoice_id.as_deref(),
+                    )
+                    .await?;
+                remove_duplicate_source(&state.database, &task.id, &source).await;
             }
         }
         emit_update(&app, &state.database, &task.id).await?;
@@ -705,6 +725,7 @@ fn apply_groups(invoices: &mut Vec<NormalizedInvoice>, groups: &[Vec<usize>]) ->
 
 #[cfg(test)]
 mod tests {
+    use sea_orm::{EntityTrait, PaginatorTrait};
     use tempfile::TempDir;
 
     use super::*;
@@ -836,6 +857,13 @@ mod tests {
         assert!(source.exists());
         assert!(preview.exists());
         assert!(state.database.invoice_detail("invoice").await.is_ok());
+        assert_eq!(
+            crate::entities::invoice_recovery_marker::Entity::find()
+                .count(&state.database.connection)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

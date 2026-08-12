@@ -26,6 +26,7 @@ Do not add a second application-facing database library. SeaORM may use SQLx int
 | `invoices` | UUIDv7 text | cascades from task; reliable identity is unique when present |
 | `invoice_items` | integer | `(invoice_id, position)` is unique and cascades from invoice |
 | `invoice_source_links` | integer | invoice/task/page tuple is unique and cascades from both parents |
+| `invoice_recovery_markers` | `(source_sha256, recovery_identity)` | records deleted subtype/number identities and optionally binds one recovery task |
 
 Money is stored as integer fen. Date/time values are normalized strings in `YYYY-MM-DD HH:mm` form. Booleans use SQLite integers through SeaORM models. The task, order, and managed image basename share the same UUID.
 
@@ -35,6 +36,7 @@ Money is stored as integer fen. Date/time values are normalized strings in `YYYY
 - Raw SQL through `Statement` is allowed for aggregate/search queries that SeaORM cannot express clearly, but bind every user-provided value; never interpolate it into SQL.
 - Server-paged sort queries must whitelist SQL column and direction fragments from typed enums and append a deterministic unique-key tie-breaker; never interpolate client strings or rely on non-unique primary ordering alone.
 - Wrap order edits, product replacement, and duplicate-flag recalculation in one transaction.
+- Write invoice recovery markers in the same transaction as invoice deletion. Claim all unclaimed markers for one source hash in the same transaction that creates its recovery task; consume matched markers and release unmatched markers in the persistence transaction.
 - External order numbers may repeat. After inserting, editing, or deleting an order, recalculate `possible_duplicate` for every affected non-empty order-number group.
 - Treat SQLite as the source of truth. In-memory queue and Jotai state are projections, not durable state.
 
@@ -73,6 +75,7 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Foreign-key cascade and reliable-identity unique-index enforcement after invoice migration.
 - Duplicate order-number group creation, edit between groups, and delete recalculation.
 - Unique SHA-256 behavior for managed images while skipped tasks remain recordable.
+- Invoice source-hash behavior for source-less audit tasks, partial-delete recovery, no-match release, and hash re-blocking after recovery completes.
 - Transaction rollback for failed order/item mutations.
 - Bulk-delete partial-result coverage, duplicate-group recalculation after successful items, and a fault-injection test proving the managed image is restored when database deletion fails.
 - Startup conversion of `queued` and `processing` tasks to `interrupted`.

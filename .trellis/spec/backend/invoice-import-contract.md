@@ -56,6 +56,7 @@ invoice_batches 1 -- * invoice_tasks 1 -- * invoices 1 -- * invoice_items
 - If one mixed response contains both successful and failed invoice items, persist the successful records and keep every failed item code in `warning_message`; never silently treat the source as fully recognized.
 - Reliable identity collision is a hard duplicate: no invoice row is committed, the task keeps RequestId/raw response/existing ID, previews are removed, and the duplicate source copy is deleted when possible. Weak number collisions remain in the ledger with `possibleDuplicate` on the full affected group.
 - Invoice edit recomputes reliable identity and both old/new weak duplicate groups transactionally. Delete uses file trash/restore compensation and removes the source only when deleting the final invoice for the task.
+- Invoice delete stores a recovery marker keyed by source SHA-256 plus normalized subtype/invoice number in the same transaction. Any unclaimed marker lets that source pass preflight and atomically binds to one recovery task. Recovery OCR persists only marked missing identities, skips ledger rows that still exist, ignores unrelated OCR results, and consumes only matched markers. Unmatched markers are released for another attempt. Once every marker is consumed, active managed sources claim the hash again. Tasks whose managed source has been cleared are audit history and never claim the hash.
 - `invoice-task-updated` is separate from the order event and carries the full task and batch detail.
 
 ### 4. Validation & Error Matrix
@@ -66,6 +67,7 @@ invoice_batches 1 -- * invoice_tasks 1 -- * invoices 1 -- * invoice_items
 | Empty selection or more than 500 files | `invalid_input`; no preflight token |
 | Unsupported extension, magic mismatch, invalid dimensions, PDF outside 1..=30, or Base64 over 10 MiB | Per-file `invalid_file`; valid siblings continue |
 | Hash already exists or repeats in selection/create race | Per-file `duplicate_file`; zero OCR calls for that file |
+| Hash has an unclaimed deletion recovery marker | Allow confirmed OCR and restore only matching missing invoices |
 | Expired/consumed token or changed fingerprint | `invalid_input`; require a new preflight |
 | Forced type outside the documented allowlist | `invalid_input` |
 | Tencent permanent business error | Task `failed` with safe error text |
@@ -91,6 +93,7 @@ invoice_batches 1 -- * invoice_tasks 1 -- * invoices 1 -- * invoice_items
 - Local file validation for extension/magic, encoded-size, image dimensions, PDF count, and managed path containment.
 - Settings migration, atomic save, Unix `0600`, masked public settings, and serialized response exclusion of SecretKey.
 - Invoice concurrency bound; duplicate file zero-call behavior; reliable hard duplicate; weak duplicate group insert/edit/delete recalculation; missing-source retry rejection.
+- Delete/recovery tests: single- and multi-invoice sources, partial restoration, unrelated OCR results ignored, source-less audits ignored by hash deduplication, no-match marker release, delete rollback, and hash re-blocking after all markers are consumed.
 - Fresh on-disk migration, `m0001` upgrade with seeded orders, partial `m0002` recovery, migration-ledger entries, foreign-key cascades, and reliable-identity uniqueness.
 - Preview extraction/crop and delete compensation failure tests when those paths change.
 - Frontend preflight-before-create, review grouping, subtype filter, edit/delete, multi-select bulk-delete, task-event, and PDF preview tests.

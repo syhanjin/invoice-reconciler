@@ -263,6 +263,40 @@ pub mod invoice_task {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod invoice_recovery_marker {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "invoice_recovery_markers")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source_sha256: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub recovery_identity: String,
+        pub recovery_task_id: Option<String>,
+        pub deleted_at: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::invoice_task::Entity",
+            from = "Column::RecoveryTaskId",
+            to = "super::invoice_task::Column::Id",
+            on_update = "NoAction",
+            on_delete = "SetNull"
+        )]
+        RecoveryTask,
+    }
+
+    impl Related<super::invoice_task::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::RecoveryTask.def()
+        }
+    }
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod invoice {
     use super::*;
 

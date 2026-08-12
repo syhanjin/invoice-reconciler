@@ -42,6 +42,10 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - Invoice OCR uses Tencent Cloud `RecognizeGeneralInvoice` through the dedicated
   invoice queue. Preserve local preflight/confirmation, the global 5 QPS limit,
   durable raw-response auditing, and the separate `invoice-task-updated` event.
+- Deleting an imported order releases its managed-image hash. Deleting an
+  invoice records a source-hash plus subtype/number recovery marker so the same
+  source can be reimported to restore only deleted invoices; source-less audit
+  tasks must not permanently claim a file hash.
 - Run SeaORM migrations before startup recovery queries. SQLite migration DDL
   must be safely repeatable, and schema changes require fresh-file, prior-version
   upgrade, and interrupted-migration recovery tests.

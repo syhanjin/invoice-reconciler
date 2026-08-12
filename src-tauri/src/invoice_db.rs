@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use sea_orm::{
     ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait,
     FromQueryResult, IntoActiveModel, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder,
@@ -6,8 +8,16 @@ use sea_orm::{
 
 use crate::db::{Database, now};
 use crate::entities::{
-    invoice, invoice_batch, invoice_line_item, invoice_source_link, invoice_task,
+    invoice, invoice_batch, invoice_line_item, invoice_recovery_marker, invoice_source_link,
+    invoice_task,
 };
+
+#[derive(Debug)]
+pub enum PersistInvoicesOutcome {
+    Inserted { invoice_ids: HashSet<String> },
+    Duplicate { existing_invoice_id: String },
+    RecoveryNoMatch { existing_invoice_id: Option<String> },
+}
 use crate::error::{AppError, AppResult};
 use crate::models::{
     InvoiceBatchCounts, InvoiceBatchDetail, InvoiceBatchSummary, InvoiceBatchesPage,
@@ -17,8 +27,18 @@ use crate::models::{
 
 impl Database {
     pub async fn invoice_hash_exists(&self, hash: &str) -> AppResult<bool> {
+        let recovery_available = invoice_recovery_marker::Entity::find()
+            .filter(invoice_recovery_marker::Column::SourceSha256.eq(hash))
+            .filter(invoice_recovery_marker::Column::RecoveryTaskId.is_null())
+            .one(&self.connection)
+            .await?
+            .is_some();
+        if recovery_available {
+            return Ok(false);
+        }
         Ok(invoice_task::Entity::find()
             .filter(invoice_task::Column::SourceSha256.eq(hash))
+            .filter(invoice_task::Column::SourcePath.is_not_null())
             .one(&self.connection)
             .await?
             .is_some())
@@ -76,8 +96,89 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_invoice_source_task(
+        &self,
+        id: &str,
+        batch_id: &str,
+        original_file_name: &str,
+        source_path: &str,
+        hash: &str,
+        media_type: &str,
+        forced_type: Option<i32>,
+    ) -> AppResult<bool> {
+        let transaction = self.connection.begin().await?;
+        invoice_task::ActiveModel {
+            id: Set(id.to_owned()),
+            batch_id: Set(batch_id.to_owned()),
+            original_file_name: Set(original_file_name.to_owned()),
+            source_path: Set(None),
+            source_sha256: Set(hash.to_owned()),
+            media_type: Set(media_type.to_owned()),
+            forced_type: Set(forced_type),
+            status: Set("queued".into()),
+            error_code: Set(None),
+            error_message: Set(None),
+            warning_message: Set(None),
+            retry_count: Set(0),
+            request_id: Set(None),
+            raw_response_json: Set(None),
+            existing_invoice_id: Set(None),
+            created_at: Set(now()),
+            started_at: Set(None),
+            completed_at: Set(None),
+        }
+        .insert(&transaction)
+        .await?;
+
+        let claimed = invoice_recovery_marker::Entity::update_many()
+            .col_expr(
+                invoice_recovery_marker::Column::RecoveryTaskId,
+                sea_orm::sea_query::Expr::value(Some(id.to_owned())),
+            )
+            .filter(invoice_recovery_marker::Column::SourceSha256.eq(hash))
+            .filter(invoice_recovery_marker::Column::RecoveryTaskId.is_null())
+            .exec(&transaction)
+            .await?
+            .rows_affected;
+        if claimed == 0
+            && invoice_task::Entity::find()
+                .filter(invoice_task::Column::SourceSha256.eq(hash))
+                .filter(invoice_task::Column::SourcePath.is_not_null())
+                .one(&transaction)
+                .await?
+                .is_some()
+        {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+
+        invoice_task::Entity::update_many()
+            .col_expr(
+                invoice_task::Column::SourcePath,
+                sea_orm::sea_query::Expr::value(Some(source_path.to_owned())),
+            )
+            .filter(invoice_task::Column::Id.eq(id))
+            .exec(&transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     pub async fn delete_invoice_batch(&self, id: &str) -> AppResult<()> {
         invoice_batch::Entity::delete_by_id(id)
+            .exec(&self.connection)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn release_invoice_recovery_claims(&self, task_id: &str) -> AppResult<()> {
+        invoice_recovery_marker::Entity::update_many()
+            .col_expr(
+                invoice_recovery_marker::Column::RecoveryTaskId,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .filter(invoice_recovery_marker::Column::RecoveryTaskId.eq(task_id))
             .exec(&self.connection)
             .await?;
         Ok(())
@@ -187,21 +288,72 @@ impl Database {
         raw_response: &str,
         normalized: &[NormalizedInvoice],
         warning: Option<&str>,
-    ) -> AppResult<Option<String>> {
+    ) -> AppResult<PersistInvoicesOutcome> {
         let transaction = self.connection.begin().await?;
-        for value in normalized {
-            if let Some(identity) = value.reliable_identity.as_deref()
-                && let Some(existing) = invoice::Entity::find()
-                    .filter(invoice::Column::ReliableIdentity.eq(identity))
-                    .one(&transaction)
-                    .await?
-            {
-                transaction.rollback().await?;
-                return Ok(Some(existing.id));
+        let recovery_markers = invoice_recovery_marker::Entity::find()
+            .filter(invoice_recovery_marker::Column::RecoveryTaskId.eq(task_id))
+            .all(&transaction)
+            .await?;
+        let is_recovery = !recovery_markers.is_empty();
+        let recovery_identities = recovery_markers
+            .iter()
+            .map(|marker| marker.recovery_identity.as_str())
+            .collect::<HashSet<_>>();
+
+        if !is_recovery {
+            for value in normalized {
+                if let Some(identity) = value.reliable_identity.as_deref()
+                    && let Some(existing) = invoice::Entity::find()
+                        .filter(invoice::Column::ReliableIdentity.eq(identity))
+                        .one(&transaction)
+                        .await?
+                {
+                    transaction.rollback().await?;
+                    return Ok(PersistInvoicesOutcome::Duplicate {
+                        existing_invoice_id: existing.id,
+                    });
+                }
             }
         }
         let timestamp = now();
+        let mut inserted_ids = HashSet::new();
+        let mut matched_recoveries = HashSet::new();
+        let mut skipped_existing = 0;
+        let mut first_existing = None;
         for value in normalized {
+            let identity = value.reliable_identity.as_deref();
+            let recovery_identity =
+                invoice_recovery_identity(&value.subtype, value.invoice_number.as_deref());
+            if is_recovery
+                && recovery_identity
+                    .as_deref()
+                    .is_none_or(|identity| !recovery_identities.contains(identity))
+            {
+                continue;
+            }
+            if is_recovery {
+                let existing = if let Some(identity) = identity {
+                    invoice::Entity::find()
+                        .filter(invoice::Column::ReliableIdentity.eq(identity))
+                        .one(&transaction)
+                        .await?
+                } else {
+                    invoice::Entity::find()
+                        .filter(invoice::Column::Subtype.eq(&value.subtype))
+                        .filter(
+                            invoice::Column::InvoiceNumber
+                                .eq(value.invoice_number.as_deref().unwrap_or_default()),
+                        )
+                        .one(&transaction)
+                        .await?
+                };
+                if let Some(existing) = existing {
+                    matched_recoveries.insert(recovery_identity.unwrap());
+                    skipped_existing += 1;
+                    first_existing.get_or_insert(existing.id);
+                    continue;
+                }
+            }
             let possible_duplicate = if value.reliable_identity.is_none() {
                 if let Some(number) = value
                     .invoice_number
@@ -271,9 +423,15 @@ impl Database {
                         .one(&self.connection)
                         .await?
                 {
-                    return Ok(Some(existing.id));
+                    return Ok(PersistInvoicesOutcome::Duplicate {
+                        existing_invoice_id: existing.id,
+                    });
                 }
                 return Err(error.into());
+            }
+            inserted_ids.insert(value.id.clone());
+            if is_recovery && let Some(recovery_identity) = recovery_identity {
+                matched_recoveries.insert(recovery_identity);
             }
             if !value.items.is_empty() {
                 invoice_line_item::Entity::insert_many(value.items.iter().enumerate().map(
@@ -305,6 +463,42 @@ impl Database {
             .insert(&transaction)
             .await?;
         }
+
+        if is_recovery {
+            if !matched_recoveries.is_empty() {
+                invoice_recovery_marker::Entity::delete_many()
+                    .filter(
+                        invoice_recovery_marker::Column::SourceSha256
+                            .eq(&recovery_markers[0].source_sha256),
+                    )
+                    .filter(
+                        invoice_recovery_marker::Column::RecoveryIdentity
+                            .is_in(matched_recoveries.iter().cloned()),
+                    )
+                    .exec(&transaction)
+                    .await?;
+            }
+            invoice_recovery_marker::Entity::update_many()
+                .col_expr(
+                    invoice_recovery_marker::Column::RecoveryTaskId,
+                    sea_orm::sea_query::Expr::value(Option::<String>::None),
+                )
+                .filter(invoice_recovery_marker::Column::RecoveryTaskId.eq(task_id))
+                .exec(&transaction)
+                .await?;
+            if inserted_ids.is_empty() {
+                transaction.commit().await?;
+                return Ok(PersistInvoicesOutcome::RecoveryNoMatch {
+                    existing_invoice_id: first_existing,
+                });
+            }
+        }
+
+        let unmatched_recoveries = recovery_markers.len() - matched_recoveries.len();
+        let warning = recovery_warning(
+            warning,
+            is_recovery.then_some((inserted_ids.len(), skipped_existing, unmatched_recoveries)),
+        );
         let result = transaction.execute(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "UPDATE invoice_tasks SET status = 'succeeded', error_code = NULL, error_message = NULL, warning_message = ?, request_id = ?, raw_response_json = ?, completed_at = ? WHERE id = ? AND status IN ('processing', 'awaiting_review')",
@@ -316,7 +510,9 @@ impl Database {
         transaction.commit().await?;
         let task = self.invoice_task(task_id).await?;
         self.refresh_invoice_batch_status(&task.batch_id).await?;
-        Ok(None)
+        Ok(PersistInvoicesOutcome::Inserted {
+            invoice_ids: inserted_ids,
+        })
     }
 
     pub async fn invoice_batch(&self, id: &str) -> AppResult<InvoiceBatchDetail> {
@@ -574,8 +770,24 @@ impl Database {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("发票 {id}")))?;
         let task_id = value.task_id.clone();
+        let recovery_identity =
+            invoice_recovery_identity(&value.subtype, value.invoice_number.as_deref());
+        let task = invoice_task::Entity::find_by_id(&task_id)
+            .one(&transaction)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("发票任务 {task_id}")))?;
         let old_subtype = value.subtype.clone();
         let old_number = value.invoice_number.clone();
+        if let Some(recovery_identity) = recovery_identity {
+            invoice_recovery_marker::ActiveModel {
+                source_sha256: Set(task.source_sha256),
+                recovery_identity: Set(recovery_identity),
+                recovery_task_id: Set(None),
+                deleted_at: Set(now()),
+            }
+            .insert(&transaction)
+            .await?;
+        }
         invoice::Entity::delete_by_id(id).exec(&transaction).await?;
         refresh_weak_duplicate_group(&transaction, &old_subtype, old_number.as_deref()).await?;
         let remaining = invoice::Entity::find()
@@ -798,11 +1010,39 @@ pub fn reliable_identity(
         number.to_ascii_uppercase()
     ))
 }
+fn invoice_recovery_identity(subtype: &str, number: Option<&str>) -> Option<String> {
+    let number = number.map(str::trim).filter(|value| !value.is_empty())?;
+    Some(format!(
+        "{}|{}",
+        subtype.trim().to_ascii_lowercase(),
+        number.to_ascii_uppercase()
+    ))
+}
 fn clean(value: Option<String>) -> Option<String> {
     value.and_then(|v| {
         let v = v.trim().to_owned();
         (!v.is_empty()).then_some(v)
     })
+}
+fn recovery_warning(
+    original: Option<&str>,
+    recovery: Option<(usize, usize, usize)>,
+) -> Option<String> {
+    let mut parts = original
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some((inserted, skipped, unmatched)) = recovery {
+        parts.push(format!(
+            "补齐 {inserted} 张已删除发票，跳过 {skipped} 张已存在发票"
+        ));
+        if unmatched > 0 {
+            parts.push(format!("{unmatched} 张待补齐发票未在本次识别结果中出现"));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("；"))
 }
 async fn refresh_weak_duplicate_group(
     transaction: &sea_orm::DatabaseTransaction,
@@ -895,7 +1135,7 @@ mod tests {
         let db = Database::in_memory().await.unwrap();
         processing_task(&db, "batch-a", "task-a", "hash-a").await;
         let first = normalized("invoice-a", Some("4403"), "10001");
-        assert!(
+        assert!(matches!(
             db.persist_invoices(
                 "task-a",
                 "request-a",
@@ -904,9 +1144,9 @@ mod tests {
                 Some("一个识别项失败"),
             )
             .await
-            .unwrap()
-            .is_none()
-        );
+            .unwrap(),
+            PersistInvoicesOutcome::Inserted { .. }
+        ));
         assert_eq!(
             db.invoice_task("task-a")
                 .await
@@ -922,7 +1162,12 @@ mod tests {
             .persist_invoices("task-b", "request-b", "{}", &[second], None)
             .await
             .unwrap();
-        assert_eq!(duplicate.as_deref(), Some("invoice-a"));
+        assert!(matches!(
+            duplicate,
+            PersistInvoicesOutcome::Duplicate {
+                existing_invoice_id
+            } if existing_invoice_id == "invoice-a"
+        ));
         let page = db
             .list_invoices(InvoicesQuery {
                 page: None,
@@ -938,6 +1183,225 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page.total, 1);
+    }
+
+    #[tokio::test]
+    async fn source_less_audit_task_does_not_claim_invoice_hash() {
+        let db = Database::in_memory().await.unwrap();
+        db.create_invoice_batch("audit-batch", None).await.unwrap();
+        db.create_invoice_task(
+            "audit-task",
+            "audit-batch",
+            "invoice.png",
+            None,
+            "audit-hash",
+            "image/png",
+            None,
+            "failed",
+            Some("duplicate_file"),
+            Some("duplicate"),
+        )
+        .await
+        .unwrap();
+
+        assert!(!db.invoice_hash_exists("audit-hash").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn create_time_duplicate_check_leaves_no_partial_source_task() {
+        let db = Database::in_memory().await.unwrap();
+        processing_task(&db, "batch-a", "task-a", "claimed-hash").await;
+        db.create_invoice_batch("batch-b", None).await.unwrap();
+
+        assert!(
+            !db.create_invoice_source_task(
+                "task-b",
+                "batch-b",
+                "invoice.png",
+                "invoices/sources/task-b.png",
+                "claimed-hash",
+                "image/png",
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(matches!(
+            db.invoice_task("task-b").await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_import_restores_only_deleted_invoice_from_multi_invoice_source() {
+        let db = Database::in_memory().await.unwrap();
+        processing_task(&db, "batch-a", "task-a", "shared-hash").await;
+        db.persist_invoices(
+            "task-a",
+            "request-a",
+            "{}",
+            &[
+                normalized("invoice-a", Some("4403"), "10001"),
+                normalized("invoice-b", Some("4403"), "10002"),
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(db.invoice_hash_exists("shared-hash").await.unwrap());
+
+        assert!(!db.delete_invoice_record("invoice-a").await.unwrap());
+        assert!(!db.invoice_hash_exists("shared-hash").await.unwrap());
+        assert!(db.invoice_detail("invoice-b").await.is_ok());
+
+        db.create_invoice_batch("batch-recovery", None)
+            .await
+            .unwrap();
+        assert!(
+            db.create_invoice_source_task(
+                "task-recovery",
+                "batch-recovery",
+                "invoice.png",
+                "invoices/sources/task-recovery.png",
+                "shared-hash",
+                "image/png",
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(db.mark_invoice_processing("task-recovery").await.unwrap());
+        let outcome = db
+            .persist_invoices(
+                "task-recovery",
+                "request-recovery",
+                "{}",
+                &[
+                    normalized("invoice-a-restored", Some("4403"), "10001"),
+                    normalized("invoice-b-duplicate", Some("4403"), "10002"),
+                    normalized("invoice-new", Some("4403"), "10003"),
+                ],
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            PersistInvoicesOutcome::Inserted { invoice_ids }
+                if invoice_ids == HashSet::from(["invoice-a-restored".to_owned()])
+        ));
+        assert!(db.invoice_detail("invoice-a-restored").await.is_ok());
+        assert!(db.invoice_detail("invoice-b").await.is_ok());
+        assert!(db.invoice_detail("invoice-b-duplicate").await.is_err());
+        assert!(db.invoice_detail("invoice-new").await.is_err());
+        assert!(db.invoice_hash_exists("shared-hash").await.unwrap());
+        assert!(
+            invoice_recovery_marker::Entity::find()
+                .all(&db.connection)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_no_match_releases_marker_for_another_attempt() {
+        let db = Database::in_memory().await.unwrap();
+        processing_task(&db, "batch-a", "task-a", "shared-hash").await;
+        db.persist_invoices(
+            "task-a",
+            "request-a",
+            "{}",
+            &[normalized("invoice-a", Some("4403"), "10001")],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(db.delete_invoice_record("invoice-a").await.unwrap());
+
+        db.create_invoice_batch("batch-recovery", None)
+            .await
+            .unwrap();
+        assert!(
+            db.create_invoice_source_task(
+                "task-recovery",
+                "batch-recovery",
+                "invoice.png",
+                "invoices/sources/task-recovery.png",
+                "shared-hash",
+                "image/png",
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(db.mark_invoice_processing("task-recovery").await.unwrap());
+        let outcome = db
+            .persist_invoices(
+                "task-recovery",
+                "request-recovery",
+                "{}",
+                &[normalized("other-invoice", Some("4403"), "99999")],
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            PersistInvoicesOutcome::RecoveryNoMatch {
+                existing_invoice_id: None
+            }
+        ));
+        let marker = invoice_recovery_marker::Entity::find()
+            .one(&db.connection)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker.source_sha256, "shared-hash");
+        assert!(marker.recovery_task_id.is_none());
+        assert!(!db.invoice_hash_exists("shared-hash").await.unwrap());
+
+        db.create_invoice_batch("batch-retry", None).await.unwrap();
+        assert!(
+            db.create_invoice_source_task(
+                "task-retry",
+                "batch-retry",
+                "invoice.png",
+                "invoices/sources/task-retry.png",
+                "shared-hash",
+                "image/png",
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(db.mark_invoice_processing("task-retry").await.unwrap());
+        let outcome = db
+            .persist_invoices(
+                "task-retry",
+                "request-retry",
+                "{}",
+                &[normalized("invoice-restored", Some("4403"), "10001")],
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            PersistInvoicesOutcome::Inserted { invoice_ids }
+                if invoice_ids == HashSet::from(["invoice-restored".to_owned()])
+        ));
+        assert!(db.invoice_detail("invoice-restored").await.is_ok());
+        assert!(
+            invoice_recovery_marker::Entity::find()
+                .all(&db.connection)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(db.invoice_hash_exists("shared-hash").await.unwrap());
     }
 
     #[tokio::test]

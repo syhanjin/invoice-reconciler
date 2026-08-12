@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
+use crate::invoice_db::PersistInvoicesOutcome;
 use crate::invoice_files::{
     copy_invoice_preview, crop_invoice_polygon, extract_pdf_pages, resolve_invoice_path,
     write_cut_image,
@@ -131,39 +132,48 @@ impl InvoiceQueueManager {
                 result.warning.as_deref(),
             )
             .await;
-        let existing = match persisted {
+        let outcome = match persisted {
             Ok(value) => value,
             Err(error) => {
                 remove_previews(&self.app_data_dir, &result).await;
                 return Err(error);
             }
         };
-        if let Some(existing) = existing {
-            remove_previews(&self.app_data_dir, &result).await;
-            self.database
-                .mark_invoice_failed(
-                    task_id,
-                    "duplicate_invoice",
-                    "相同发票代码和号码已存在",
-                    Some(&result.request_id),
-                    Some(&result.raw_response),
-                    Some(&existing),
-                )
-                .await?;
-            match tokio::fs::remove_file(&source).await {
-                Ok(()) => {
-                    if let Err(error) = self.database.clear_invoice_source_path(task_id).await {
-                        tracing::warn!(task_id,error=%error,"failed to clear duplicate invoice source path");
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    if let Err(error) = self.database.clear_invoice_source_path(task_id).await {
-                        tracing::warn!(task_id,error=%error,"failed to clear missing duplicate source path");
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(task_id,error=%error,"failed to remove duplicate invoice source");
-                }
+        match outcome {
+            PersistInvoicesOutcome::Inserted { invoice_ids } => {
+                remove_unpersisted_previews(&self.app_data_dir, &result, &invoice_ids).await;
+            }
+            PersistInvoicesOutcome::Duplicate {
+                existing_invoice_id,
+            } => {
+                remove_previews(&self.app_data_dir, &result).await;
+                self.database
+                    .mark_invoice_failed(
+                        task_id,
+                        "duplicate_invoice",
+                        "相同发票代码和号码已存在",
+                        Some(&result.request_id),
+                        Some(&result.raw_response),
+                        Some(&existing_invoice_id),
+                    )
+                    .await?;
+                remove_duplicate_source(&self.database, task_id, &source).await;
+            }
+            PersistInvoicesOutcome::RecoveryNoMatch {
+                existing_invoice_id,
+            } => {
+                remove_previews(&self.app_data_dir, &result).await;
+                self.database
+                    .mark_invoice_failed(
+                        task_id,
+                        "recovery_no_match",
+                        "本次识别未找到待补齐的已删除发票，可重新导入后重试",
+                        Some(&result.request_id),
+                        Some(&result.raw_response),
+                        existing_invoice_id.as_deref(),
+                    )
+                    .await?;
+                remove_duplicate_source(&self.database, task_id, &source).await;
             }
         }
         Ok(())
@@ -242,6 +252,47 @@ pub(crate) async fn remove_previews(app_data: &std::path::Path, result: &Tencent
     for invoice in &result.invoices {
         if let Ok(path) = resolve_invoice_path(app_data, &invoice.preview_path) {
             let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
+pub(crate) async fn remove_unpersisted_previews(
+    app_data: &std::path::Path,
+    result: &TencentOcrResult,
+    persisted_ids: &std::collections::HashSet<String>,
+) {
+    for invoice in &result.invoices {
+        if persisted_ids.contains(&invoice.id) {
+            continue;
+        }
+        if let Ok(path) = resolve_invoice_path(app_data, &invoice.preview_path) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
+pub(crate) async fn remove_duplicate_source(
+    database: &Database,
+    task_id: &str,
+    source: &std::path::Path,
+) {
+    if let Err(error) = database.release_invoice_recovery_claims(task_id).await {
+        tracing::warn!(task_id,error=%error,"failed to release invoice recovery claims");
+        return;
+    }
+    match tokio::fs::remove_file(source).await {
+        Ok(()) => {
+            if let Err(error) = database.clear_invoice_source_path(task_id).await {
+                tracing::warn!(task_id,error=%error,"failed to clear duplicate invoice source path");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(error) = database.clear_invoice_source_path(task_id).await {
+                tracing::warn!(task_id,error=%error,"failed to clear missing duplicate source path");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(task_id,error=%error,"failed to remove duplicate invoice source");
         }
     }
 }
