@@ -1,4 +1,4 @@
-export type NavigationView = "orders" | "settings"
+export type NavigationView = "orders" | "importTasks" | "settings"
 
 export interface AppSettings {
   ollamaBaseUrl: string
@@ -50,6 +50,27 @@ export interface BatchDetail {
   completedAt: string | null
   counts: BatchCounts
   tasks: ImportTask[]
+}
+
+export interface ImportBatchSummary {
+  id: string
+  platform: "taobao"
+  status: BatchDetail["status"]
+  createdAt: string
+  completedAt: string | null
+  counts: BatchCounts
+}
+
+export interface ImportBatchesPage {
+  items: ImportBatchSummary[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface ImportBatchesQuery {
+  page?: number
+  pageSize?: number
 }
 
 export interface BootstrapState {

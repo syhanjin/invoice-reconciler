@@ -4,7 +4,6 @@ import { Filter, ImagePlus, LoaderCircle, Search, X } from "lucide-react"
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 
-import { BatchPanel } from "@/components/batch-panel"
 import { OrdersTable } from "@/components/orders-table"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -22,15 +21,14 @@ import type { BatchDetail, OrdersPage as OrdersPageData } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 interface OrdersPageProps {
-  activeBatch: BatchDetail | null
-  onBatchChange: (batch: BatchDetail) => void
+  onBatchCreated: (batch: BatchDetail) => void
   refreshToken: number
 }
 
 const emptyPage: OrdersPageData = { items: [], total: 0, page: 1, pageSize: 20 }
 const OrderSheet = lazy(() => import("@/components/order-sheet"))
 
-export function OrdersPage({ activeBatch, onBatchChange, refreshToken }: OrdersPageProps) {
+export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
   const [orders, setOrders] = useState<OrdersPageData>(emptyPage)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState("")
@@ -70,7 +68,7 @@ export function OrdersPage({ activeBatch, onBatchChange, refreshToken }: OrdersP
       setImporting(true)
       try {
         const batch = await api.createImportBatch(paths)
-        onBatchChange(batch)
+        onBatchCreated(batch)
         toast.success(`已提交 ${paths.length} 张图片`)
       } catch (error) {
         toast.error(errorMessage(error), { duration: 6000 })
@@ -78,7 +76,7 @@ export function OrdersPage({ activeBatch, onBatchChange, refreshToken }: OrdersP
         setImporting(false)
       }
     },
-    [importing, onBatchChange],
+    [importing, onBatchCreated],
   )
 
   useEffect(() => {
@@ -150,7 +148,6 @@ export function OrdersPage({ activeBatch, onBatchChange, refreshToken }: OrdersP
           </Button>
         </div>
       </header>
-      {activeBatch && <BatchPanel batch={activeBatch} onBatchChange={onBatchChange} />}
       <div className="flex min-h-14 shrink-0 items-center gap-3 border-b bg-white px-6">
         <form
           className="relative w-full max-w-sm"

@@ -5,6 +5,8 @@ import type {
   AppSettings,
   BatchDetail,
   BootstrapState,
+  ImportBatchesPage,
+  ImportBatchesQuery,
   OllamaStatus,
   OrderDetail,
   OrdersPage,
@@ -25,6 +27,8 @@ export const api = {
       request: { platform: "taobao", imagePaths },
     }),
   getBatch: (id: string) => invoke<BatchDetail>("get_batch", { request: { id } }),
+  listImportBatches: (query: ImportBatchesQuery) =>
+    invoke<ImportBatchesPage>("list_import_batches", { query }),
   cancelTask: (id: string) => invoke<boolean>("cancel_task", { request: { id } }),
   cancelBatch: (id: string) => invoke<number>("cancel_batch", { request: { id } }),
   retryTask: (id: string) => invoke<BatchDetail>("retry_task", { request: { id } }),

@@ -17,6 +17,7 @@ save_settings(request: UpdateSettingsRequest) -> AppSettings
 check_ollama(request: UpdateSettingsRequest) -> OllamaStatus
 create_import_batch(request: CreateBatchRequest) -> BatchDetail
 get_batch(request: { id }) -> BatchDetail
+list_import_batches(query: ImportBatchesQuery) -> ImportBatchesPage
 cancel_task(request: { id }) -> bool
 cancel_batch(request: { id }) -> u64
 retry_task(request: { id }) -> BatchDetail
@@ -36,6 +37,8 @@ Durable tables are `app_settings`, `import_batches`, `import_tasks`, `orders`, a
 `UpdateSettingsRequest` contains `ollamaBaseUrl: string`, `ollamaModel: string`, and `maxConcurrency: number`. Defaults are `http://127.0.0.1:11434`, `qwen3-vl:4b`, and `3`.
 
 `CreateBatchRequest` contains `platform: "taobao"` and `imagePaths: string[]`. A non-duplicate file receives a UUIDv7 before copying and is stored as `images/<uuid>.<normalized-extension>`. The task ID, order ID, and image basename must remain identical across retry.
+
+`ImportBatchesQuery` contains optional `page` and `pageSize` integers. Page defaults to `1` and is normalized to at least `1`; page size defaults to `20` and is clamped to `1..=100`. `ImportBatchesPage` contains `{ items, total, page, pageSize }`. Each item is an `ImportBatchSummary` with batch metadata plus aggregate `BatchCounts`, but no `tasks` array. Sort summaries by `created_at DESC, id DESC`, then load the selected batch through `get_batch`; this keeps IPC and memory bounded as history grows.
 
 The Ollama `/api/chat` request uses `stream: false`, `format` containing the JSON Schema, `options.temperature: 0`, and `options.num_ctx: 16384`. Its recognized JSON shape is:
 
@@ -69,17 +72,21 @@ Queue concurrency is captured from settings when a run begins. The number of sen
 | Cancel queued task | Mark `canceled`; worker must recheck durable status before send |
 | Cancel processing task | Do not force-abort the HTTP request |
 | Delete database failure | Restore the image from the temporary trash path |
+| Import history page below 1 | Normalize to page `1` |
+| Import history page size outside `1..=100` | Clamp it before applying `LIMIT` |
+| Import history is empty | Return an empty page with `total = 0`; do not synthesize a batch |
 
 ### 5. Good/Base/Bad Cases
 
 - Good: ten images with concurrency three result in no more than three simultaneous HTTP requests, each success is committed immediately, and task events update progress.
 - Base: an OCR result with no order number and an invalid date still stores valid product/shop fields, with nullable fields and a warning.
-- Bad: copying an image under its original name, sending every request at once, treating a repeated order number as a hard duplicate, or retrying under a new UUID violates this contract.
+- Bad: copying an image under its original name, sending every request at once, returning all task rows in every history summary, treating a repeated order number as a hard duplicate, or retrying under a new UUID violates this contract.
 
 ### 6. Tests Required
 
 - Migration integration test: all tables migrate and rerunning migrations succeeds.
 - Database integration test: same-number groups are flagged; editing between groups recalculates both groups.
+- Import-history database test: assert stable pagination, aggregate counts for every task status, empty results, and page-size clamping.
 - File unit test: extension and magic-byte validation agree, and the UUID basename is retained.
 - OCR mock-server test: assert the exact structured request fields and parse a valid response.
 - Queue async test: measure peak in-flight requests and assert `peak <= captured_concurrency`.
@@ -110,3 +117,5 @@ stream::iter(task_ids)
 ```
 
 Reserve the global queue before this loop, release it when the run finishes, and re-read each task's durable status immediately before sending.
+
+For import history, do not build `Vec<BatchDetail>` for a list page. Query aggregate summaries first and call `batch(id)` only for the selected row.

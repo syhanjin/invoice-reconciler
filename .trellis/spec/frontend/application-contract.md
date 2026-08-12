@@ -14,6 +14,8 @@ All backend access lives in `src/lib/api.ts`. Components call these typed wrappe
 api.bootstrap(): Promise<BootstrapState>
 api.checkOllama(settings: AppSettings): Promise<OllamaStatus>
 api.createImportBatch(imagePaths: string[]): Promise<BatchDetail>
+api.listImportBatches(query: ImportBatchesQuery): Promise<ImportBatchesPage>
+api.getBatch(id: string): Promise<BatchDetail>
 api.listOrders(query: OrdersQuery): Promise<OrdersPage>
 api.getOrder(id: string): Promise<OrderDetail>
 api.updateOrder(request: UpdateOrderRequest): Promise<OrderDetail>
@@ -27,6 +29,9 @@ Rust serializes public structs with `camelCase`. Tauri command names remain snak
 
 - `settingsAtom` and `activeBatchAtom` cache current projections; SQLite remains authoritative.
 - A task event carries the entire updated `BatchDetail`. Replace the active batch snapshot when its ID matches rather than incrementing counters locally.
+- Import tasks live in a separate first-level workspace. Its order tab pages persisted batch summaries with `20`, `50`, or `100` rows and loads full tasks only after selecting a batch. The invoice tab remains disabled until that domain is implemented.
+- A successful order screenshot import navigates to the import-task workspace and selects the new batch. Canceling the file dialog or rejecting batch creation preserves the orders workspace.
+- A live event may refresh the matching selected detail and summary, but an event for another batch must not replace or reload the detail being inspected.
 - Refresh the orders query after task success and after an order mutation so persisted values remain authoritative.
 - The orders query is server-paged and contains page, page size, search, duplicate-only filter, sort field, and sort direction.
 - Order forms use React Hook Form plus Zod. Convert yuan display input to integer fen before invoking the backend.
@@ -45,14 +50,16 @@ Rust serializes public structs with `camelCase`. Tauri command names remain snak
 | Ollama reachable but model missing | Show the backend pull guidance; never trigger installation or pull |
 | Empty amount/date/order number/shop | Submit `null`, not an empty-string sentinel |
 | Live event for another batch | Do not replace the visible active batch |
+| Import-history or batch-detail request fails | Clear stale content, show a retryable page state, and display the Sonner error |
+| Import-history page becomes empty | Select no detail and show the order-task empty state |
 | Component unmount | Call the `UnlistenFn` to remove the Tauri event listener |
 | Delete confirmation declined | Perform no command and preserve the open record |
 
 ### 5. Good/Base/Bad Cases
 
-- Good: a task event replaces the batch snapshot, the progress panel updates every status count, and successful OCR causes the server-paged table to refresh.
-- Base: a small window keeps the table scrollable and the order sheet within the viewport while all commands remain accessible.
-- Bad: issuing SQL in React, duplicating backend queue counters in component state, importing Tauri `invoke` throughout the component tree, or displaying a managed path directly as an image URL.
+- Good: a task event replaces the matching batch snapshot, the task center updates its selected detail and summary, and successful OCR causes the server-paged order table to refresh.
+- Base: a small window switches task history/detail to stacked sections while keeping their independent scroll areas and actions accessible.
+- Bad: issuing SQL in React, loading every historical task into one response, replacing selected history with an unrelated live event, duplicating backend queue counters in component state, importing Tauri `invoke` throughout the component tree, or displaying a managed path directly as an image URL.
 
 ### 6. Tests Required
 
@@ -60,7 +67,8 @@ Rust serializes public structs with `camelCase`. Tauri command names remain snak
 - Jotai store test asserting that an event for the active batch replaces the stored snapshot.
 - API contract test or TypeScript build asserting camel-case invoke argument names.
 - Component tests for settings validation and nullable order edit fields when those flows change.
-- Desktop smoke tests at the default and minimum window sizes for table, progress panel, image preview, edit/delete sheet, and settings.
+- Component tests for task-history pagination, disabled invoice tab, detail loading/error retry, and post-import navigation when those flows change.
+- Desktop smoke tests at the default and minimum window sizes for table, task-center history/detail scrolling, image preview, edit/delete sheet, and settings.
 - Always run `bun run build`, `bun run lint`, and `bun run test` before commit.
 
 ### 7. Wrong vs Correct
@@ -90,3 +98,5 @@ await api.updateOrder({
 ```
 
 Keep invoke payload construction in `api.ts` and pass the entire typed `request` object expected by the command.
+
+Do not use a `BatchDetail[]` history response. Use `ImportBatchSummary[]` for the page and `api.getBatch(id)` for the selected detail.

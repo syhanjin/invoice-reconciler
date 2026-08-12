@@ -8,9 +8,9 @@ use crate::AppState;
 use crate::error::{AppError, AppResult, CommandResult};
 use crate::files::{copy_managed_image, normalized_extension, resolve_managed_path, sha256_file};
 use crate::models::{
-    AppSettings, BatchDetail, BootstrapState, CreateBatchRequest, IdRequest, OllamaStatus,
-    OrderDetail, OrdersPage, OrdersQuery, TaskUpdateEvent, UpdateOrderRequest,
-    UpdateSettingsRequest,
+    AppSettings, BatchDetail, BootstrapState, CreateBatchRequest, IdRequest, ImportBatchesPage,
+    ImportBatchesQuery, OllamaStatus, OrderDetail, OrdersPage, OrdersQuery, TaskUpdateEvent,
+    UpdateOrderRequest, UpdateSettingsRequest,
 };
 
 struct PreparedImage {
@@ -203,6 +203,18 @@ pub async fn get_batch(
     request: IdRequest,
 ) -> CommandResult<BatchDetail> {
     state.database.batch(&request.id).await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn list_import_batches(
+    state: State<'_, AppState>,
+    query: ImportBatchesQuery,
+) -> CommandResult<ImportBatchesPage> {
+    state
+        .database
+        .list_import_batches(query)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]

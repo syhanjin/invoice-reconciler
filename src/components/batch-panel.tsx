@@ -2,8 +2,6 @@ import {
   AlertCircle,
   Ban,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   Clock3,
   LoaderCircle,
   RefreshCw,
@@ -96,7 +94,7 @@ function TaskRow({ task, onRetry, onCancel }: {
 }
 
 export function BatchPanel({ batch, onBatchChange }: BatchPanelProps) {
-  const [expanded, setExpanded] = useState(true)
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
   const finished =
     batch.counts.succeeded + batch.counts.failed + batch.counts.canceled +
     batch.counts.skipped + batch.counts.interrupted
@@ -104,26 +102,33 @@ export function BatchPanel({ batch, onBatchChange }: BatchPanelProps) {
   const retryable = batch.counts.failed + batch.counts.interrupted
 
   const retry = async (id: string) => {
+    setPendingAction(id)
     try {
       onBatchChange(await api.retryTask(id))
     } catch (error) {
       toast.error(errorMessage(error))
+    } finally {
+      setPendingAction(null)
     }
   }
   const cancel = async (id: string) => {
+    setPendingAction(id)
     try {
-      await api.cancelTask(id)
+      const canceled = await api.cancelTask(id)
+      if (canceled) onBatchChange(await api.getBatch(batch.id))
     } catch (error) {
       toast.error(errorMessage(error))
+    } finally {
+      setPendingAction(null)
     }
   }
 
   return (
-    <section className="border-b bg-white">
-      <div className="flex min-h-16 items-center gap-4 px-6 py-3">
+    <section className="flex h-full min-h-0 flex-col bg-white">
+      <div className="flex min-h-24 shrink-0 items-center gap-4 border-b px-6 py-4">
         <div className="min-w-0 flex-1">
           <div className="mb-2 flex items-center gap-3">
-            <p className="text-sm font-medium">最近导入批次</p>
+            <p className="text-sm font-medium">导入批次</p>
             <Badge variant="secondary">淘宝</Badge>
             <span className="text-xs text-muted-foreground">
               {formatDateTime(batch.createdAt)}
@@ -146,15 +151,19 @@ export function BatchPanel({ batch, onBatchChange }: BatchPanelProps) {
           <Button
             variant="outline"
             size="sm"
+            disabled={pendingAction !== null}
             onClick={async () => {
+              setPendingAction("retry-batch")
               try {
                 onBatchChange(await api.retryFailedBatch(batch.id))
               } catch (error) {
                 toast.error(errorMessage(error))
+              } finally {
+                setPendingAction(null)
               }
             }}
           >
-            <RefreshCw />
+            <RefreshCw className={cn(pendingAction === "retry-batch" && "animate-spin")} />
             重试失败项
           </Button>
         )}
@@ -162,11 +171,16 @@ export function BatchPanel({ batch, onBatchChange }: BatchPanelProps) {
           <Button
             variant="outline"
             size="sm"
+            disabled={pendingAction !== null}
             onClick={async () => {
+              setPendingAction("cancel-batch")
               try {
                 await api.cancelBatch(batch.id)
+                onBatchChange(await api.getBatch(batch.id))
               } catch (error) {
                 toast.error(errorMessage(error))
+              } finally {
+                setPendingAction(null)
               }
             }}
           >
@@ -174,30 +188,29 @@ export function BatchPanel({ batch, onBatchChange }: BatchPanelProps) {
             取消排队
           </Button>
         )}
-        <Tooltip>
-          <TooltipTrigger
-            render={<Button variant="ghost" size="icon-sm" onClick={() => setExpanded(!expanded)} />}
-          >
-            {expanded ? <ChevronUp /> : <ChevronDown />}
-          </TooltipTrigger>
-          <TooltipContent>{expanded ? "收起任务" : "展开任务"}</TooltipContent>
-        </Tooltip>
       </div>
-      {expanded && (
-        <div className="border-t bg-zinc-50/50">
-          {batch.status === "completed_with_errors" && (
-            <Alert className="mx-4 mt-3 rounded-md border-amber-200 bg-amber-50 text-amber-900">
-              <AlertCircle />
-              <AlertDescription>部分图片未完成，可查看错误后重试。</AlertDescription>
-            </Alert>
-          )}
-          <ScrollArea className="max-h-56">
-            {batch.tasks.map((task) => (
-              <TaskRow key={task.id} task={task} onRetry={retry} onCancel={cancel} />
-            ))}
-          </ScrollArea>
-        </div>
+      {batch.status === "completed_with_errors" && (
+        <Alert className="mx-6 mt-4 shrink-0 rounded-md border-amber-200 bg-amber-50 text-amber-900">
+          <AlertCircle />
+          <AlertDescription>部分图片未完成，可查看错误后重试。</AlertDescription>
+        </Alert>
       )}
+      <div className="flex h-11 shrink-0 items-center border-b px-6 text-xs font-medium text-muted-foreground">
+        图片任务
+      </div>
+      <ScrollArea className="min-h-0 flex-1 bg-white">
+        {batch.tasks.map((task) => (
+          <div
+            className={cn(
+              pendingAction !== null && "pointer-events-none",
+              pendingAction === task.id && "opacity-60",
+            )}
+            key={task.id}
+          >
+            <TaskRow task={task} onRetry={retry} onCancel={cancel} />
+          </div>
+        ))}
+      </ScrollArea>
     </section>
   )
 }

@@ -1,5 +1,5 @@
 import { useAtom, useAtomValue, useSetAtom } from "jotai"
-import { lazy, Suspense, useEffect, useState } from "react"
+import { lazy, Suspense, useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 
 import { AppShell } from "@/components/app-shell"
@@ -18,6 +18,7 @@ import {
 } from "@/lib/store"
 
 const SettingsPage = lazy(() => import("@/components/settings-page"))
+const ImportTasksPage = lazy(() => import("@/components/import-tasks-page"))
 
 function Initializing() {
   return (
@@ -43,6 +44,13 @@ export function App() {
   const mergeBatchEvent = useSetAtom(mergeBatchEventAtom)
   const refreshToken = useAtomValue(ordersRefreshAtom)
   const [ready, setReady] = useState(false)
+  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null)
+
+  const handleBatchCreated = useCallback((batch: Parameters<typeof mergeBatch>[0]) => {
+    mergeBatch(batch)
+    setSelectedBatchId(batch.id)
+    setView("importTasks")
+  }, [mergeBatch, setView])
 
   useEffect(() => {
     let disposed = false
@@ -77,10 +85,19 @@ export function App() {
         <AppShell view={view} onViewChange={setView}>
           {view === "orders" && (
             <OrdersPage
-              activeBatch={activeBatch}
-              onBatchChange={mergeBatch}
+              onBatchCreated={handleBatchCreated}
               refreshToken={refreshToken}
             />
+          )}
+          {view === "importTasks" && (
+            <Suspense fallback={<Initializing />}>
+              <ImportTasksPage
+                activeBatch={activeBatch}
+                selectedBatchId={selectedBatchId}
+                onSelectedBatchChange={setSelectedBatchId}
+                onBatchChange={mergeBatch}
+              />
+            </Suspense>
           )}
           {view === "settings" && settings && (
             <Suspense fallback={<Initializing />}>

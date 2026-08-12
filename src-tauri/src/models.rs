@@ -131,6 +131,33 @@ pub struct BatchDetail {
     pub tasks: Vec<ImportTask>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBatchesQuery {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBatchSummary {
+    pub id: String,
+    pub platform: String,
+    pub status: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub counts: BatchCounts,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBatchesPage {
+    pub items: Vec<ImportBatchSummary>,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskUpdateEvent {

@@ -14,9 +14,10 @@ use crate::entities::{app_setting, import_batch, import_task, order, order_item}
 use crate::error::{AppError, AppResult};
 use crate::migration::Migrator;
 use crate::models::{
-    AppSettings, BatchCounts, BatchDetail, DEFAULT_MAX_CONCURRENCY, ImportTask, NormalizedOrder,
-    OrderDetail, OrderListItem, OrderSort, OrdersPage, OrdersQuery, Platform, SortDirection,
-    UpdateOrderRequest, UpdateSettingsRequest,
+    AppSettings, BatchCounts, BatchDetail, DEFAULT_MAX_CONCURRENCY, ImportBatchSummary,
+    ImportBatchesPage, ImportBatchesQuery, ImportTask, NormalizedOrder, OrderDetail, OrderListItem,
+    OrderSort, OrdersPage, OrdersQuery, Platform, SortDirection, UpdateOrderRequest,
+    UpdateSettingsRequest,
 };
 
 #[derive(Clone)]
@@ -359,6 +360,43 @@ impl Database {
         }
     }
 
+    pub async fn list_import_batches(
+        &self,
+        query: ImportBatchesQuery,
+    ) -> AppResult<ImportBatchesPage> {
+        let page = query.page.unwrap_or(1).max(1);
+        let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
+        let total = import_batch::Entity::find().count(&self.connection).await? as i64;
+        let rows = ImportBatchSummaryRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT b.id, b.platform, b.status, b.created_at, b.completed_at, \
+             COUNT(t.id) AS total, \
+             COALESCE(SUM(CASE WHEN t.status = 'queued' THEN 1 ELSE 0 END), 0) AS queued, \
+             COALESCE(SUM(CASE WHEN t.status = 'processing' THEN 1 ELSE 0 END), 0) AS processing, \
+             COALESCE(SUM(CASE WHEN t.status = 'succeeded' THEN 1 ELSE 0 END), 0) AS succeeded, \
+             COALESCE(SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed, \
+             COALESCE(SUM(CASE WHEN t.status = 'canceled' THEN 1 ELSE 0 END), 0) AS canceled, \
+             COALESCE(SUM(CASE WHEN t.status = 'skipped' THEN 1 ELSE 0 END), 0) AS skipped, \
+             COALESCE(SUM(CASE WHEN t.status = 'interrupted' THEN 1 ELSE 0 END), 0) AS interrupted \
+             FROM import_batches b LEFT JOIN import_tasks t ON t.batch_id = b.id \
+             GROUP BY b.id, b.platform, b.status, b.created_at, b.completed_at \
+             ORDER BY b.created_at DESC, b.id DESC LIMIT ? OFFSET ?",
+            [
+                i64::from(page_size).into(),
+                (i64::from(page - 1) * i64::from(page_size)).into(),
+            ],
+        ))
+        .all(&self.connection)
+        .await?;
+
+        Ok(ImportBatchesPage {
+            items: rows.into_iter().map(ImportBatchSummary::from).collect(),
+            total,
+            page,
+            page_size,
+        })
+    }
+
     pub async fn list_orders(&self, query: OrdersQuery) -> AppResult<OrdersPage> {
         let page = query.page.unwrap_or(1).max(1);
         let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
@@ -588,6 +626,45 @@ impl Database {
     }
 }
 
+#[derive(FromQueryResult)]
+struct ImportBatchSummaryRow {
+    id: String,
+    platform: String,
+    status: String,
+    created_at: String,
+    completed_at: Option<String>,
+    total: i64,
+    queued: i64,
+    processing: i64,
+    succeeded: i64,
+    failed: i64,
+    canceled: i64,
+    skipped: i64,
+    interrupted: i64,
+}
+
+impl From<ImportBatchSummaryRow> for ImportBatchSummary {
+    fn from(row: ImportBatchSummaryRow) -> Self {
+        Self {
+            id: row.id,
+            platform: row.platform,
+            status: row.status,
+            created_at: row.created_at,
+            completed_at: row.completed_at,
+            counts: BatchCounts {
+                total: row.total,
+                queued: row.queued,
+                processing: row.processing,
+                succeeded: row.succeeded,
+                failed: row.failed,
+                canceled: row.canceled,
+                skipped: row.skipped,
+                interrupted: row.interrupted,
+            },
+        }
+    }
+}
+
 impl From<import_task::Model> for ImportTask {
     fn from(model: import_task::Model) -> Self {
         Self {
@@ -741,6 +818,102 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    async fn insert_batch_at(db: &Database, id: &str, created_at: &str) {
+        import_batch::ActiveModel {
+            id: Set(id.into()),
+            platform: Set("taobao".into()),
+            status: Set("completed_with_errors".into()),
+            created_at: Set(created_at.into()),
+            completed_at: Set(Some(created_at.into())),
+        }
+        .insert(&db.connection)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_task_with_status(db: &Database, id: &str, batch_id: &str, status: &str) {
+        db.create_task(id, batch_id, "order.png", None, id, status, None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_batch_history_is_stably_paged_with_aggregate_counts() {
+        let db = seeded_database().await;
+        insert_batch_at(&db, "batch-a", "2026-08-10T09:00:00Z").await;
+        insert_batch_at(&db, "batch-b", "2026-08-11T09:00:00Z").await;
+        insert_batch_at(&db, "batch-c", "2026-08-11T09:00:00Z").await;
+
+        for (index, status) in [
+            "queued",
+            "processing",
+            "succeeded",
+            "failed",
+            "canceled",
+            "skipped",
+            "interrupted",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_task_with_status(&db, &format!("task-{index}"), "batch-c", status).await;
+        }
+
+        let first = db
+            .list_import_batches(ImportBatchesQuery {
+                page: Some(1),
+                page_size: Some(2),
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.total, 3);
+        assert_eq!(first.page, 1);
+        assert_eq!(first.page_size, 2);
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|batch| batch.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["batch-c", "batch-b"]
+        );
+        assert_eq!(first.items[0].counts.total, 7);
+        assert_eq!(first.items[0].counts.queued, 1);
+        assert_eq!(first.items[0].counts.processing, 1);
+        assert_eq!(first.items[0].counts.succeeded, 1);
+        assert_eq!(first.items[0].counts.failed, 1);
+        assert_eq!(first.items[0].counts.canceled, 1);
+        assert_eq!(first.items[0].counts.skipped, 1);
+        assert_eq!(first.items[0].counts.interrupted, 1);
+        assert_eq!(first.items[1].counts.total, 0);
+
+        let second = db
+            .list_import_batches(ImportBatchesQuery {
+                page: Some(2),
+                page_size: Some(2),
+            })
+            .await
+            .unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].id, "batch-a");
+    }
+
+    #[tokio::test]
+    async fn import_batch_history_normalizes_page_bounds() {
+        let db = seeded_database().await;
+        let page = db
+            .list_import_batches(ImportBatchesQuery {
+                page: Some(0),
+                page_size: Some(500),
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.items.is_empty());
+        assert_eq!(page.page, 1);
+        assert_eq!(page.page_size, 100);
     }
 
     #[tokio::test]

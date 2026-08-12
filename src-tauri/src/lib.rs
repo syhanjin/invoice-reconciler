@@ -60,6 +60,7 @@ pub fn run() {
             commands::check_ollama,
             commands::create_import_batch,
             commands::get_batch,
+            commands::list_import_batches,
             commands::cancel_task,
             commands::cancel_batch,
             commands::retry_task,
