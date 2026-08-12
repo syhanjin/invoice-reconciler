@@ -292,3 +292,36 @@ Allow deleted orders and invoices to be reimported; recover only deleted invoice
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: Preserve order import history on delete
+
+**Date**: 2026-08-13
+**Task**: Preserve order import history on delete
+**Branch**: `main`
+
+### Summary
+
+Changed order deletion to preserve immutable import tasks while clearing managed image paths, added rollback and reimport regressions, and updated backend contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `710deb2` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
