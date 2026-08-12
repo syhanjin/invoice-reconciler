@@ -246,3 +246,49 @@ Allow deleted orders and invoices to be reimported; recover only deleted invoice
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: 订单与发票匹配
+
+**Date**: 2026-08-13
+**Task**: 订单与发票匹配
+**Branch**: `main`
+
+### Summary
+
+实现订单记录与发票的自动候选、冲突处理、自定义组合、确认持久化和匹配工作台。
+
+### Main Changes
+
+- Added durable many-to-one invoice matching with globally unique order occupancy, repeatable SeaORM migration coverage, automatic/custom confirmation, unconfirm, and atomic batch rollback.
+- Implemented exact-fen CNY candidate generation, missing-money exclusion, missing-date skip semantics, same-shop multi-order normalization, cross-invoice conflicts, and bounded candidate search.
+- Added the invoice-driven diff-style matching workspace with status filters, shared scrolling, candidate choice, batch confirmation, detail sheets, and a cross-page custom order picker with explicit mismatch acceptance.
+- Protected confirmed records from deletion and warned/unconfirmed transactionally when matching-critical fields change.
+- Added matching limits to versioned settings.toml and documented the backend/frontend matching contracts plus AGENTS.md conventions.
+- Verification: cargo test (60 passed), cargo fmt --check, cargo clippy --all-targets -- -D warnings, bun run lint, bun run test (32 passed), bun run build, git diff --check, and desktop/minimum-window browser inspection with mocked Tauri IPC data.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8dada77` | (see git log) |
+| `80c6660` | (see git log) |
+
+### Testing
+
+- [OK] `cargo test`: 60 passed
+- [OK] `cargo fmt --check`
+- [OK] `cargo clippy --all-targets -- -D warnings`
+- [OK] `bun run lint`
+- [OK] `bun run test`: 32 passed across 9 files
+- [OK] `bun run build`
+- [OK] Desktop and 920x640 browser layout inspection with mocked Tauri IPC data
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
