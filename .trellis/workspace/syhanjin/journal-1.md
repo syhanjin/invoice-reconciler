@@ -325,3 +325,37 @@ Changed order deletion to preserve immutable import tasks while clearing managed
 ### Next Steps
 
 - None - task complete
+
+
+## Session 10: Unified order recognition pool and Aliyun batch recovery
+
+**Date**: 2026-08-13
+**Task**: Unified order recognition pool and Aliyun batch recovery
+**Branch**: `main`
+
+### Summary
+
+Replaced order import batches with one durable pool and immutable completion logs; added Ollama, OpenAI-compatible, and Aliyun File/Batch recognition with concurrent submissions, restart recovery, idempotent reconciliation, and same-session cancel release; updated responsive task/settings UI, migrations, tests, and executable specs.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b80255a` | (see git log) |
+| `d3aaff1` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

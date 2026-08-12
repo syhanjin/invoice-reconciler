@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 9
+- **Total Sessions**: 10
 - **Last Active**: 2026-08-13
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~327 | Active |
+| `journal-1.md` | ~361 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 10 | 2026-08-13 | Unified order recognition pool and Aliyun batch recovery | `b80255a`, `d3aaff1` | `main` |
 | 9 | 2026-08-13 | Preserve order import history on delete | `710deb2` | `main` |
 | 8 | 2026-08-13 | 订单与发票匹配 | `8dada77`, `80c6660` | `main` |
 | 7 | 2026-08-13 | Fix reimport after deletion | `ce7da1b` | `main` |
