@@ -181,3 +181,201 @@ pub mod order_item {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod invoice_batch {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "invoice_batches")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: String,
+        pub status: String,
+        pub forced_type: Option<i32>,
+        pub created_at: String,
+        pub completed_at: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(has_many = "super::invoice_task::Entity")]
+        InvoiceTasks,
+    }
+
+    impl Related<super::invoice_task::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::InvoiceTasks.def()
+        }
+    }
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod invoice_task {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "invoice_tasks")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: String,
+        pub batch_id: String,
+        pub original_file_name: String,
+        pub source_path: Option<String>,
+        pub source_sha256: String,
+        pub media_type: String,
+        pub forced_type: Option<i32>,
+        pub status: String,
+        pub error_code: Option<String>,
+        pub error_message: Option<String>,
+        pub warning_message: Option<String>,
+        pub retry_count: i32,
+        pub request_id: Option<String>,
+        pub raw_response_json: Option<String>,
+        pub existing_invoice_id: Option<String>,
+        pub created_at: String,
+        pub started_at: Option<String>,
+        pub completed_at: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::invoice_batch::Entity",
+            from = "Column::BatchId",
+            to = "super::invoice_batch::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        InvoiceBatch,
+        #[sea_orm(has_many = "super::invoice::Entity")]
+        Invoices,
+    }
+    impl Related<super::invoice_batch::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::InvoiceBatch.def()
+        }
+    }
+    impl Related<super::invoice::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Invoices.def()
+        }
+    }
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod invoice {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "invoices")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: String,
+        pub task_id: String,
+        pub r#type: i32,
+        pub subtype: String,
+        pub type_description: String,
+        pub subtype_description: String,
+        pub invoice_code: Option<String>,
+        pub invoice_number: Option<String>,
+        pub invoice_date: Option<String>,
+        pub buyer_name: Option<String>,
+        pub buyer_tax_id: Option<String>,
+        pub seller_name: Option<String>,
+        pub seller_tax_id: Option<String>,
+        pub amount_fen: Option<i64>,
+        pub tax_fen: Option<i64>,
+        pub total_fen: Option<i64>,
+        pub currency: String,
+        pub reliable_identity: Option<String>,
+        pub possible_duplicate: bool,
+        pub preview_path: String,
+        pub page_start: i32,
+        pub page_end: i32,
+        pub raw_invoice_json: String,
+        pub created_at: String,
+        pub updated_at: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::invoice_task::Entity",
+            from = "Column::TaskId",
+            to = "super::invoice_task::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        InvoiceTask,
+        #[sea_orm(has_many = "super::invoice_line_item::Entity")]
+        Items,
+    }
+    impl Related<super::invoice_task::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::InvoiceTask.def()
+        }
+    }
+    impl Related<super::invoice_line_item::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Items.def()
+        }
+    }
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod invoice_line_item {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "invoice_items")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i32,
+        pub invoice_id: String,
+        pub position: i32,
+        pub name: String,
+        pub specification: Option<String>,
+        pub unit: Option<String>,
+        pub quantity: Option<String>,
+        pub unit_price_fen: Option<i64>,
+        pub amount_fen: Option<i64>,
+        pub tax_rate: Option<String>,
+        pub tax_fen: Option<i64>,
+        pub raw_json: String,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::invoice::Entity",
+            from = "Column::InvoiceId",
+            to = "super::invoice::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Invoice,
+    }
+    impl Related<super::invoice::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Invoice.def()
+        }
+    }
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod invoice_source_link {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "invoice_source_links")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i32,
+        pub invoice_id: String,
+        pub task_id: String,
+        pub page_start: i32,
+        pub page_end: i32,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}

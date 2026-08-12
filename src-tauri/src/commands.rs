@@ -26,8 +26,9 @@ struct PreparedImage {
 pub async fn bootstrap(state: State<'_, AppState>) -> CommandResult<BootstrapState> {
     async {
         Ok::<BootstrapState, AppError>(BootstrapState {
-            settings: state.database.settings().await?,
+            settings: state.settings.public().await,
             latest_batch: state.database.latest_batch().await?,
+            latest_invoice_batch: state.database.latest_invoice_batch().await?,
         })
     }
     .await
@@ -36,7 +37,7 @@ pub async fn bootstrap(state: State<'_, AppState>) -> CommandResult<BootstrapSta
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> CommandResult<AppSettings> {
-    state.database.settings().await.map_err(Into::into)
+    Ok(state.settings.public().await)
 }
 
 #[tauri::command]
@@ -44,11 +45,7 @@ pub async fn save_settings(
     state: State<'_, AppState>,
     request: UpdateSettingsRequest,
 ) -> CommandResult<AppSettings> {
-    state
-        .database
-        .update_settings(request)
-        .await
-        .map_err(Into::into)
+    state.settings.save(request).await.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -87,7 +84,7 @@ async fn create_import_batch_inner(
         return Err(AppError::InvalidInput("单个批次最多导入 500 张图片".into()));
     }
 
-    let settings = state.database.settings().await?;
+    let settings = state.settings.private().await.ollama();
     let check = state.ollama.check(&settings).await?;
     if !check.model_available {
         return Err(AppError::ModelMissing(settings.ollama_model.clone()));
@@ -263,13 +260,7 @@ pub async fn retry_task(
     async {
         let current = state.database.task(&request.id).await?;
         state.queue.reserve(&current.batch_id).await?;
-        let settings = match state.database.settings().await {
-            Ok(settings) => settings,
-            Err(error) => {
-                state.queue.release(&current.batch_id).await;
-                return Err(error);
-            }
-        };
+        let settings = state.settings.private().await.ollama();
         let task = match state.database.prepare_retry(&request.id).await {
             Ok(task) => task,
             Err(error) => {
@@ -299,13 +290,7 @@ pub async fn retry_failed_batch(
             return Err(AppError::InvalidInput("该批次没有可重试任务".into()));
         }
         state.queue.reserve(&request.id).await?;
-        let settings = match state.database.settings().await {
-            Ok(settings) => settings,
-            Err(error) => {
-                state.queue.release(&request.id).await;
-                return Err(error);
-            }
-        };
+        let settings = state.settings.private().await.ollama();
         if let Err(error) = state.database.prepare_retries(&ids).await {
             state.queue.release(&request.id).await;
             return Err(error);
@@ -457,6 +442,8 @@ mod tests {
     use crate::models::{NormalizedOrder, Platform};
     use crate::ocr::OllamaClient;
     use crate::queue::QueueManager;
+    use crate::settings::SettingsStore;
+    use crate::tencent_ocr::TencentOcrClient;
 
     async fn test_state() -> (TempDir, AppState) {
         let directory = tempfile::tempdir().unwrap();
@@ -466,12 +453,24 @@ mod tests {
         let database = Database::in_memory().await.unwrap();
         let ollama = OllamaClient::new().unwrap();
         let queue = QueueManager::new(database.clone(), ollama.clone(), app_data_dir.clone());
+        let legacy = database.settings().await.unwrap();
+        let settings = SettingsStore::load_or_migrate(&app_data_dir, legacy)
+            .await
+            .unwrap();
+        let invoice_queue = crate::invoice_queue::InvoiceQueueManager::new(
+            database.clone(),
+            TencentOcrClient::new().unwrap(),
+            app_data_dir.clone(),
+        );
         (
             directory,
             AppState {
                 database,
                 ollama,
                 queue,
+                invoice_queue,
+                invoice_preflights: crate::invoice_commands::InvoicePreflightStore::default(),
+                settings,
                 app_data_dir,
                 images_dir,
             },

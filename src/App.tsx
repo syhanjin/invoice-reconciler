@@ -3,6 +3,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 
 import { AppShell } from "@/components/app-shell"
+import { InvoicesPage } from "@/components/invoices-page"
 import { OrdersPage } from "@/components/orders-page"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Toaster } from "@/components/ui/sonner"
@@ -10,8 +11,12 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { api, errorMessage } from "@/lib/api"
 import {
   activeBatchAtom,
+  activeInvoiceBatchAtom,
+  invoicesRefreshAtom,
   mergeBatchAtom,
   mergeBatchEventAtom,
+  mergeInvoiceBatchAtom,
+  mergeInvoiceBatchEventAtom,
   navigationAtom,
   ordersRefreshAtom,
   settingsAtom,
@@ -43,8 +48,13 @@ export function App() {
   const mergeBatch = useSetAtom(mergeBatchAtom)
   const mergeBatchEvent = useSetAtom(mergeBatchEventAtom)
   const refreshToken = useAtomValue(ordersRefreshAtom)
+  const invoiceRefreshToken = useAtomValue(invoicesRefreshAtom)
+  const [activeInvoiceBatch, setActiveInvoiceBatch] = useAtom(activeInvoiceBatchAtom)
+  const mergeInvoiceBatch = useSetAtom(mergeInvoiceBatchAtom)
+  const mergeInvoiceBatchEvent = useSetAtom(mergeInvoiceBatchEventAtom)
   const [ready, setReady] = useState(false)
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null)
+  const [selectedInvoiceBatchId, setSelectedInvoiceBatchId] = useState<string | null>(null)
 
   const handleBatchCreated = useCallback((batch: Parameters<typeof mergeBatch>[0]) => {
     mergeBatch(batch)
@@ -52,15 +62,23 @@ export function App() {
     setView("importTasks")
   }, [mergeBatch, setView])
 
+  const handleInvoiceBatchCreated = useCallback((batch: Parameters<typeof mergeInvoiceBatch>[0]) => {
+    mergeInvoiceBatch(batch)
+    setSelectedInvoiceBatchId(batch.id)
+    setView("importTasks")
+  }, [mergeInvoiceBatch, setView])
+
   useEffect(() => {
     let disposed = false
     let unlisten: (() => void) | undefined
+    let unlistenInvoice: (() => void) | undefined
     api
       .bootstrap()
       .then((state) => {
         if (disposed) return
         setSettings(state.settings)
         setActiveBatch(state.latestBatch)
+        setActiveInvoiceBatch(state.latestInvoiceBatch)
         setReady(true)
       })
       .catch((error) => {
@@ -71,11 +89,16 @@ export function App() {
       if (disposed) dispose()
       else unlisten = dispose
     })
+    api.listenForInvoiceTaskUpdates((event) => mergeInvoiceBatchEvent(event.batch)).then((dispose) => {
+      if (disposed) dispose()
+      else unlistenInvoice = dispose
+    })
     return () => {
       disposed = true
       unlisten?.()
+      unlistenInvoice?.()
     }
-  }, [mergeBatchEvent, setActiveBatch, setSettings])
+  }, [mergeBatchEvent, mergeInvoiceBatchEvent, setActiveBatch, setActiveInvoiceBatch, setSettings])
 
   return (
     <TooltipProvider>
@@ -89,6 +112,12 @@ export function App() {
               refreshToken={refreshToken}
             />
           )}
+          {view === "invoices" && (
+            <InvoicesPage
+              onBatchCreated={handleInvoiceBatchCreated}
+              refreshToken={invoiceRefreshToken}
+            />
+          )}
           {view === "importTasks" && (
             <Suspense fallback={<Initializing />}>
               <ImportTasksPage
@@ -96,6 +125,13 @@ export function App() {
                 selectedBatchId={selectedBatchId}
                 onSelectedBatchChange={setSelectedBatchId}
                 onBatchChange={mergeBatch}
+                activeInvoiceBatch={activeInvoiceBatch}
+                selectedInvoiceBatchId={selectedInvoiceBatchId}
+                onSelectedInvoiceBatchChange={setSelectedInvoiceBatchId}
+                onInvoiceBatchChange={(batch) => {
+                  mergeInvoiceBatch(batch)
+                  setActiveInvoiceBatch(batch)
+                }}
               />
             </Suspense>
           )}

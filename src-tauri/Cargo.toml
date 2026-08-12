@@ -16,7 +16,12 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+hmac = "0.12"
+hex = "0.4"
 infer = "0.19"
+imagesize = "0.14"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+lopdf = "0.36"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rust_decimal = "1"
 sea-orm = { version = "1.1", features = ["macros", "runtime-tokio-rustls", "sqlx-sqlite", "with-chrono", "with-uuid"] }
@@ -27,10 +32,14 @@ sha2 = "0.10"
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "macros", "process", "rt-multi-thread", "sync", "time"] }
+toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 axum = "0.8"

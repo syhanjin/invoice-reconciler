@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { BatchPanel } from "@/components/batch-panel"
+import { InvoiceTasksTab } from "@/components/invoice-tasks-tab"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -25,7 +26,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { api, errorMessage } from "@/lib/api"
 import { formatDateTime } from "@/lib/format"
-import type { BatchDetail, ImportBatchesPage, ImportBatchSummary } from "@/lib/types"
+import type { BatchDetail, ImportBatchesPage, ImportBatchSummary, InvoiceBatchDetail } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 interface ImportTasksPageProps {
@@ -33,6 +34,10 @@ interface ImportTasksPageProps {
   selectedBatchId: string | null
   onSelectedBatchChange: (id: string | null) => void
   onBatchChange: (batch: BatchDetail) => void
+  activeInvoiceBatch: InvoiceBatchDetail | null
+  selectedInvoiceBatchId: string | null
+  onSelectedInvoiceBatchChange: (id: string | null) => void
+  onInvoiceBatchChange: (batch: InvoiceBatchDetail) => void
 }
 
 const emptyPage: ImportBatchesPage = { items: [], total: 0, page: 1, pageSize: 20 }
@@ -110,6 +115,10 @@ export default function ImportTasksPage({
   selectedBatchId,
   onSelectedBatchChange,
   onBatchChange,
+  activeInvoiceBatch,
+  selectedInvoiceBatchId,
+  onSelectedInvoiceBatchChange,
+  onInvoiceBatchChange,
 }: ImportTasksPageProps) {
   const [history, setHistory] = useState<ImportBatchesPage>(emptyPage)
   const [page, setPage] = useState(1)
@@ -221,7 +230,7 @@ export default function ImportTasksPage({
         <div className="flex h-12 shrink-0 items-end border-b bg-white px-6">
           <TabsList variant="line" className="h-11">
             <TabsTrigger value="orders" className="min-w-20">订单</TabsTrigger>
-            <TabsTrigger value="invoices" className="min-w-20" disabled>发票</TabsTrigger>
+            <TabsTrigger value="invoices" className="min-w-20">发票</TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value="orders" className="min-h-0 bg-zinc-100">
@@ -320,6 +329,14 @@ export default function ImportTasksPage({
               )}
             </section>
           </div>
+        </TabsContent>
+        <TabsContent value="invoices" className="min-h-0 bg-zinc-100">
+          <InvoiceTasksTab
+            activeBatch={activeInvoiceBatch}
+            selectedBatchId={selectedInvoiceBatchId}
+            onSelectedBatchChange={onSelectedInvoiceBatchChange}
+            onBatchChange={onInvoiceBatchChange}
+          />
         </TabsContent>
       </Tabs>
     </div>

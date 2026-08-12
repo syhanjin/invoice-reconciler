@@ -13,6 +13,10 @@ pub enum AppError {
     ModelMissing(String),
     #[error("OCR 返回的数据无效：{0}")]
     InvalidOcr(String),
+    #[error("腾讯云 OCR 请求失败：{0}")]
+    TencentOcr(String),
+    #[error("设置文件处理失败：{0}")]
+    Settings(String),
     #[error("数据库操作失败：{0}")]
     Database(String),
     #[error("当前已有识别批次正在运行")]
@@ -31,6 +35,8 @@ impl AppError {
             Self::OllamaUnavailable(_) => "ollama_unavailable",
             Self::ModelMissing(_) => "model_missing",
             Self::InvalidOcr(_) => "invalid_ocr",
+            Self::TencentOcr(_) => "tencent_ocr_error",
+            Self::Settings(_) => "settings_error",
             Self::Database(_) => "database_error",
             Self::BatchBusy => "batch_busy",
             Self::NotFound(_) => "not_found",

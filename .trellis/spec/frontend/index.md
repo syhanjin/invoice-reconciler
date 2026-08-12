@@ -11,3 +11,4 @@ Use React with TypeScript, Bun, Tailwind CSS v4, shadcn/ui, Jotai, TanStack Tabl
 | Guide | Description | Status |
 | --- | --- | --- |
 | [Desktop Application Contract](./application-contract.md) | Tauri API, state ownership, events, validation, and UI tests | Active |
+| [Invoice Workspace Contract](./invoice-workspace-contract.md) | Paid-import confirmation, invoice task review, ledger controls, and preview behavior | Active |

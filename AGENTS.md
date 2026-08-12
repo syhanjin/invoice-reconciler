@@ -36,6 +36,15 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - Linux launches default `WEBKIT_DISABLE_DMABUF_RENDERER` to `1` in the Rust
   executable entry point before Tauri starts. Preserve an explicitly supplied
   launch-environment value.
+- Runtime settings live in a versioned application-data `settings.toml`, not
+  SQLite. Keep the public settings response credential-free, preserve atomic
+  replacement, and enforce `0600` on Unix or a current-user ACL on Windows.
+- Invoice OCR uses Tencent Cloud `RecognizeGeneralInvoice` through the dedicated
+  invoice queue. Preserve local preflight/confirmation, the global 5 QPS limit,
+  durable raw-response auditing, and the separate `invoice-task-updated` event.
+- Run SeaORM migrations before startup recovery queries. SQLite migration DDL
+  must be safely repeatable, and schema changes require fresh-file, prior-version
+  upgrade, and interrupted-migration recovery tests.
 
 ## Trellis Workflow Overrides
 

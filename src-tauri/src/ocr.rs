@@ -219,6 +219,11 @@ mod tests {
             ollama_base_url: format!("http://{address}"),
             ollama_model: "vision:test".into(),
             max_concurrency: 3,
+            tencent_secret_id_masked: None,
+            tencent_credentials_configured: false,
+            invoice_ocr_concurrency: 3,
+            settings_path: String::new(),
+            permission_warning: None,
         };
         let result = OllamaClient::new()
             .unwrap()

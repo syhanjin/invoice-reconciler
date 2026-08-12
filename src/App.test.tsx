@@ -28,10 +28,21 @@ const batch: BatchDetail = {
 vi.mock("@/lib/api", () => ({
   api: {
     bootstrap: vi.fn().mockResolvedValue({
-      settings: { ollamaBaseUrl: "http://127.0.0.1:11434", ollamaModel: "model", maxConcurrency: 3 },
+      settings: {
+        ollamaBaseUrl: "http://127.0.0.1:11434",
+        ollamaModel: "model",
+        maxConcurrency: 3,
+        tencentSecretIdMasked: null,
+        tencentCredentialsConfigured: false,
+        invoiceOcrConcurrency: 3,
+        settingsPath: "/tmp/settings.toml",
+        permissionWarning: null,
+      },
       latestBatch: null,
+      latestInvoiceBatch: null,
     }),
     listenForTaskUpdates: vi.fn().mockResolvedValue(() => undefined),
+    listenForInvoiceTaskUpdates: vi.fn().mockResolvedValue(() => undefined),
   },
   errorMessage: () => "操作失败",
 }))

@@ -30,7 +30,7 @@ Rust serializes public structs with `camelCase`. Tauri command names remain snak
 
 - `settingsAtom` and `activeBatchAtom` cache current projections; SQLite remains authoritative.
 - A task event carries the entire updated `BatchDetail`. Replace the active batch snapshot when its ID matches rather than incrementing counters locally.
-- Import tasks live in a separate first-level workspace. Its order tab pages persisted batch summaries with `20`, `50`, or `100` rows and loads full tasks only after selecting a batch. The invoice tab remains disabled until that domain is implemented.
+- Import tasks live in a separate first-level workspace. The order and invoice tabs page persisted batch summaries with `20`, `50`, or `100` rows and load full tasks only after selecting a batch. Each tab owns its selected batch and reacts only to events from the matching domain.
 - A successful order screenshot import navigates to the import-task workspace and selects the new batch. Canceling the file dialog or rejecting batch creation preserves the orders workspace.
 - A live event may refresh the matching selected detail and summary, but an event for another batch must not replace or reload the detail being inspected.
 - Refresh the orders query after task success and after an order mutation so persisted values remain authoritative.
@@ -86,7 +86,7 @@ Rust serializes public structs with `camelCase`. Tauri command names remain snak
 - Component tests for settings validation and nullable order edit fields when those flows change.
 - Component tests for all order sort-field mappings and sort cycles; search/filter/page-size reset; first/previous/next/last and validated page jumps; invalid-page correction; column visibility/resizing; density; reset; preference normalization; and reload failure preserving successful rows.
 - Component tests for row selection without detail activation; header checked/unchecked/indeterminate states; clearing on server-query changes; confirmation cancel; and mixed bulk-delete results retaining only failed selections.
-- Component tests for task-history pagination, disabled invoice tab, detail loading/error retry, and post-import navigation when those flows change.
+- Component tests for order/invoice task-history pagination, tab-specific selection and events, detail loading/error retry, and post-import navigation when those flows change.
 - Desktop smoke tests at the default and minimum window sizes for table, task-center history/detail scrolling, image preview, edit/delete sheet, and settings.
 - Always run `bun run build`, `bun run lint`, and `bun run test` before commit.
 

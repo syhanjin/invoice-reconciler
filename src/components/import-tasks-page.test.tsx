@@ -78,6 +78,10 @@ function Harness() {
       selectedBatchId={selected}
       onSelectedBatchChange={setSelected}
       onBatchChange={vi.fn()}
+      activeInvoiceBatch={null}
+      selectedInvoiceBatchId={null}
+      onSelectedInvoiceBatchChange={vi.fn()}
+      onInvoiceBatchChange={vi.fn()}
     />
   )
 }
@@ -95,7 +99,7 @@ describe("ImportTasksPage", () => {
     render(<Harness />)
 
     expect(screen.getByRole("tab", { name: "订单" })).toHaveAttribute("data-active")
-    expect(screen.getByRole("tab", { name: "发票" })).toHaveAttribute("aria-disabled", "true")
+    expect(screen.getByRole("tab", { name: "发票" })).not.toHaveAttribute("aria-disabled", "true")
     expect(await screen.findByText("failed-order.png")).toBeInTheDocument()
     expect(apiMocks.listImportBatches).toHaveBeenCalledWith({ page: 1, pageSize: 20 })
     expect(apiMocks.getBatch).toHaveBeenCalledWith("batch-new")

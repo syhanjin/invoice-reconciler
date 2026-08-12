@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"SeaORM migration ordering, resumable SQLite DDL, transactions, and file compensation"}
+{"file":".trellis/spec/backend/invoice-import-contract.md","reason":"Settings security, Tencent OCR, invoice persistence, deduplication, and command contracts"}
+{"file":".trellis/spec/frontend/application-contract.md","reason":"Application state, task workspace, table interaction, and event conventions"}
+{"file":".trellis/spec/frontend/invoice-workspace-contract.md","reason":"Invoice preflight, task review, ledger selection, preview, and settings UI contracts"}

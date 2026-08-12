@@ -21,6 +21,11 @@ Do not add a second application-facing database library. SeaORM may use SQLx int
 | `import_tasks` | UUIDv7 text | cascades from batch; managed image hashes are unique |
 | `orders` | task UUIDv7 text | cascades from task; external order number is not unique |
 | `order_items` | integer | `(order_id, position)` is unique and cascades from order |
+| `invoice_batches` | UUIDv7 text | invoice-specific lifecycle and optional forced Tencent type |
+| `invoice_tasks` | UUIDv7 text | cascades from batch; stores source hash, audit response, and retry state |
+| `invoices` | UUIDv7 text | cascades from task; reliable identity is unique when present |
+| `invoice_items` | integer | `(invoice_id, position)` is unique and cascades from invoice |
+| `invoice_source_links` | integer | invoice/task/page tuple is unique and cascades from both parents |
 
 Money is stored as integer fen. Date/time values are normalized strings in `YYYY-MM-DD HH:mm` form. Booleans use SQLite integers through SeaORM models. The task, order, and managed image basename share the same UUID.
 
@@ -35,7 +40,13 @@ Money is stored as integer fen. Date/time values are normalized strings in `YYYY
 
 ## Migrations
 
-Add a new `MigrationTrait` implementation and append it to `Migrator::migrations()`. Never edit an applied migration merely to evolve an existing installation. Every new constraint or index needs a migration test that creates a fresh in-memory database and asserts both the schema behavior and the repository behavior it supports.
+Add a new `MigrationTrait` implementation and append it to `Migrator::migrations()`. Never edit an applied migration merely to evolve an existing installation. Every new constraint or index needs a migration test that creates a fresh database and asserts both the schema behavior and the repository behavior it supports.
+
+- Run `Migrator::up` before any startup query references a table introduced by a pending migration. Restart recovery updates for `queued` or `processing` rows run only after all pending migrations finish.
+- SQLite migration DDL is not wrapped in one transaction by `sea-orm-migration`. New table and index statements must therefore be safely repeatable with `IF NOT EXISTS`, so a process interruption can resume instead of failing on a partially created schema.
+- Migration tests must use real temporary SQLite files for both a fresh install and an upgrade from the immediately previous migration. Seed existing domain data before upgrading and assert it survives.
+- Also simulate a partial prior migration, reconnect through the production `Database::connect` path, and assert the missing schema plus migration ledger entry are completed.
+- Verify constraints behavior after migration: foreign-key cascades, partial unique indexes, check constraints, and required query indexes must be exercised through actual writes or schema inspection.
 
 ## File Compensation
 
@@ -53,10 +64,13 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Do not delete the managed image before arranging a recoverable compensation path.
 - Do not modify duplicate flags outside the same transaction as the associated order change.
 - Do not use ad hoc schema creation outside `sea-orm-migration`.
+- Do not run restart-recovery SQL for new tables before `Migrator::up`.
+- Do not assume SQLite migration DDL is automatically atomic.
 
 ## Required Tests
 
-- Fresh migration and migration idempotency.
+- Fresh file migration, previous-version upgrade with seeded data, and interrupted-migration recovery.
+- Foreign-key cascade and reliable-identity unique-index enforcement after invoice migration.
 - Duplicate order-number group creation, edit between groups, and delete recalculation.
 - Unique SHA-256 behavior for managed images while skipped tasks remain recordable.
 - Transaction rollback for failed order/item mutations.

@@ -14,14 +14,24 @@ import type {
   OrdersQuery,
   TaskUpdateEvent,
   UpdateOrderRequest,
+  SaveSettingsRequest,
+  InvoiceBatchPreview,
+  InvoiceBatchDetail,
+  InvoiceBatchesPage,
+  InvoiceTaskUpdateEvent,
+  InvoicesPage,
+  InvoicesQuery,
+  InvoiceDetail,
+  UpdateInvoiceRequest,
+  DeleteInvoicesResult,
 } from "@/lib/types"
 
 export const api = {
   bootstrap: () => invoke<BootstrapState>("bootstrap"),
   getSettings: () => invoke<AppSettings>("get_settings"),
-  saveSettings: (request: AppSettings) =>
+  saveSettings: (request: SaveSettingsRequest) =>
     invoke<AppSettings>("save_settings", { request }),
-  checkOllama: (request: AppSettings) =>
+  checkOllama: (request: SaveSettingsRequest) =>
     invoke<OllamaStatus>("check_ollama", { request }),
   createImportBatch: (imagePaths: string[]) =>
     invoke<BatchDetail>("create_import_batch", {
@@ -42,10 +52,33 @@ export const api = {
   deleteOrder: (id: string) => invoke<void>("delete_order", { request: { id } }),
   deleteOrders: (ids: string[]) =>
     invoke<DeleteOrdersResult>("delete_orders", { request: { ids } }),
+  prepareInvoiceBatch: (filePaths: string[], forcedType: number | null) =>
+    invoke<InvoiceBatchPreview>("prepare_invoice_batch", { request: { filePaths, forcedType } }),
+  createInvoiceBatch: (preflightToken: string) =>
+    invoke<InvoiceBatchDetail>("create_invoice_batch", { request: { preflightToken } }),
+  getInvoiceBatch: (id: string) => invoke<InvoiceBatchDetail>("get_invoice_batch", { request: { id } }),
+  listInvoiceBatches: (query: { page?: number; pageSize?: number }) =>
+    invoke<InvoiceBatchesPage>("list_invoice_batches", { query }),
+  cancelInvoiceTask: (id: string) => invoke<boolean>("cancel_invoice_task", { request: { id } }),
+  retryInvoiceTask: (id: string, forcedType: number | null) =>
+    invoke<InvoiceBatchDetail>("retry_invoice_task", { request: { id, forcedType } }),
+  confirmInvoiceSplit: (taskId: string, groups: number[][]) =>
+    invoke<InvoiceBatchDetail>("confirm_invoice_split", { request: { taskId, groups } }),
+  listInvoices: (query: InvoicesQuery) => invoke<InvoicesPage>("list_invoices", { query }),
+  getInvoice: (id: string) => invoke<InvoiceDetail>("get_invoice", { request: { id } }),
+  updateInvoice: (request: UpdateInvoiceRequest) =>
+    invoke<InvoiceDetail>("update_invoice", { request }),
+  deleteInvoice: (id: string) => invoke<void>("delete_invoice", { request: { id } }),
+  deleteInvoices: (ids: string[]) =>
+    invoke<DeleteInvoicesResult>("delete_invoices", { request: { ids } }),
   listenForTaskUpdates: (
     handler: (payload: TaskUpdateEvent) => void,
   ): Promise<UnlistenFn> =>
     listen<TaskUpdateEvent>("import-task-updated", (event) => handler(event.payload)),
+  listenForInvoiceTaskUpdates: (
+    handler: (payload: InvoiceTaskUpdateEvent) => void,
+  ): Promise<UnlistenFn> =>
+    listen<InvoiceTaskUpdateEvent>("invoice-task-updated", (event) => handler(event.payload)),
   imageUrl: (absolutePath: string) => convertFileSrc(absolutePath),
 }
 

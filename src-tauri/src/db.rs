@@ -17,12 +17,11 @@ use crate::models::{
     AppSettings, BatchCounts, BatchDetail, DEFAULT_MAX_CONCURRENCY, ImportBatchSummary,
     ImportBatchesPage, ImportBatchesQuery, ImportTask, NormalizedOrder, OrderDetail, OrderListItem,
     OrderSort, OrdersPage, OrdersQuery, Platform, SortDirection, UpdateOrderRequest,
-    UpdateSettingsRequest,
 };
 
 #[derive(Clone)]
 pub struct Database {
-    connection: DatabaseConnection,
+    pub(crate) connection: DatabaseConnection,
 }
 
 impl Database {
@@ -43,6 +42,15 @@ impl Database {
         connection
             .execute(Statement::from_sql_and_values(
                 DbBackend::Sqlite,
+                "UPDATE invoice_tasks SET status = 'interrupted', error_code = 'app_interrupted', \
+                 error_message = '应用在识别完成前退出，可手动重试', completed_at = ? \
+                 WHERE status IN ('queued', 'processing')",
+                [now().into()],
+            ))
+            .await?;
+        connection
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
                 "UPDATE import_tasks SET status = 'interrupted', error_code = 'app_interrupted', \
                  error_message = '应用在识别完成前退出，可手动重试', completed_at = ? \
                  WHERE status IN ('queued', 'processing')",
@@ -51,6 +59,7 @@ impl Database {
             .await?;
         let database = Self { connection };
         database.refresh_open_batches().await?;
+        database.refresh_open_invoice_batches().await?;
         Ok(database)
     }
 
@@ -83,20 +92,6 @@ impl Database {
             .await?
             .ok_or_else(|| AppError::Database("缺少应用设置记录".into()))?;
         Ok(settings_from_model(model))
-    }
-
-    pub async fn update_settings(&self, request: UpdateSettingsRequest) -> AppResult<AppSettings> {
-        let request = request.validate()?;
-        let model = app_setting::Entity::find_by_id(1)
-            .one(&self.connection)
-            .await?
-            .ok_or_else(|| AppError::Database("缺少应用设置记录".into()))?;
-        let mut active = model.into_active_model();
-        active.ollama_base_url = Set(request.ollama_base_url);
-        active.ollama_model = Set(request.ollama_model);
-        active.max_concurrency = Set(i32::from(request.max_concurrency));
-        active.updated_at = Set(now());
-        Ok(settings_from_model(active.update(&self.connection).await?))
     }
 
     pub async fn hash_exists(&self, hash: &str) -> AppResult<bool> {
@@ -698,6 +693,11 @@ fn settings_from_model(model: app_setting::Model) -> AppSettings {
         ollama_base_url: model.ollama_base_url,
         ollama_model: model.ollama_model,
         max_concurrency: u8::try_from(model.max_concurrency).unwrap_or(DEFAULT_MAX_CONCURRENCY),
+        tencent_secret_id_masked: None,
+        tencent_credentials_configured: false,
+        invoice_ocr_concurrency: crate::models::DEFAULT_INVOICE_OCR_CONCURRENCY,
+        settings_path: String::new(),
+        permission_warning: None,
     }
 }
 
@@ -783,7 +783,7 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     })
 }
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     Utc::now().to_rfc3339()
 }
 

@@ -19,6 +19,7 @@ interface AppShellProps {
 
 const navigation = [
   { id: "orders" as const, label: "订单", icon: ClipboardList },
+  { id: "invoices" as const, label: "发票", icon: ReceiptText },
   { id: "importTasks" as const, label: "导入任务", icon: ListTodo },
   { id: "settings" as const, label: "设置", icon: Settings },
 ]
@@ -33,7 +34,7 @@ export function AppShell({ view, onViewChange, children }: AppShellProps) {
           </div>
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold">票据助手</p>
-            <p className="truncate text-xs text-muted-foreground">订单识别工作台</p>
+            <p className="truncate text-xs text-muted-foreground">票据识别工作台</p>
           </div>
         </div>
         <Separator className="my-4" />
@@ -64,7 +65,7 @@ export function AppShell({ view, onViewChange, children }: AppShellProps) {
                 <span className="size-2 rounded-full bg-emerald-500" />
                 本地数据
             </TooltipTrigger>
-            <TooltipContent side="right">订单和截图仅保存在本机</TooltipContent>
+            <TooltipContent side="right">台账和源文件仅保存在本机</TooltipContent>
           </Tooltip>
         </div>
       </aside>

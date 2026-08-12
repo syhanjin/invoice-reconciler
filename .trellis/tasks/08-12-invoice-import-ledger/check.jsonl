@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify fresh, prior-version, interrupted migration, constraints, and compensation behavior"}
+{"file":".trellis/spec/backend/invoice-import-contract.md","reason":"Verify paid-call boundary, secret exclusion, OCR parsing, queue limits, and audit data"}
+{"file":".trellis/spec/frontend/application-contract.md","reason":"Verify task-domain isolation, event ownership, and server-paged interaction behavior"}
+{"file":".trellis/spec/frontend/invoice-workspace-contract.md","reason":"Verify preflight confirmation, review, ledger selection/delete, settings, and PDF preview states"}
