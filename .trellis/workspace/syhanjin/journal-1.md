@@ -81,3 +81,36 @@ Defaulted WEBKIT_DISABLE_DMABUF_RENDERER to 1 at the Linux executable entry poin
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Persistent import task center
+
+**Date**: 2026-08-12
+**Task**: Persistent import task center
+**Branch**: `main`
+
+### Summary
+
+Added a first-level import task workspace with persisted batch pagination, on-demand task details, post-import navigation, responsive scrolling, cross-layer contracts, and full backend/frontend coverage.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `219777e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
