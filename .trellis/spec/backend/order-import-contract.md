@@ -1,10 +1,12 @@
 # Order Import Contract
 
-## Scenario: Taobao Screenshot OCR Import
+## Scenario: Unified Order Recognition Pool
 
 ### 1. Scope / Trigger
 
-This contract applies whenever a Tauri command, database schema, managed-image operation, Ollama request, queue transition, or frontend payload involved in screenshot import changes. The first supported platform is `taobao`; one image produces at most one order and an order may contain multiple product items.
+This contract applies whenever a Tauri command, SQLite migration, managed-image operation, recognition provider, queue transition, remote batch supervisor, or frontend payload involved in order screenshot import changes. The first supported platform is `taobao`; one image produces at most one order and an order may contain multiple product items.
+
+Orders have one durable import pool. Do not reintroduce a user-visible order import batch. Invoice batches and the Tencent invoice queue are a separate domain and are unchanged by this contract.
 
 ### 2. Signatures
 
@@ -14,42 +16,59 @@ Tauri commands use camel-case serialized request and response fields:
 bootstrap() -> BootstrapState
 get_settings() -> AppSettings
 save_settings(request: UpdateSettingsRequest) -> AppSettings
-check_ollama(request: UpdateSettingsRequest) -> OllamaStatus
-create_import_batch(request: CreateBatchRequest) -> BatchDetail
-get_batch(request: { id }) -> BatchDetail
-list_import_batches(query: ImportBatchesQuery) -> ImportBatchesPage
-cancel_task(request: { id }) -> bool
-cancel_batch(request: { id }) -> u64
-retry_task(request: { id }) -> BatchDetail
-retry_failed_batch(request: { id }) -> BatchDetail
-list_orders(query: OrdersQuery) -> OrdersPage
-get_order(request: { id }) -> OrderDetail
-update_order(request: UpdateOrderRequest) -> OrderDetail
-delete_order(request: { id }) -> ()
-delete_orders(request: DeleteOrdersRequest) -> DeleteOrdersResult
+check_order_recognizer(request: UpdateSettingsRequest) -> RecognizerStatus
+import_order_images(request: { platform: "taobao", imagePaths: string[] }) -> ImportOrderImagesResult
+get_order_import_pool() -> OrderImportPool
+list_order_import_logs(query: OrderImportLogsQuery) -> OrderImportLogsPage
+retry_order_import_task(request: { id }) -> bool
+retry_failed_order_import_tasks() -> u64
+delete_order_import_task(request: { id }) -> ()
+submit_order_recognition_batch() -> string
+cancel_order_recognition_batch(request: { id }) -> ()
 ```
 
-The backend emits `import-task-updated` with `{ task: ImportTask, batch: BatchDetail }` after durable state changes.
+The backend emits `order-import-updated` after durable changes:
 
-Durable tables are `app_settings`, `import_batches`, `import_tasks`, `orders`, and `order_items`. See [Database Guidelines](./database-guidelines.md) for keys and transaction rules.
+```text
+{ kind, taskId?, orderId?, recognitionBatchId? }
+```
+
+The event is an invalidation signal. Consumers reload the authoritative pool, completion log, and order list instead of deriving state from event counts.
+
+Durable tables are `order_import_pool`, `order_recognition_batches`, `order_import_logs`, `orders`, and `order_items`. Legacy `import_batches` and `import_tasks` remain only for schema compatibility and are not order-import APIs.
 
 ### 3. Contracts
 
-`UpdateSettingsRequest` contains `ollamaBaseUrl: string`, `ollamaModel: string`, and `maxConcurrency: number`. Defaults are `http://127.0.0.1:11434`, `qwen3-vl:4b`, and `3`.
+#### Provider settings
 
-`CreateBatchRequest` contains `platform: "taobao"` and `imagePaths: string[]`. A non-duplicate file receives a UUIDv7 before copying and is stored as `images/<uuid>.<normalized-extension>`. The task ID, order ID, and image basename must remain identical across retry.
+`orderRecognitionProvider` is one of `ollama`, `openai`, or `aliyun_batch`.
 
-`ImportBatchesQuery` contains optional `page` and `pageSize` integers. Page defaults to `1` and is normalized to at least `1`; page size defaults to `20` and is clamped to `1..=100`. `ImportBatchesPage` contains `{ items, total, page, pageSize }`. Each item is an `ImportBatchSummary` with batch metadata plus aggregate `BatchCounts`, but no `tasks` array. Sort summaries by `created_at DESC, id DESC`, then load the selected batch through `get_batch`; this keeps IPC and memory bounded as history grows.
+- `ollama`: realtime `/api/chat`, no API key.
+- `openai`: realtime OpenAI-compatible `/chat/completions`, optional bearer API key.
+- `aliyun_batch`: manual OpenAI-compatible File + Batch workflow, required bearer API key.
 
-`OrdersQuery` contains optional `page`, `pageSize`, `search`, `duplicateOnly`, `sortBy`, and `sortDirection`. Supported sort fields are `created_at`, `ordered_at`, `paid_amount`, and `shop_name`; directions are `asc` and `desc`. Every order sort appends `id DESC` as a stable tie-breaker so page boundaries do not drift between equivalent queries.
+`UpdateSettingsRequest` carries provider-specific base URLs, models, optional replacement keys, clear-key flags, `aliyunEnableThinking`, and global realtime `maxConcurrency` in `1..=8`. Secrets live only in versioned application-data `settings.toml`; public `AppSettings` exposes masked/configured fields and never plaintext keys. Saving settings must wake the realtime queue when a realtime provider becomes active and must always resume existing remote batches, even when the selected provider is no longer `aliyun_batch`.
 
-`DeleteOrdersRequest` contains `ids: string[]` with `1..=100` entries. Process unique IDs sequentially in first-seen order. `DeleteOrdersResult` contains `results: DeleteOrderResult[]`; every unique requested ID produces `{ id, deleted, errorCode, errorMessage }`. Success uses `deleted: true` with null error fields. An item failure uses `deleted: false` with the stable `AppError` code and complete display message, while later IDs continue.
+#### Pool and logs
 
-Both single and bulk deletion use the same per-order operation: resolve the managed image under application data, rename it into the temporary trash directory, transactionally delete the order and its cascading item records, clear the preserved import task's `managed_image_path`, and recalculate the old duplicate-number group, then remove the trashed image. A database failure rolls back both database mutations and restores the image before returning that item's failure.
+`OrderImportPool` contains `{ tasks, batches, pending, processing, failed }`. Task states are:
 
-Order deletion must never delete or rewrite the import task's audit fields, status, or batch membership. The preserved succeeded task remains visible in import history and continues to contribute to the original batch counts. Clearing only its managed-image path releases the SHA-256 claim, so a later import of the same screenshot is a new import and must not be skipped. Source-less skipped/audit tasks likewise remain in history but do not claim a hash.
+```text
+pending -> processing -> removed on success
+pending -> batch_submitting -> batch_locked -> removed on success
+processing | batch_submitting | batch_locked -> failed on local/remote failure or cancellation remainder
+failed -> pending on explicit retry
+```
 
-The Ollama `/api/chat` request uses `stream: false`, `format` containing the JSON Schema, `options.temperature: 0`, and `options.num_ctx: 16384`. Its recognized JSON shape is:
+Only `pending` and `failed` pool tasks may be individually deleted. A successful recognition transaction creates the order/items, transfers image metadata to `orders`, inserts one immutable `order_import_logs` row, and removes the pool row. The transaction is idempotent by task ID: replayed remote output must not duplicate the order or completion log.
+
+`OrderImportLogsQuery` defaults page to `1`, page size to `20`, clamps page size to `1..=100`, and sorts by `completed_at DESC, task_id DESC`. Logs never change after insertion. Editing or deleting an order must not update or remove its log. Logs do not own images and do not claim source hashes.
+
+#### Realtime recognition
+
+Ollama and generic OpenAI-compatible providers consume every `pending` task from the same dynamic process-wide queue. New imports wake the queue while older work is in flight. Each drain re-reads current private settings and respects the current global concurrency ceiling. Switching providers prevents new work from starting under the old provider; already-sent requests may finish.
+
+Ollama sends `stream: false`, JSON Schema in `format`, `temperature: 0`, and `num_ctx: 16384`. OpenAI-compatible recognition sends a base64 data URL, `response_format.type: json_schema`, a strict schema, and bearer auth when configured. Both normalize the same result:
 
 ```json
 {
@@ -61,81 +80,111 @@ The Ollama `/api/chat` request uses `stream: false`, `format` containing the JSO
 }
 ```
 
-Store valid money as integer fen and valid time as local `YYYY-MM-DD HH:mm`. Preserve the original model JSON exactly in `raw_ocr_json`. Invalid optional values become `null` and add a warning; they do not discard otherwise valid fields.
+Store money as integer fen and valid local time as `YYYY-MM-DD HH:mm`. Invalid optional values become `null` plus a warning; preserve the provider JSON in `raw_ocr_json`.
 
-Queue concurrency is captured from settings when a run begins. The number of sent but unfinished Ollama HTTP requests must never exceed that value. Only one batch or retry run may actively own the application queue; Ollama may queue the bounded set of already-sent requests internally.
+#### Aliyun batch recognition
+
+`submit_order_recognition_batch` atomically locks all currently `pending` tasks, creates a local snapshot with an incrementing short number such as `B000001`, and returns its local ID. New imports remain pending and another submission may create a concurrent batch while earlier batches run.
+
+Build one JSONL request per eligible task using `custom_id = task.id`, `POST /v1/chat/completions`, the strict vision schema, and an inline base64 image. Enforce 50,000 requests, 500 MB per input file, and 6 MB per line. Reject an invalid task into `failed` without preventing valid tasks in the same submission from running.
+
+Persist checkpoints in this order:
+
+1. Local batch and locked task membership.
+2. Uploaded `input_file_id` immediately after file upload.
+3. Remote `batch_id` immediately after create/list recovery.
+4. Remote status and output/error file IDs while polling.
+5. Idempotent per-task results, then terminal local batch status.
+
+The local batch stores the submitted base URL, model, and thinking flag. Polling reads the current Aliyun key so a key can be repaired after restart without changing the submitted model snapshot.
+
+#### Restart and cancellation
+
+Migrations run before recovery queries. On startup, realtime `processing` tasks become `failed/app_interrupted`; `batch_submitting` and `batch_locked` tasks remain locked and their active local batches are supervised again.
+
+- Remote ID present: resume retrieval directly; never upload or create again.
+- Input file ID present but remote ID absent: list by input file and local recovery name, bind the existing remote batch if found, then continue polling. A persisted create-attempt checkpoint prevents immediate duplicate creation; after a bounded recovery grace period with no matching cloud job, create from the already uploaded file to cover a crash immediately before the original request was sent.
+- No input file checkpoint: the cloud request could not have started; fail the local batch and release its tasks.
+- Repeated output or a crash during finalization: replay must be harmless because success persistence is idempotent.
+
+Cancellation calls the remote cancel endpoint before changing local state. A `cancelling` response is not terminal: keep the supervisor running until `cancelled`/`canceled`, reconcile any completed output first, then mark every remaining locked task `failed`, clear `recognition_batch_id`, and set the local batch to `canceled` in the same running application session. Never require another restart to release canceled tasks or their images.
 
 ### 4. Validation & Error Matrix
 
 | Condition | Required behavior |
 | --- | --- |
-| Empty image list | Return `invalid_input`; create no batch |
-| More than 500 images | Return `invalid_input`; create no batch |
-| Unsupported extension, invalid magic bytes, or unreadable file | Reject before batch persistence |
-| Ollama unreachable | Return actionable connection error; do not install software |
-| Configured model absent | Return `model_missing` with `ollama pull <model>` guidance |
-| Same SHA-256 in this or an earlier batch | Create a `skipped` task; do not copy or call OCR |
-| Same non-empty order number from different images | Retain all orders and flag the complete group as possible duplicates |
-| Invalid model JSON or request failure | Mark task `failed` with a stable error code/message |
-| Process exits while queued/processing | Mark task `interrupted` on next startup; never auto-resubmit |
-| Cancel queued task | Mark `canceled`; worker must recheck durable status before send |
-| Cancel processing task | Do not force-abort the HTTP request |
-| Delete database failure | Restore the image from the temporary trash path |
-| Reimport after successful delete | Preserve the old task in history, but treat the image as new and do not skip it because of that task |
-| Bulk delete has zero or more than `100` requested IDs | Reject the whole command with `invalid_input`; perform no deletion |
-| Bulk delete repeats an ID | Process it once and return one result at its first position |
-| One bulk-delete item is missing or fails | Return that item's stable error code/message and continue later unique IDs |
-| Import history page below 1 | Normalize to page `1` |
-| Import history page size outside `1..=100` | Clamp it before applying `LIMIT` |
-| Import history is empty | Return an empty page with `total = 0`; do not synthesize a batch |
-| Orders query contains search and duplicate-only | Bind the search pattern, combine both filters, and calculate `total` from the same filter set used for page rows |
+| Empty image list or more than 500 selected images | Return `invalid_input`; copy and persist nothing |
+| Unsupported extension, invalid magic bytes, or unreadable file | Reject before pool persistence |
+| Same SHA-256 in the request, pool, or image-owning order | Count as skipped; create no pool/log row and make no OCR call |
+| Realtime provider request/JSON failure | Mark only that task `failed`; require explicit retry |
+| OpenAI/Aliyun key absent when required | Return actionable validation/service error without exposing any key |
+| Submit batch under a non-Aliyun provider | Return `invalid_input`; keep pending tasks unchanged |
+| Batch submission with no pending tasks | Return `invalid_input`; create no empty batch |
+| One JSONL line is invalid/over 6 MB | Fail that task; submit remaining valid tasks |
+| Remote batch transient retrieval/download failure | Keep local batch active and retry with backoff |
+| Process exits during realtime request | Mark that task failed at startup; do not auto-retry it |
+| Process exits during remote batch | Preserve lock and checkpoints; resume supervision without duplicate upload/order |
+| Cancel endpoint fails | Leave local batch active and locked; surface the error |
+| Cancel endpoint returns `cancelling` | Continue polling; do not release tasks prematurely |
+| Remote cancellation becomes terminal | Import completed results, fail/unlock remainder immediately in the current process |
+| Delete `processing`, `batch_submitting`, or `batch_locked` task | Return `invalid_input`; preserve row and image |
+| Delete pending/failed task database failure | Restore its temporarily moved image |
+| Delete a recognized order | Remove its owned image and hash claim, preserve immutable completion log |
+| Duplicate remote result or finalization replay | Create at most one order and one log per task |
 
 ### 5. Good/Base/Bad Cases
 
-- Good: ten images with concurrency three result in no more than three simultaneous HTTP requests, each success is committed immediately, and task events update progress.
-- Good: a three-ID delete where the middle ID is missing deletes the first and last IDs, returns a `not_found` result for the middle ID, and recalculates duplicate groups after each success.
-- Base: an OCR result with no order number and an invalid date still stores valid product/shop fields, with nullable fields and a warning.
-- Bad: copying an image under its original name, sending every request at once, concurrently deleting every selected order, stopping a bulk response after one item fails, returning all task rows in every history summary, treating a repeated order number as a hard duplicate, or retrying under a new UUID violates this contract.
+- Good: three realtime imports are running, a fourth import arrives, and the same queue starts it as capacity becomes available without creating or selecting a user-visible batch.
+- Good: `B000001` and `B000002` run concurrently while new pending screenshots remain editable; restarting resumes both from persisted cloud IDs.
+- Good: after restart, cancel returns `cancelling`, the supervisor observes `cancelled`, imports completed lines, and immediately releases every remainder to `failed` without a second restart.
+- Base: a remote result omits an optional date; the valid fields still produce an order and immutable log with a warning.
+- Bad: storing cloud IDs only in memory, unlocking on the first cancel response, starting one queue per import click, auto-retrying failures forever, mutating logs when orders change, or generating a new task ID during retry violates this contract.
 
 ### 6. Tests Required
 
-- Migration integration test: all tables migrate and rerunning migrations succeeds.
-- Database integration test: same-number groups are flagged; editing between groups recalculates both groups.
-- Import-history database test: assert stable pagination, aggregate counts for every task status, empty results, and page-size clamping.
-- Orders-query database test: assert every supported sort field in both directions, `id DESC` tie-breaking, and search/duplicate filtering combined with pagination.
-- Bulk-delete command tests: assert empty/oversize validation, duplicate-ID normalization, partial results, successful image removal, preserved import task and batch counts, duplicate-group recalculation, and image restoration after an injected database failure.
-- Delete/reimport database test: assert successful deletion preserves the import task while clearing its managed path and releasing the SHA-256 claim; a failed deletion must preserve the order, task path, image, and claim.
-- File unit test: extension and magic-byte validation agree, and the UUID basename is retained.
-- OCR mock-server test: assert the exact structured request fields and parse a valid response.
-- Queue async test: measure peak in-flight requests and assert `peak <= captured_concurrency`.
-- Normalization tests: decimal rounding to fen, accepted time formats, null/warning fallback.
-- Frontend contract tests: invoke argument names match Rust camel-case types and task events replace the active batch snapshot.
-- Desktop smoke test: imported image renders through the restricted asset protocol and edit/delete/settings flows remain usable at the minimum window size.
+- Migration: fresh file, m0004 upgrade with successful and incomplete legacy tasks, and interrupted m0005 recovery.
+- Startup recovery: realtime `processing` becomes failed while remote batch locks and checkpoints survive.
+- Pool database: concurrent batch allocation locks only each submission's pending snapshot; success is atomic and idempotent.
+- Realtime queue: measure peak in-flight work and assert it never exceeds current configured concurrency.
+- Protocol mocks: assert Ollama and OpenAI-compatible paths, bearer auth, image data URL, strict schema, and normalized response.
+- Batch JSONL: assert `custom_id`, endpoint, model/thinking flag, strict schema, and isolation of unreadable/oversize inputs.
+- Remote restart: bind an already accepted remote batch from persisted input file ID and assert no duplicate upload/create/order.
+- Remote cancellation regression: restart with locked work, receive `cancelling` then `cancelled`, and assert pool task is failed/unlocked and local batch canceled before another restart.
+- File compensation: failed pool deletion/import/order deletion restores ownership consistently and releases hashes only on success.
+- Frontend: order task page dual-pane states, manual submit/cancel controls, retry/delete rules, logs pagination, and event-driven reload.
+- Quality gate: `cargo fmt --check`, strict Clippy, full Rust tests, `bun run lint`, `bun run test`, and `bun run build`.
 
 ### 7. Wrong vs Correct
 
 #### Wrong
 
 ```rust
-for task in tasks {
-    tokio::spawn(call_ollama(task));
-}
+// The remote ID disappears when the process exits.
+tokio::spawn(poll_remote(create_batch(input_file_id).await?.id));
 ```
 
-This has no application-wide ownership and can send an unbounded number of requests.
+```rust
+// A cancel request was accepted, but the cloud job is still cancelling.
+database.release_all_tasks(batch_id).await?;
+```
 
 #### Correct
 
 ```rust
-stream::iter(task_ids)
-    .for_each_concurrent(Some(settings.max_concurrency.into()), |task_id| async move {
-        process_task(task_id).await;
-    })
-    .await;
+database.set_input_file_id(batch_id, &input_file_id).await?;
+let remote = client.create(&settings, &input_file_id, batch_id).await?;
+database.set_remote_batch_id(batch_id, &remote.id).await?;
+supervisor.poll_until_terminal(batch_id).await?;
 ```
 
-Reserve the global queue before this loop, release it when the run finishes, and re-read each task's durable status immediately before sending.
+```rust
+let remote = client.cancel(base_url, api_key, remote_id).await?;
+database.mark_batch_canceling(batch_id).await?;
+if terminal_status(&remote.status) {
+    supervisor.finalize(batch_id, remote).await?;
+} else {
+    supervisor.poll_until_terminal(batch_id).await?;
+}
+```
 
-For import history, do not build `Vec<BatchDetail>` for a list page. Query aggregate summaries first and call `batch(id)` only for the selected row.
-
-For bulk deletion, do not launch `delete_order_inner` futures concurrently or return the first item error as the command error. Validate the request once, deduplicate IDs in first-seen order, await the compensated single-order operation for each ID, and convert each outcome into `DeleteOrderResult`.
+Persist each external checkpoint before advancing local state, use a per-process batch poll guard, and make finalization idempotent. This is what makes restart recovery and cancellation release correct.

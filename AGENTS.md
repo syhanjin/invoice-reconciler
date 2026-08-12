@@ -42,12 +42,18 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - Invoice OCR uses Tencent Cloud `RecognizeGeneralInvoice` through the dedicated
   invoice queue. Preserve local preflight/confirmation, the global 5 QPS limit,
   durable raw-response auditing, and the separate `invoice-task-updated` event.
+- Order OCR uses one durable import pool. Ollama and generic OpenAI-compatible
+  providers consume it through the dynamic realtime queue; Aliyun Bailian uses
+  manually submitted, concurrently supervised File/Batch jobs with persisted
+  input/remote IDs. Preserve restart recovery, idempotent result reconciliation,
+  immutable completion logs, and terminal cancel reconciliation that releases
+  remaining task/image locks without requiring another restart.
 - Order/invoice matching computes ephemeral candidates and persists only explicit
   confirmations. Preserve exact-fen/CNY rules, missing-date comparison semantics,
   global order uniqueness, atomic batch confirmation, and matched edit/delete guards.
-- Deleting an imported order must preserve its import task as immutable history,
-  while removing the managed screenshot and clearing that task's image path to
-  release the hash for reimport. Deleting an invoice records a source-hash plus
+- Deleting an imported order must preserve its immutable completion log while
+  removing the order-owned managed screenshot to release the hash for reimport.
+  Deleting an invoice records a source-hash plus
   subtype/number recovery marker so the same source can be reimported to restore
   only deleted invoices; source-less audit tasks must not permanently claim a
   file hash.

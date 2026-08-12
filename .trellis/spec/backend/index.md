@@ -4,7 +4,7 @@
 
 ## Overview
 
-The backend is a Tauri v2 Rust process. It owns SQLite through SeaORM, managed screenshot storage, the bounded Ollama queue, validation, and all durable state transitions. Read the import contract before changing any cross-layer command or OCR behavior.
+The backend is a Tauri v2 Rust process. It owns SQLite through SeaORM, managed screenshot storage, the dynamic realtime recognition queue, Aliyun remote batch supervision, validation, and all durable state transitions. Read the import contract before changing any cross-layer command, provider, OCR, or recovery behavior.
 
 ## Guidelines Index
 

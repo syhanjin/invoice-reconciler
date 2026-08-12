@@ -4,130 +4,129 @@
 
 ### 1. Scope / Trigger
 
-This contract applies when changing the React shell, orders table, import progress, order editor, settings, Tauri invoke wrappers, or the `import-task-updated` listener. The first screen is the operational orders workspace, not a landing page.
+This contract applies when changing the React shell, unified order import pool, immutable completion log, orders table, order editor, recognition settings, Tauri invoke wrappers, or `order-import-task-updated` listener. The first screen is the operational orders workspace, not a landing page. Invoice import remains a separate batch-based tab and event domain.
 
 ### 2. Signatures
 
-All backend access lives in `src/lib/api.ts`. Components call these typed wrappers rather than importing `invoke` or `listen` directly:
+All backend access lives in `src/lib/api.ts`. Components call typed wrappers rather than importing `invoke` or `listen` directly:
 
 ```ts
 api.bootstrap(): Promise<BootstrapState>
-api.checkOllama(settings: AppSettings): Promise<OllamaStatus>
-api.createImportBatch(imagePaths: string[]): Promise<BatchDetail>
-api.listImportBatches(query: ImportBatchesQuery): Promise<ImportBatchesPage>
-api.getBatch(id: string): Promise<BatchDetail>
+api.checkOrderRecognizer(request: SaveSettingsRequest): Promise<RecognizerStatus>
+api.importOrderImages(imagePaths: string[]): Promise<ImportOrderImagesResult>
+api.getOrderImportPool(): Promise<OrderImportPool>
+api.listOrderImportLogs(query): Promise<OrderImportLogsPage>
+api.retryOrderImportTask(id: string): Promise<boolean>
+api.retryFailedOrderImportTasks(): Promise<number>
+api.deleteOrderImportTask(id: string): Promise<void>
+api.submitOrderRecognitionBatch(): Promise<string>
+api.cancelOrderRecognitionBatch(id: string): Promise<void>
 api.listOrders(query: OrdersQuery): Promise<OrdersPage>
 api.getOrder(id: string): Promise<OrderDetail>
 api.updateOrder(request: UpdateOrderRequest): Promise<OrderDetail>
 api.deleteOrder(id: string): Promise<void>
 api.deleteOrders(ids: string[]): Promise<DeleteOrdersResult>
-api.listenForTaskUpdates(handler): Promise<UnlistenFn>
 ```
 
-Rust serializes public structs with `camelCase`. Tauri command names remain snake case.
+Rust serializes public structs with `camelCase`; Tauri command names remain snake case. `BootstrapState` contains settings and the latest invoice batch only. Do not restore `latestBatch`, order `BatchDetail`, order batch summaries, or order batch selection state.
 
 ### 3. Contracts
 
-- `settingsAtom` and `activeBatchAtom` cache current projections; SQLite remains authoritative.
-- A task event carries the entire updated `BatchDetail`. Replace the active batch snapshot when its ID matches rather than incrementing counters locally.
-- Import tasks live in a separate first-level workspace. The order and invoice tabs page persisted batch summaries with `20`, `50`, or `100` rows and load full tasks only after selecting a batch. Each tab owns its selected batch and reacts only to events from the matching domain.
-- A successful order screenshot import navigates to the import-task workspace and selects the new batch. Canceling the file dialog or rejecting batch creation preserves the orders workspace.
-- A live event may refresh the matching selected detail and summary, but an event for another batch must not replace or reload the detail being inspected.
-- Refresh the orders query after task success and after an order mutation so persisted values remain authoritative.
+#### Unified task workspace
+
+- A successful file selection calls `importOrderImages` directly and navigates to the import-task workspace. There is no user-visible order import batch creation or batch picker.
+- The order tab uses a two-column desktop layout: the left side is the mutable pool, the right side is immutable completion history. Narrow layouts expose the same two panes as nested tabs with independent scroll areas.
+- The left pane shows counts and rows for `pending`, `processing`, `batch_submitting`, `batch_locked`, and `failed`. Failed rows expose retry; only pending/failed rows expose delete, with destructive confirmation.
+- When `settings.orderRecognitionProvider === "aliyun_batch"`, expose manual “submit batch” for current pending tasks. Show every active batch concurrently with its short number, task count, model, status, and cancel control. New imports must remain usable while batches run.
+- Realtime providers do not expose manual submit; newly imported pending tasks are consumed by the backend queue automatically.
+- The right pane pages `20`, `50`, or `100` immutable `OrderImportLog` rows. It displays provider/model, optional short batch number/warning, and completion time. It does not offer edit/delete actions because order mutations never rewrite logs.
+
+`order-import-task-updated` is an invalidation event. Increment the order refresh token and reload pool/log projections; do not increment local counters, infer task transitions, or reuse `invoice-task-updated`. Successful recognition refreshes the server-paged orders query.
+
+#### Recognition settings
+
+Settings use a provider Select with values `ollama`, `openai`, and `aliyun_batch`, then render only the relevant base URL/model/key/thinking controls. API key fields preserve an existing key when blank, support explicit clearing, and show only configured/masked state returned by the backend. “Check service” validates the currently selected provider through `checkOrderRecognizer`.
+
+Ollama and OpenAI-compatible providers share the realtime concurrency setting. Aliyun is manual batch mode and may enable thinking. Changing the selected provider does not hide active Aliyun batches from the task pool.
+
+#### Orders table and mutations
+
 - The orders query is server-paged and contains page, page size, search, duplicate-only filter, sort field, and sort direction.
-- The orders table controls `page`, `pageSize`, `search`, `duplicateOnly`, `sortBy`, and `sortDirection` in `OrdersPage`; TanStack Table renders the current server page and must not apply client-side sorting or pagination.
-- Search, duplicate-only, sort, and page-size changes reset to page `1`. If a response makes the current page invalid, request the last valid page. Empty results remain on page `1` of `1`.
-- Persist only table presentation preferences under a versioned local-storage key: page size, sort, column visibility, constrained column sizing, and comfortable/compact density. Normalize unknown columns and invalid values on read. Never persist search, duplicate-only, current page, or the open order.
-- The order-number column is always visible. Optional columns may be hidden, table preferences may be reset together, and resize/header controls must not activate a data row.
-- Order selection is controlled by `OrdersPage` and scoped to `OrdersPage.items`, the currently loaded server page. The always-visible selection column is not hideable or resizable; row checkboxes must stop row activation, and the header checkbox must represent checked, unchecked, and indeterminate current-page states.
-- Clear selection before page, page-size, committed-search, duplicate-filter, or sort changes. Preserve it across presentation-only preference changes, and prune IDs that are absent after a same-query refresh.
-- Bulk deletion requires one confirmation and one `api.deleteOrders` call. Disable repeat confirmation while it runs. Remove successful IDs from selection, preserve failed IDs that remain on the current page, refresh from SQLite, and identify failures by visible order number or ID.
-- Order forms use React Hook Form plus Zod. Convert yuan display input to integer fen before invoking the backend.
-- Raw OCR JSON is read-only. Product order in the submitted array is significant.
-- Use `convertFileSrc` only for the absolute path returned by `get_order`; do not construct filesystem or asset URLs in components.
-- Keep controls based on shadcn/ui and Lucide icons. Do not add custom SVG controls or a second component framework.
+- TanStack Table renders the current server page and must not apply client-side sorting or pagination.
+- Search, duplicate-only, sort, and page-size changes reset to page `1`. If a response makes the current page invalid, request the last valid page.
+- Persist only versioned table presentation preferences: page size, sort, column visibility/sizing, and density. Do not persist search, duplicate-only, page, or open order.
+- Row selection is controlled by the orders page and scoped to the loaded server page. Bulk deletion uses one confirmation and one `deleteOrders` call, preserving failed selections and refreshing SQLite projections.
+- Order forms use React Hook Form and Zod; convert yuan input to integer fen. Raw OCR JSON is read-only and product array order is significant.
+- Use `convertFileSrc` only for the absolute path returned by `getOrder`.
+- Use existing shadcn/ui and Lucide controls; do not add native selects, custom SVG controls, or a second component framework.
 
 ### 4. Validation & Error Matrix
 
 | Condition | Frontend behavior |
 | --- | --- |
-| No selected image | Keep import disabled; do not invoke |
-| Native dialog canceled | Preserve current batch and table state |
-| Backend invoke rejects | Convert the value through `errorMessage` and show a Sonner error toast |
-| Orders reload rejects | Preserve the last successful page, end the loading state, and show the Sonner error |
-| Stored table preference is malformed or obsolete | Drop unknown fields and normalize page size, sort, density, visibility, and column widths to supported values |
-| Requested orders page exceeds the new last page | Change to the last valid page and issue one corrected server request |
-| Settings URL lacks HTTP(S), model is empty, or concurrency outside `1..=8` | Block submit with form validation |
-| Ollama reachable but model missing | Show the backend pull guidance; never trigger installation or pull |
-| Empty amount/date/order number/shop | Submit `null`, not an empty-string sentinel |
-| Live event for another batch | Do not replace the visible active batch |
-| Import-history or batch-detail request fails | Clear stale content, show a retryable page state, and display the Sonner error |
-| Import-history page becomes empty | Select no detail and show the order-task empty state |
-| Component unmount | Call the `UnlistenFn` to remove the Tauri event listener |
-| Delete confirmation declined | Perform no command and preserve the open record |
-| Bulk delete request is empty or exceeds `100` IDs | Backend rejects with `invalid_input`; the current-page UI must never produce more than `100` IDs |
-| Bulk delete returns mixed per-order results | Report the success count, identify failures, retain failed current-page rows as selected, and reload the server query |
-| Bulk delete invoke rejects before a result | Preserve all selections and the open confirmation so the user can retry |
-| Same-query refresh removes a selected row | Prune its ID; close bulk confirmation if no selected IDs remain |
+| Native image dialog canceled | Preserve workspace state; do not invoke import |
+| Import returns skipped duplicates | Report imported/skipped totals and navigate only when work was added |
+| Backend invoke rejects | Convert through `errorMessage` and show Sonner error |
+| Pool/log reload rejects | End loading, retain the last useful projection where possible, and show error |
+| No pending tasks in Aliyun mode | Disable manual submit |
+| Provider is realtime | Hide manual submit; keep active remote batch controls visible if any |
+| Batch status is canceling | Disable repeated cancel while continuing to display the batch |
+| Task is processing or batch locked | Expose neither retry nor individual delete |
+| Delete confirmation declined | Perform no command and preserve row/image |
+| Completion log is empty | Show an empty log state; page remains `1 / 1` |
+| Log page becomes out of range | Request the new last valid page once |
+| Settings URL/model/concurrency invalid | Block save/check with form validation |
+| Required Aliyun key is absent | Show backend error; never expose stored plaintext key |
+| Event arrives | Reload authoritative pool/log/order projections; do not derive counts from event payload |
+| Component unmount | Call every Tauri `UnlistenFn` |
+| Bulk order delete returns mixed results | Report successes/failures, retain failed visible selections, and reload orders |
 
 ### 5. Good/Base/Bad Cases
 
-- Good: a task event replaces the matching batch snapshot, the task center updates its selected detail and summary, and successful OCR causes the server-paged order table to refresh.
-- Good: sorting a supported header resets to page one, requests the backend sort field, and retains column layout and density preferences after remount.
-- Good: selecting two current-page rows and deleting them sends one typed request; a one-success/one-failure result clears only the successful selection and refreshes persisted rows.
-- Base: a small window switches task history/detail to stacked sections while keeping their independent scroll areas and actions accessible.
-- Bad: issuing SQL in React, client-sorting only the visible server page, persisting a transient search/page selection, retaining selection across a server-query change, invoking `delete_order` concurrently from React, loading every historical task into one response, replacing selected history with an unrelated live event, duplicating backend queue counters in component state, importing Tauri `invoke` throughout the component tree, or displaying a managed path directly as an image URL.
+- Good: while `B000001` is running, the user imports more screenshots, sees them pending, submits `B000002`, and can cancel either batch independently.
+- Good: after restart, a still-running batch remains visible; cancel stays disabled only during its cancel request/state, and tasks disappear or return failed as backend events invalidate the pool.
+- Good: a completion event reloads the right log and orders table while leaving the log row immutable after later order edits/deletion.
+- Base: on a narrow window the user switches between “任务池” and “导入完成” tabs without losing pagination or actions.
+- Bad: rendering old order batch history/detail, disabling all imports while a batch runs, optimistic local unlock on cancel click, showing raw provider keys, using invoice events for orders, or calling Tauri `invoke` directly from components violates this contract.
 
 ### 6. Tests Required
 
-- Unit tests for currency/date presentation and yuan-to-fen conversion boundaries.
-- Jotai store test asserting that an event for the active batch replaces the stored snapshot.
-- API contract test or TypeScript build asserting camel-case invoke argument names.
-- Component tests for settings validation and nullable order edit fields when those flows change.
-- Component tests for all order sort-field mappings and sort cycles; search/filter/page-size reset; first/previous/next/last and validated page jumps; invalid-page correction; column visibility/resizing; density; reset; preference normalization; and reload failure preserving successful rows.
-- Component tests for row selection without detail activation; header checked/unchecked/indeterminate states; clearing on server-query changes; confirmation cancel; and mixed bulk-delete results retaining only failed selections.
-- Component tests for order/invoice task-history pagination, tab-specific selection and events, detail loading/error retry, and post-import navigation when those flows change.
-- Desktop smoke tests at the default and minimum window sizes for table, task-center history/detail scrolling, image preview, edit/delete sheet, and settings.
-- Always run `bun run build`, `bun run lint`, and `bun run test` before commit.
+- API/store tests: command names and camel-case arguments, absence of old order batch state, and order event invalidation behavior.
+- Orders-page component tests: file import totals, duplicate reporting, task-center navigation, cancel behavior, and server-query refresh.
+- Import-task component tests: desktop pool/log data, mobile tabs, all pool statuses, active concurrent batches, manual submit only in Aliyun mode, cancel, retry-all/single, delete confirmation, and log pagination.
+- Settings component tests: provider selection, conditional fields, masked/preserved/cleared keys, Aliyun thinking, validation, and provider-aware service check.
+- Existing order-table tests: every sort mapping/cycle, search/filter/page reset, invalid-page correction, presentation preferences, selection, and mixed bulk-delete results.
+- Desktop smoke tests at default and minimum window sizes for dual-pane scrolling, responsive tabs, active batch controls, order preview/editor, and settings.
+- Always run `bun run lint`, `bun run test`, and `bun run build` before commit.
 
 ### 7. Wrong vs Correct
 
 #### Wrong
 
 ```ts
-await invoke("update_order", {
-  id,
-  paid_amount: amount,
-})
+// Remote cancellation is asynchronous; this projection can be false.
+setPool((pool) => ({ ...pool, tasks: pool.tasks.filter((task) => task.batchId !== id) }))
+await api.cancelOrderRecognitionBatch(id)
 ```
 
-This bypasses the shared boundary and does not match the Rust request wrapper.
+```ts
+// Reintroduces order-side batch selection and a stale snapshot.
+const [activeBatch, setActiveBatch] = useAtom(activeBatchAtom)
+```
 
 #### Correct
 
 ```ts
-await api.updateOrder({
-  id,
-  paidAmountFen: yuanToFen(amount),
-  productNames,
-  externalOrderNumber: emptyToNull(orderNumber),
-  orderedAt: emptyToNull(orderedAt),
-  shopName: emptyToNull(shopName),
-})
+await api.cancelOrderRecognitionBatch(id)
+// The order-import event invalidates all affected projections.
+setOrderRefreshToken((value) => value + 1)
 ```
-
-Keep invoke payload construction in `api.ts` and pass the entire typed `request` object expected by the command.
-
-Do not use a `BatchDetail[]` history response. Use `ImportBatchSummary[]` for the page and `api.getBatch(id)` for the selected detail.
-
-For orders, do not pass the current server page through a TanStack sorted row model. Update the controlled `OrdersQuery` and reload through `api.listOrders` instead.
-
-Do not fan out single-order commands from React:
 
 ```ts
-// Wrong: concurrent side effects and no structured partial result.
-await Promise.all(selectedIds.map((id) => api.deleteOrder(id)))
-
-// Correct: one typed command returns a result for every unique ID.
-const { results } = await api.deleteOrders(selectedIds)
+const [pool, logs] = await Promise.all([
+  api.getOrderImportPool(),
+  api.listOrderImportLogs({ page, pageSize }),
+])
 ```
+
+The backend owns queue, remote, and cancellation state. The frontend issues typed commands and reloads durable projections rather than inventing transitions.
