@@ -1,0 +1,13 @@
+# Frontend Development Guidelines
+
+> Executable conventions for the React application embedded in Tauri.
+
+## Stack
+
+Use React with TypeScript, Bun, Tailwind CSS v4, shadcn/ui, Jotai, TanStack Table, React Hook Form, Zod, Sonner, and Lucide React. Install shadcn components through `bunx shadcn@latest add <component>` and prefer existing dependencies over hand-written control primitives.
+
+## Guidelines Index
+
+| Guide | Description | Status |
+| --- | --- | --- |
+| [Desktop Application Contract](./application-contract.md) | Tauri API, state ownership, events, validation, and UI tests | Active |

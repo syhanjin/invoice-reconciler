@@ -1,0 +1,95 @@
+import { useAtom, useAtomValue, useSetAtom } from "jotai"
+import { lazy, Suspense, useEffect, useState } from "react"
+import { toast } from "sonner"
+
+import { AppShell } from "@/components/app-shell"
+import { OrdersPage } from "@/components/orders-page"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Toaster } from "@/components/ui/sonner"
+import { TooltipProvider } from "@/components/ui/tooltip"
+import { api, errorMessage } from "@/lib/api"
+import {
+  activeBatchAtom,
+  mergeBatchAtom,
+  mergeBatchEventAtom,
+  navigationAtom,
+  ordersRefreshAtom,
+  settingsAtom,
+} from "@/lib/store"
+
+const SettingsPage = lazy(() => import("@/components/settings-page"))
+
+function Initializing() {
+  return (
+    <div className="flex min-h-screen bg-zinc-100">
+      <div className="w-56 border-r bg-white p-4">
+        <Skeleton className="h-10 w-36" />
+        <Skeleton className="mt-8 h-9 w-full" />
+        <Skeleton className="mt-2 h-9 w-full" />
+      </div>
+      <div className="flex-1 space-y-4 p-8">
+        <Skeleton className="h-12 w-56" />
+        <Skeleton className="h-[680px] w-full" />
+      </div>
+    </div>
+  )
+}
+
+export function App() {
+  const [view, setView] = useAtom(navigationAtom)
+  const [settings, setSettings] = useAtom(settingsAtom)
+  const [activeBatch, setActiveBatch] = useAtom(activeBatchAtom)
+  const mergeBatch = useSetAtom(mergeBatchAtom)
+  const mergeBatchEvent = useSetAtom(mergeBatchEventAtom)
+  const refreshToken = useAtomValue(ordersRefreshAtom)
+  const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    api
+      .bootstrap()
+      .then((state) => {
+        if (disposed) return
+        setSettings(state.settings)
+        setActiveBatch(state.latestBatch)
+        setReady(true)
+      })
+      .catch((error) => {
+        toast.error(errorMessage(error), { duration: 8000 })
+        setReady(true)
+      })
+    api.listenForTaskUpdates((event) => mergeBatchEvent(event.batch)).then((dispose) => {
+      if (disposed) dispose()
+      else unlisten = dispose
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [mergeBatchEvent, setActiveBatch, setSettings])
+
+  return (
+    <TooltipProvider>
+      {!ready ? (
+        <Initializing />
+      ) : (
+        <AppShell view={view} onViewChange={setView}>
+          {view === "orders" && (
+            <OrdersPage
+              activeBatch={activeBatch}
+              onBatchChange={mergeBatch}
+              refreshToken={refreshToken}
+            />
+          )}
+          {view === "settings" && settings && (
+            <Suspense fallback={<Initializing />}>
+              <SettingsPage settings={settings} onSettingsChange={setSettings} />
+            </Suspense>
+          )}
+        </AppShell>
+      )}
+      <Toaster richColors position="bottom-right" />
+    </TooltipProvider>
+  )
+}
