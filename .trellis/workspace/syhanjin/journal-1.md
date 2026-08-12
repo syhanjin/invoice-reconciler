@@ -114,3 +114,36 @@ Added a first-level import task workspace with persisted batch pagination, on-de
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: Complete order table controls
+
+**Date**: 2026-08-12
+**Task**: Complete order table controls
+**Branch**: `main`
+
+### Summary
+
+Added server-controlled order sorting and pagination, persisted table display preferences, column resizing and visibility controls, responsive density and reset actions, plus frontend and backend regression coverage.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4d78ba6` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
