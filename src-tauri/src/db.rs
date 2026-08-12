@@ -576,11 +576,20 @@ impl Database {
         {
             return Err(AppError::MatchingLocked(format!("订单 {id}")));
         }
-        let result = import_task::Entity::delete_by_id(id)
+        let result = order::Entity::delete_by_id(id).exec(&transaction).await?;
+        if result.rows_affected != 1 {
+            return Err(AppError::NotFound(format!("订单 {id}")));
+        }
+        let result = import_task::Entity::update_many()
+            .col_expr(
+                import_task::Column::ManagedImagePath,
+                Expr::value(Option::<String>::None),
+            )
+            .filter(import_task::Column::Id.eq(id))
             .exec(&transaction)
             .await?;
         if result.rows_affected != 1 {
-            return Err(AppError::NotFound(format!("订单 {id}")));
+            return Err(AppError::NotFound(format!("导入记录 {id}")));
         }
         refresh_duplicate_group(&transaction, old_number.as_deref()).await?;
         transaction.commit().await?;

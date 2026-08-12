@@ -45,9 +45,9 @@ Durable tables are `app_settings`, `import_batches`, `import_tasks`, `orders`, a
 
 `DeleteOrdersRequest` contains `ids: string[]` with `1..=100` entries. Process unique IDs sequentially in first-seen order. `DeleteOrdersResult` contains `results: DeleteOrderResult[]`; every unique requested ID produces `{ id, deleted, errorCode, errorMessage }`. Success uses `deleted: true` with null error fields. An item failure uses `deleted: false` with the stable `AppError` code and complete display message, while later IDs continue.
 
-Both single and bulk deletion use the same per-order operation: resolve the managed image under application data, rename it into the temporary trash directory, transactionally delete the task/order/item records and recalculate the old duplicate-number group, then remove the trashed image. A database failure restores the image before returning that item's failure.
+Both single and bulk deletion use the same per-order operation: resolve the managed image under application data, rename it into the temporary trash directory, transactionally delete the order and its cascading item records, clear the preserved import task's `managed_image_path`, and recalculate the old duplicate-number group, then remove the trashed image. A database failure rolls back both database mutations and restores the image before returning that item's failure.
 
-Deleting the task also releases the managed-image SHA-256 claim. A later import of the same screenshot is a new import and must not be skipped because of the deleted task. Source-less skipped/audit tasks remain in history but do not claim a hash.
+Order deletion must never delete or rewrite the import task's audit fields, status, or batch membership. The preserved succeeded task remains visible in import history and continues to contribute to the original batch counts. Clearing only its managed-image path releases the SHA-256 claim, so a later import of the same screenshot is a new import and must not be skipped. Source-less skipped/audit tasks likewise remain in history but do not claim a hash.
 
 The Ollama `/api/chat` request uses `stream: false`, `format` containing the JSON Schema, `options.temperature: 0`, and `options.num_ctx: 16384`. Its recognized JSON shape is:
 
@@ -81,7 +81,7 @@ Queue concurrency is captured from settings when a run begins. The number of sen
 | Cancel queued task | Mark `canceled`; worker must recheck durable status before send |
 | Cancel processing task | Do not force-abort the HTTP request |
 | Delete database failure | Restore the image from the temporary trash path |
-| Reimport after successful delete | Treat the image as new; do not skip it because of the deleted task |
+| Reimport after successful delete | Preserve the old task in history, but treat the image as new and do not skip it because of that task |
 | Bulk delete has zero or more than `100` requested IDs | Reject the whole command with `invalid_input`; perform no deletion |
 | Bulk delete repeats an ID | Process it once and return one result at its first position |
 | One bulk-delete item is missing or fails | Return that item's stable error code/message and continue later unique IDs |
@@ -103,8 +103,8 @@ Queue concurrency is captured from settings when a run begins. The number of sen
 - Database integration test: same-number groups are flagged; editing between groups recalculates both groups.
 - Import-history database test: assert stable pagination, aggregate counts for every task status, empty results, and page-size clamping.
 - Orders-query database test: assert every supported sort field in both directions, `id DESC` tie-breaking, and search/duplicate filtering combined with pagination.
-- Bulk-delete command tests: assert empty/oversize validation, duplicate-ID normalization, partial results, successful image removal, duplicate-group recalculation, and image restoration after an injected database failure.
-- Delete/reimport database test: assert successful deletion releases the managed-image SHA-256 claim while a failed deletion preserves it.
+- Bulk-delete command tests: assert empty/oversize validation, duplicate-ID normalization, partial results, successful image removal, preserved import task and batch counts, duplicate-group recalculation, and image restoration after an injected database failure.
+- Delete/reimport database test: assert successful deletion preserves the import task while clearing its managed path and releasing the SHA-256 claim; a failed deletion must preserve the order, task path, image, and claim.
 - File unit test: extension and magic-byte validation agree, and the UUID basename is retained.
 - OCR mock-server test: assert the exact structured request fields and parse a valid response.
 - Queue async test: measure peak in-flight requests and assert `peak <= captured_concurrency`.

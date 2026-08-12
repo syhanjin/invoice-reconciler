@@ -38,6 +38,7 @@ Money is stored as integer fen. Date/time values are normalized strings in `YYYY
 - Raw SQL through `Statement` is allowed for aggregate/search queries that SeaORM cannot express clearly, but bind every user-provided value; never interpolate it into SQL.
 - Server-paged sort queries must whitelist SQL column and direction fragments from typed enums and append a deterministic unique-key tie-breaker; never interpolate client strings or rely on non-unique primary ordering alone.
 - Wrap order edits, product replacement, and duplicate-flag recalculation in one transaction.
+- Treat `import_tasks` as durable audit history. Business deletion of an order deletes the `orders` row and cascading items but preserves its task; clear only `managed_image_path` in the same transaction to release the source hash.
 - Write invoice recovery markers in the same transaction as invoice deletion. Claim all unclaimed markers for one source hash in the same transaction that creates its recovery task; consume matched markers and release unmatched markers in the persistence transaction.
 - External order numbers may repeat. After inserting, editing, or deleting an order, recalculate `possible_duplicate` for every affected non-empty order-number group.
 - Treat SQLite as the source of truth. In-memory queue and Jotai state are projections, not durable state.
@@ -58,7 +59,7 @@ Add a new `MigrationTrait` implementation and append it to `Migrator::migrations
 Database transactions cannot include filesystem changes. Use explicit compensation:
 
 - Import: copy the UUID-named image, then insert task data; on any creation failure, delete the batch and copied files.
-- Delete: move the managed image to a temporary trash path, delete database rows transactionally, then remove the trash file. Restore the image if the database operation fails.
+- Order delete: move the managed image to a temporary trash path, transactionally delete the order and clear the preserved task's managed path, then remove the trash file. Restore the image if either database mutation fails.
 - Bulk delete: apply the same compensated single-order operation sequentially per unique ID. Return per-ID outcomes so one failure neither hides prior successes nor prevents later IDs from being attempted.
 - Resolve all managed paths under the configured application-data directory before reading, deleting, or exposing them.
 
@@ -67,6 +68,7 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Do not use an external order number as a primary key or unique key.
 - Do not store decimal currency in floating-point columns.
 - Do not delete the managed image before arranging a recoverable compensation path.
+- Do not delete an import task as a side effect of deleting its business order.
 - Do not modify duplicate flags outside the same transaction as the associated order change.
 - Do not use ad hoc schema creation outside `sea-orm-migration`.
 - Do not run restart-recovery SQL for new tables before `Migrator::up`.
@@ -81,6 +83,6 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Unique SHA-256 behavior for managed images while skipped tasks remain recordable.
 - Invoice source-hash behavior for source-less audit tasks, partial-delete recovery, no-match release, and hash re-blocking after recovery completes.
 - Transaction rollback for failed order/item mutations.
-- Bulk-delete partial-result coverage, duplicate-group recalculation after successful items, and a fault-injection test proving the managed image is restored when database deletion fails.
+- Bulk-delete partial-result coverage, preserved import-task/batch history, duplicate-group recalculation after successful items, and a fault-injection test proving the order, task path, hash claim, and managed image are restored when database deletion fails.
 - Startup conversion of `queued` and `processing` tasks to `interrupted`.
 - Matching fresh-file/m0003-upgrade/interrupted-migration coverage, unique order occupancy, cascade cleanup, and atomic batch rollback.

@@ -525,6 +525,7 @@ mod tests {
         let (_directory, state) = test_state().await;
         let first_image = insert_order(&state, "order-a", "duplicate").await;
         let second_image = insert_order(&state, "order-b", "duplicate").await;
+        let batch_before_delete = state.database.batch("delete-batch").await.unwrap();
 
         let result = delete_orders_inner(
             &state,
@@ -541,6 +542,39 @@ mod tests {
         assert!(!first_image.exists());
         assert!(state.database.order_detail("order-a").await.is_err());
         assert!(!state.database.hash_exists("order-a").await.unwrap());
+        let deleted_order_task = state.database.task("order-a").await.unwrap();
+        assert_eq!(deleted_order_task.batch_id, "delete-batch");
+        assert_eq!(deleted_order_task.original_file_name, "order.png");
+        assert_eq!(deleted_order_task.status, "succeeded");
+        assert_eq!(deleted_order_task.image_sha256, "order-a");
+        assert_eq!(deleted_order_task.retry_count, 0);
+        assert!(deleted_order_task.completed_at.is_some());
+        assert!(deleted_order_task.managed_image_path.is_none());
+        let batch = state.database.batch("delete-batch").await.unwrap();
+        assert_eq!(batch.status, batch_before_delete.status);
+        assert_eq!(batch.completed_at, batch_before_delete.completed_at);
+        assert_eq!(batch.counts.total, 2);
+        assert_eq!(batch.counts.succeeded, 2);
+        assert_eq!(batch.tasks.len(), 2);
+        state
+            .database
+            .create_batch("reimport-batch", Platform::Taobao)
+            .await
+            .unwrap();
+        state
+            .database
+            .create_task(
+                "reimported-order-a",
+                "reimport-batch",
+                "order.png",
+                Some("images/reimported-order-a.png"),
+                "order-a",
+                "queued",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(state.database.hash_exists("order-a").await.unwrap());
         assert!(!result.results[1].deleted);
         assert_eq!(result.results[1].id, "missing");
         assert_eq!(result.results[1].error_code.as_deref(), Some("not_found"));
@@ -562,8 +596,9 @@ mod tests {
         state
             .database
             .execute_test_statement(
-                "CREATE TRIGGER fail_order_delete BEFORE DELETE ON import_tasks \
-                 WHEN OLD.id = 'order-a' BEGIN SELECT RAISE(FAIL, 'forced delete failure'); END",
+                "CREATE TRIGGER fail_order_delete BEFORE UPDATE OF managed_image_path ON import_tasks \
+                 WHEN OLD.id = 'order-a' AND NEW.managed_image_path IS NULL \
+                 BEGIN SELECT RAISE(FAIL, 'forced delete failure'); END",
             )
             .await
             .unwrap();
@@ -586,6 +621,15 @@ mod tests {
         assert!(image.exists());
         assert!(state.database.order_detail("order-a").await.is_ok());
         assert!(state.database.hash_exists("order-a").await.unwrap());
+        assert!(
+            state
+                .database
+                .task("order-a")
+                .await
+                .unwrap()
+                .managed_image_path
+                .is_some()
+        );
     }
 
     #[tokio::test]
