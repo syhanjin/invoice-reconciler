@@ -4,33 +4,22 @@ import { cleanup, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import type { BatchDetail } from "@/lib/types"
-
-const batch: BatchDetail = {
-  id: "created-batch",
-  platform: "taobao",
-  status: "queued",
-  createdAt: "2026-08-12T08:00:00Z",
-  completedAt: null,
-  counts: {
-    total: 1,
-    queued: 1,
-    processing: 0,
-    succeeded: 0,
-    failed: 0,
-    canceled: 0,
-    skipped: 0,
-    interrupted: 0,
-  },
-  tasks: [],
-}
-
 vi.mock("@/lib/api", () => ({
   api: {
     bootstrap: vi.fn().mockResolvedValue({
       settings: {
+        orderRecognitionProvider: "ollama",
         ollamaBaseUrl: "http://127.0.0.1:11434",
         ollamaModel: "model",
+        openaiBaseUrl: "https://example.com/v1",
+        openaiModel: "vision-model",
+        openaiApiKeyMasked: null,
+        openaiApiKeyConfigured: false,
+        aliyunBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        aliyunModel: "qwen-vl-max",
+        aliyunApiKeyMasked: null,
+        aliyunApiKeyConfigured: false,
+        aliyunEnableThinking: false,
         maxConcurrency: 3,
         tencentSecretIdMasked: null,
         tencentCredentialsConfigured: false,
@@ -40,10 +29,9 @@ vi.mock("@/lib/api", () => ({
         settingsPath: "/tmp/settings.toml",
         permissionWarning: null,
       },
-      latestBatch: null,
       latestInvoiceBatch: null,
     }),
-    listenForTaskUpdates: vi.fn().mockResolvedValue(() => undefined),
+    listenForOrderImportUpdates: vi.fn().mockResolvedValue(() => undefined),
     listenForInvoiceTaskUpdates: vi.fn().mockResolvedValue(() => undefined),
   },
   errorMessage: () => "操作失败",
@@ -54,15 +42,13 @@ vi.mock("@/components/app-shell", () => ({
 }))
 
 vi.mock("@/components/orders-page", () => ({
-  OrdersPage: ({ onBatchCreated }: { onBatchCreated: (value: BatchDetail) => void }) => (
-    <button type="button" onClick={() => onBatchCreated(batch)}>创建导入批次</button>
+  OrdersPage: ({ onImagesImported }: { onImagesImported: () => void }) => (
+    <button type="button" onClick={onImagesImported}>导入订单图片</button>
   ),
 }))
 
 vi.mock("@/components/import-tasks-page", () => ({
-  default: ({ selectedBatchId }: { selectedBatchId: string | null }) => (
-    <p>任务中心：{selectedBatchId}</p>
-  ),
+  default: () => <p>统一订单任务池</p>,
 }))
 
 import { App } from "./App"
@@ -70,12 +56,12 @@ import { App } from "./App"
 describe("App import navigation", () => {
   afterEach(cleanup)
 
-  it("opens the task center with the newly created batch selected", async () => {
+  it("opens the unified task pool after importing images", async () => {
     const user = userEvent.setup()
     render(<Provider store={createStore()}><App /></Provider>)
 
-    await user.click(await screen.findByRole("button", { name: "创建导入批次" }))
+    await user.click(await screen.findByRole("button", { name: "导入订单图片" }))
 
-    expect(await screen.findByText("任务中心：created-batch")).toBeInTheDocument()
+    expect(await screen.findByText("统一订单任务池")).toBeInTheDocument()
   })
 })

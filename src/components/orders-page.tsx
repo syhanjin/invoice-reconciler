@@ -28,7 +28,6 @@ import {
 import { api, errorMessage } from "@/lib/api"
 import { orderTablePreferencesAtom } from "@/lib/store"
 import type {
-  BatchDetail,
   OrdersPage as OrdersPageData,
   OrderSortBy,
   SortDirection,
@@ -36,14 +35,14 @@ import type {
 import { cn } from "@/lib/utils"
 
 interface OrdersPageProps {
-  onBatchCreated: (batch: BatchDetail) => void
+  onImagesImported: () => void
   refreshToken: number
 }
 
 const emptyPage: OrdersPageData = { items: [], total: 0, page: 1, pageSize: 20 }
 const OrderSheet = lazy(() => import("@/components/order-sheet"))
 
-export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
+export function OrdersPage({ onImagesImported, refreshToken }: OrdersPageProps) {
   const [orders, setOrders] = useState<OrdersPageData>(emptyPage)
   const [preferences, setPreferences] = useAtom(orderTablePreferencesAtom)
   const [page, setPage] = useState(1)
@@ -132,16 +131,16 @@ export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
       if (!paths.length || importing) return
       setImporting(true)
       try {
-        const batch = await api.createImportBatch(paths)
-        onBatchCreated(batch)
-        toast.success(`已提交 ${paths.length} 张图片`)
+        const result = await api.importOrderImages(paths)
+        onImagesImported()
+        toast.success(`已加入 ${result.imported} 张图片${result.skipped ? `，跳过 ${result.skipped} 张重复图片` : ""}`)
       } catch (error) {
         toast.error(errorMessage(error), { duration: 6000 })
       } finally {
         setImporting(false)
       }
     },
-    [importing, onBatchCreated],
+    [importing, onImagesImported],
   )
 
   useEffect(() => {

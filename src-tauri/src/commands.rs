@@ -1,18 +1,19 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::{AppError, AppResult, CommandResult};
 use crate::files::{copy_managed_image, normalized_extension, resolve_managed_path, sha256_file};
 use crate::models::{
-    AppSettings, BatchDetail, BootstrapState, CreateBatchRequest, DeleteOrderResult,
-    DeleteOrdersRequest, DeleteOrdersResult, IdRequest, ImportBatchesPage, ImportBatchesQuery,
-    OllamaStatus, OrderDetail, OrdersPage, OrdersQuery, TaskUpdateEvent, UpdateOrderRequest,
-    UpdateSettingsRequest,
+    AppSettings, BootstrapState, DeleteOrderResult, DeleteOrdersRequest, DeleteOrdersResult,
+    IdRequest, ImportOrderImagesRequest, ImportOrderImagesResult, OrderDetail, OrderImportLogsPage,
+    OrderImportLogsQuery, OrderImportPool, OrderRecognitionProvider, OrdersPage, OrdersQuery,
+    RecognizerStatus, UpdateOrderRequest, UpdateSettingsRequest,
 };
+use crate::queue::emit_update;
 
 struct PreparedImage {
     source: PathBuf,
@@ -27,7 +28,6 @@ pub async fn bootstrap(state: State<'_, AppState>) -> CommandResult<BootstrapSta
     async {
         Ok::<BootstrapState, AppError>(BootstrapState {
             settings: state.settings.public().await,
-            latest_batch: state.database.latest_batch().await?,
             latest_invoice_batch: state.database.latest_invoice_batch().await?,
         })
     }
@@ -42,19 +42,76 @@ pub async fn get_settings(state: State<'_, AppState>) -> CommandResult<AppSettin
 
 #[tauri::command]
 pub async fn save_settings(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: UpdateSettingsRequest,
 ) -> CommandResult<AppSettings> {
-    state.settings.save(request).await.map_err(Into::into)
+    let settings = state
+        .settings
+        .save(request)
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    state
+        .order_batch
+        .resume(app)
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    if settings.order_recognition_provider.is_realtime() {
+        state.queue.wake();
+    }
+    Ok(settings)
 }
 
 #[tauri::command]
-pub async fn check_ollama(
+pub async fn check_order_recognizer(
     state: State<'_, AppState>,
     request: UpdateSettingsRequest,
-) -> CommandResult<OllamaStatus> {
+) -> CommandResult<RecognizerStatus> {
     async {
-        let settings = request.validate()?;
+        let public = request.clone().validate()?;
+        let current = state.settings.private().await;
+        let settings = crate::models::OrderRecognitionSettings {
+            provider: public.order_recognition_provider,
+            base_url: match public.order_recognition_provider {
+                OrderRecognitionProvider::Ollama => public.ollama_base_url,
+                OrderRecognitionProvider::Openai => public.openai_base_url,
+                OrderRecognitionProvider::AliyunBatch => public.aliyun_base_url,
+            },
+            model: match public.order_recognition_provider {
+                OrderRecognitionProvider::Ollama => public.ollama_model,
+                OrderRecognitionProvider::Openai => public.openai_model,
+                OrderRecognitionProvider::AliyunBatch => public.aliyun_model,
+            },
+            api_key: match public.order_recognition_provider {
+                OrderRecognitionProvider::Ollama => String::new(),
+                OrderRecognitionProvider::Openai => request
+                    .openai_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or(current.openai_api_key),
+                OrderRecognitionProvider::AliyunBatch => request
+                    .aliyun_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or(current.aliyun_api_key),
+            },
+            max_concurrency: public.max_concurrency,
+            enable_thinking: request.aliyun_enable_thinking,
+        };
+        if matches!(settings.provider, OrderRecognitionProvider::AliyunBatch) {
+            state.aliyun_batch.check(&settings).await?;
+            return Ok(RecognizerStatus {
+                provider: settings.provider,
+                reachable: true,
+                model_available: true,
+                version: None,
+                message: "阿里云百炼 Batch 服务可用".into(),
+            });
+        }
         state.ollama.check(&settings).await
     }
     .await
@@ -62,33 +119,28 @@ pub async fn check_ollama(
 }
 
 #[tauri::command]
-pub async fn create_import_batch(
+pub async fn import_order_images(
     app: AppHandle,
     state: State<'_, AppState>,
-    request: CreateBatchRequest,
-) -> CommandResult<BatchDetail> {
-    create_import_batch_inner(&app, &state, request)
+    request: ImportOrderImagesRequest,
+) -> CommandResult<ImportOrderImagesResult> {
+    import_order_images_inner(&app, &state, request)
         .await
         .map_err(Into::into)
 }
 
-async fn create_import_batch_inner(
+async fn import_order_images_inner(
     app: &AppHandle,
     state: &AppState,
-    request: CreateBatchRequest,
-) -> AppResult<BatchDetail> {
+    request: ImportOrderImagesRequest,
+) -> AppResult<ImportOrderImagesResult> {
     if request.image_paths.is_empty() {
         return Err(AppError::InvalidInput("请至少选择一张订单截图".into()));
     }
     if request.image_paths.len() > 500 {
-        return Err(AppError::InvalidInput("单个批次最多导入 500 张图片".into()));
+        return Err(AppError::InvalidInput("单次最多导入 500 张图片".into()));
     }
-
-    let settings = state.settings.private().await.ollama();
-    let check = state.ollama.check(&settings).await?;
-    if !check.model_available {
-        return Err(AppError::ModelMissing(settings.ollama_model.clone()));
-    }
+    let _platform = request.platform;
 
     let mut batch_hashes = HashSet::new();
     let mut prepared = Vec::with_capacity(request.image_paths.len());
@@ -112,34 +164,15 @@ async fn create_import_batch_inner(
         });
     }
 
-    let batch_id = Uuid::now_v7().to_string();
-    state.queue.reserve(&batch_id).await?;
-    if let Err(error) = state
-        .database
-        .create_batch(&batch_id, request.platform)
-        .await
-    {
-        state.queue.release(&batch_id).await;
-        return Err(error);
-    }
-    let mut scheduled = Vec::new();
+    let mut imported = 0;
+    let mut skipped = 0;
     let mut copied_paths = Vec::new();
+    let mut pool_tasks = Vec::new();
     let creation_result: AppResult<()> = async {
         for image in prepared {
             let id = Uuid::now_v7();
             if image.duplicate {
-                state
-                    .database
-                    .create_task(
-                        &id.to_string(),
-                        &batch_id,
-                        &image.original_file_name,
-                        None,
-                        &image.hash,
-                        "skipped",
-                        Some("相同图片已导入，本次已跳过"),
-                    )
-                    .await?;
+                skipped += 1;
                 continue;
             }
 
@@ -147,162 +180,122 @@ async fn create_import_batch_inner(
                 copy_managed_image(&image.source, &state.images_dir, id, &image.extension).await?;
             let relative_string = relative.to_string_lossy().replace('\\', "/");
             copied_paths.push(state.app_data_dir.join(&relative));
-            state
-                .database
-                .create_task(
-                    &id.to_string(),
-                    &batch_id,
-                    &image.original_file_name,
-                    Some(&relative_string),
-                    &image.hash,
-                    "queued",
-                    None,
-                )
-                .await?;
-            scheduled.push(id.to_string());
+            pool_tasks.push((
+                id.to_string(),
+                image.original_file_name,
+                relative_string,
+                image.hash,
+            ));
+            imported += 1;
         }
+        state.database.create_pool_tasks(&pool_tasks).await?;
         Ok(())
     }
     .await;
 
     if let Err(error) = creation_result {
-        let _ = state.database.delete_batch(&batch_id).await;
         for path in copied_paths {
             let _ = tokio::fs::remove_file(path).await;
         }
-        state.queue.release(&batch_id).await;
         return Err(error);
     }
-
-    if let Err(error) = state.database.finalize_batch(&batch_id).await {
-        state.queue.release(&batch_id).await;
-        return Err(error);
+    emit_update(app, "tasks_imported", None, None, None);
+    if state
+        .settings
+        .private()
+        .await
+        .order_recognition_provider
+        .is_realtime()
+    {
+        state.queue.wake();
     }
-    let batch = state.database.batch(&batch_id).await?;
-    if let Some(task) = batch.tasks.last().cloned() {
-        let _ = app.emit(
-            "import-task-updated",
-            TaskUpdateEvent {
-                task,
-                batch: batch.clone(),
-            },
-        );
-    }
-    state
-        .queue
-        .enqueue_reserved(app.clone(), batch_id, scheduled, settings)
-        .await?;
-    Ok(batch)
+    Ok(ImportOrderImagesResult { imported, skipped })
 }
 
 #[tauri::command]
-pub async fn get_batch(
-    state: State<'_, AppState>,
-    request: IdRequest,
-) -> CommandResult<BatchDetail> {
-    state.database.batch(&request.id).await.map_err(Into::into)
+pub async fn get_order_import_pool(state: State<'_, AppState>) -> CommandResult<OrderImportPool> {
+    state.database.order_import_pool().await.map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn list_import_batches(
+pub async fn list_order_import_logs(
     state: State<'_, AppState>,
-    query: ImportBatchesQuery,
-) -> CommandResult<ImportBatchesPage> {
+    query: OrderImportLogsQuery,
+) -> CommandResult<OrderImportLogsPage> {
     state
         .database
-        .list_import_batches(query)
+        .order_import_logs(query)
         .await
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn cancel_task(
+pub async fn retry_order_import_task(
     app: AppHandle,
     state: State<'_, AppState>,
     request: IdRequest,
 ) -> CommandResult<bool> {
-    async {
-        let canceled = state.database.mark_canceled(&request.id).await?;
-        if canceled {
-            emit_task_update(&app, &state, &request.id).await?;
-        }
-        Ok::<bool, AppError>(canceled)
+    let retried = state
+        .database
+        .retry_pool_task(&request.id)
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    if retried {
+        emit_update(&app, "task_retried", Some(&request.id), None, None);
+        state.queue.wake();
     }
-    .await
-    .map_err(Into::into)
+    Ok(retried)
 }
 
 #[tauri::command]
-pub async fn cancel_batch(
+pub async fn retry_failed_order_import_tasks(
     app: AppHandle,
     state: State<'_, AppState>,
-    request: IdRequest,
 ) -> CommandResult<u64> {
-    async {
-        let affected = state.database.cancel_batch_queued(&request.id).await?;
-        if let Ok(batch) = state.database.batch(&request.id).await
-            && let Some(task) = batch.tasks.last().cloned()
-        {
-            let _ = app.emit("import-task-updated", TaskUpdateEvent { task, batch });
-        }
-        Ok::<u64, AppError>(affected)
+    let affected = state
+        .database
+        .retry_all_pool_tasks()
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    if affected > 0 {
+        emit_update(&app, "tasks_retried", None, None, None);
+        state.queue.wake();
     }
-    .await
-    .map_err(Into::into)
+    Ok(affected)
 }
 
 #[tauri::command]
-pub async fn retry_task(
+pub async fn delete_order_import_task(
     app: AppHandle,
     state: State<'_, AppState>,
     request: IdRequest,
-) -> CommandResult<BatchDetail> {
-    async {
-        let current = state.database.task(&request.id).await?;
-        state.queue.reserve(&current.batch_id).await?;
-        let settings = state.settings.private().await.ollama();
-        let task = match state.database.prepare_retry(&request.id).await {
-            Ok(task) => task,
-            Err(error) => {
-                state.queue.release(&current.batch_id).await;
-                return Err(error);
-            }
-        };
-        state
-            .queue
-            .enqueue_reserved(app, task.batch_id.clone(), vec![task.id], settings)
-            .await?;
-        state.database.batch(&task.batch_id).await
-    }
-    .await
-    .map_err(Into::into)
+) -> CommandResult<()> {
+    delete_order_import_task_inner(&state, &request.id)
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    emit_update(&app, "task_deleted", Some(&request.id), None, None);
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn retry_failed_batch(
+pub async fn submit_order_recognition_batch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<String> {
+    state.order_batch.submit(app).await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn cancel_order_recognition_batch(
     app: AppHandle,
     state: State<'_, AppState>,
     request: IdRequest,
-) -> CommandResult<BatchDetail> {
-    async {
-        let ids = state.database.retryable_task_ids(&request.id).await?;
-        if ids.is_empty() {
-            return Err(AppError::InvalidInput("该批次没有可重试任务".into()));
-        }
-        state.queue.reserve(&request.id).await?;
-        let settings = state.settings.private().await.ollama();
-        if let Err(error) = state.database.prepare_retries(&ids).await {
-            state.queue.release(&request.id).await;
-            return Err(error);
-        }
-        state
-            .queue
-            .enqueue_reserved(app, request.id.clone(), ids, settings)
-            .await?;
-        state.database.batch(&request.id).await
-    }
-    .await
-    .map_err(Into::into)
+) -> CommandResult<()> {
+    state
+        .order_batch
+        .cancel(app, &request.id)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -419,11 +412,34 @@ async fn delete_order_inner(state: &AppState, id: &str) -> AppResult<()> {
     Ok(())
 }
 
-async fn emit_task_update(app: &AppHandle, state: &AppState, task_id: &str) -> AppResult<()> {
-    let task = state.database.task(task_id).await?;
-    let batch = state.database.batch(&task.batch_id).await?;
-    app.emit("import-task-updated", TaskUpdateEvent { task, batch })
-        .map_err(|error| AppError::Internal(error.to_string()))
+async fn delete_order_import_task_inner(state: &AppState, id: &str) -> AppResult<()> {
+    let task = state.database.pool_task(id).await?;
+    if !matches!(task.status.as_str(), "pending" | "failed") {
+        return Err(AppError::InvalidInput(
+            "只有未锁定的待处理或失败任务可以删除".into(),
+        ));
+    }
+    let source = resolve_managed_path(&state.app_data_dir, &task.managed_image_path)?;
+    let trash_dir = state.app_data_dir.join("trash");
+    tokio::fs::create_dir_all(&trash_dir).await?;
+    let extension = Path::new(&task.managed_image_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("img");
+    let trash = trash_dir.join(format!("{}.{}.deleting", task.id, extension));
+    tokio::fs::rename(&source, &trash).await?;
+    if let Err(error) = state.database.delete_pool_task_record(id).await {
+        if let Err(restore_error) = tokio::fs::rename(&trash, &source).await {
+            return Err(AppError::Internal(format!(
+                "删除任务记录失败，且无法恢复图片：{error}；{restore_error}"
+            )));
+        }
+        return Err(error);
+    }
+    if let Err(error) = tokio::fs::remove_file(&trash).await {
+        tracing::warn!(task_id = id, error = %error, "failed to remove deleted pool image");
+    }
+    Ok(())
 }
 
 fn resolve_detail_image(state: &AppState, detail: &mut OrderDetail) -> AppResult<()> {
@@ -439,11 +455,7 @@ mod tests {
 
     use super::*;
     use crate::db::Database;
-    use crate::models::{NormalizedOrder, Platform};
-    use crate::ocr::OllamaClient;
-    use crate::queue::QueueManager;
-    use crate::settings::SettingsStore;
-    use crate::tencent_ocr::TencentOcrClient;
+    use crate::models::{NormalizedOrder, OrderImportLogsQuery};
 
     async fn test_state() -> (TempDir, AppState) {
         let directory = tempfile::tempdir().unwrap();
@@ -451,60 +463,33 @@ mod tests {
         let images_dir = app_data_dir.join("images");
         tokio::fs::create_dir_all(&images_dir).await.unwrap();
         let database = Database::in_memory().await.unwrap();
-        let ollama = OllamaClient::new().unwrap();
-        let queue = QueueManager::new(database.clone(), ollama.clone(), app_data_dir.clone());
-        let legacy = database.settings().await.unwrap();
-        let settings = SettingsStore::load_or_migrate(&app_data_dir, legacy)
-            .await
-            .unwrap();
-        let invoice_queue = crate::invoice_queue::InvoiceQueueManager::new(
-            database.clone(),
-            TencentOcrClient::new().unwrap(),
-            app_data_dir.clone(),
-        );
-        (
-            directory,
-            AppState {
-                database,
-                ollama,
-                queue,
-                invoice_queue,
-                invoice_preflights: crate::invoice_commands::InvoicePreflightStore::default(),
-                settings,
-                app_data_dir,
-                images_dir,
-            },
-        )
+        let state = AppState::test(database, app_data_dir, images_dir).await;
+        (directory, state)
     }
 
     async fn insert_order(state: &AppState, id: &str, number: &str) -> PathBuf {
-        state
-            .database
-            .create_batch("delete-batch", Platform::Taobao)
-            .await
-            .ok();
         let relative = format!("images/{id}.png");
         let image = state.app_data_dir.join(&relative);
         tokio::fs::write(&image, b"managed image").await.unwrap();
         state
             .database
-            .create_task(
-                id,
-                "delete-batch",
-                "order.png",
-                Some(&relative),
-                id,
-                "queued",
-                None,
-            )
+            .create_pool_task(id, "order.png", &relative, id)
             .await
             .unwrap();
-        state.database.mark_processing(id).await.unwrap();
+        assert_eq!(
+            state
+                .database
+                .claim_next_realtime_task()
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            id
+        );
         state
             .database
-            .persist_recognized_order(
+            .persist_pool_order(
                 id,
-                Platform::Taobao,
                 &NormalizedOrder {
                     order_number: Some(number.into()),
                     product_names: vec!["商品".into()],
@@ -514,6 +499,10 @@ mod tests {
                     warning: None,
                     raw_json: "{}".into(),
                 },
+                "ollama",
+                "test-model",
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -525,7 +514,6 @@ mod tests {
         let (_directory, state) = test_state().await;
         let first_image = insert_order(&state, "order-a", "duplicate").await;
         let second_image = insert_order(&state, "order-b", "duplicate").await;
-        let batch_before_delete = state.database.batch("delete-batch").await.unwrap();
 
         let result = delete_orders_inner(
             &state,
@@ -542,35 +530,20 @@ mod tests {
         assert!(!first_image.exists());
         assert!(state.database.order_detail("order-a").await.is_err());
         assert!(!state.database.hash_exists("order-a").await.unwrap());
-        let deleted_order_task = state.database.task("order-a").await.unwrap();
-        assert_eq!(deleted_order_task.batch_id, "delete-batch");
-        assert_eq!(deleted_order_task.original_file_name, "order.png");
-        assert_eq!(deleted_order_task.status, "succeeded");
-        assert_eq!(deleted_order_task.image_sha256, "order-a");
-        assert_eq!(deleted_order_task.retry_count, 0);
-        assert!(deleted_order_task.completed_at.is_some());
-        assert!(deleted_order_task.managed_image_path.is_none());
-        let batch = state.database.batch("delete-batch").await.unwrap();
-        assert_eq!(batch.status, batch_before_delete.status);
-        assert_eq!(batch.completed_at, batch_before_delete.completed_at);
-        assert_eq!(batch.counts.total, 2);
-        assert_eq!(batch.counts.succeeded, 2);
-        assert_eq!(batch.tasks.len(), 2);
-        state
+        let logs = state
             .database
-            .create_batch("reimport-batch", Platform::Taobao)
+            .order_import_logs(OrderImportLogsQuery::default())
             .await
             .unwrap();
+        assert_eq!(logs.total, 2);
+        assert!(logs.items.iter().any(|log| log.task_id == "order-a"));
         state
             .database
-            .create_task(
+            .create_pool_task(
                 "reimported-order-a",
-                "reimport-batch",
                 "order.png",
-                Some("images/reimported-order-a.png"),
+                "images/reimported-order-a.png",
                 "order-a",
-                "queued",
-                None,
             )
             .await
             .unwrap();
@@ -596,8 +569,8 @@ mod tests {
         state
             .database
             .execute_test_statement(
-                "CREATE TRIGGER fail_order_delete BEFORE UPDATE OF managed_image_path ON import_tasks \
-                 WHEN OLD.id = 'order-a' AND NEW.managed_image_path IS NULL \
+                "CREATE TRIGGER fail_order_delete BEFORE DELETE ON orders \
+                 WHEN OLD.id = 'order-a' \
                  BEGIN SELECT RAISE(FAIL, 'forced delete failure'); END",
             )
             .await
@@ -621,14 +594,14 @@ mod tests {
         assert!(image.exists());
         assert!(state.database.order_detail("order-a").await.is_ok());
         assert!(state.database.hash_exists("order-a").await.unwrap());
-        assert!(
+        assert_eq!(
             state
                 .database
-                .task("order-a")
+                .order_detail("order-a")
                 .await
                 .unwrap()
-                .managed_image_path
-                .is_some()
+                .image_path,
+            "images/order-a.png"
         );
     }
 

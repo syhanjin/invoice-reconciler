@@ -1,17 +1,18 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { useState } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { BatchDetail, ImportBatchesPage } from "@/lib/types"
+import type { AppSettings, OrderImportLogsPage, OrderImportPool } from "@/lib/types"
 
 const apiMocks = vi.hoisted(() => ({
-  listImportBatches: vi.fn(),
-  getBatch: vi.fn(),
-  cancelTask: vi.fn(),
-  cancelBatch: vi.fn(),
-  retryTask: vi.fn(),
-  retryFailedBatch: vi.fn(),
+  getOrderImportPool: vi.fn(),
+  listOrderImportLogs: vi.fn(),
+  retryOrderImportTask: vi.fn(),
+  retryFailedOrderImportTasks: vi.fn(),
+  deleteOrderImportTask: vi.fn(),
+  submitOrderRecognitionBatch: vi.fn(),
+  cancelOrderRecognitionBatch: vi.fn(),
+  listInvoiceBatches: vi.fn(),
 }))
 
 vi.mock("@/lib/api", () => ({
@@ -21,68 +22,95 @@ vi.mock("@/lib/api", () => ({
 
 import ImportTasksPage from "./import-tasks-page"
 
-const detail: BatchDetail = {
-  id: "batch-new",
-  platform: "taobao",
-  status: "completed_with_errors",
-  createdAt: "2026-08-12T08:00:00Z",
-  completedAt: "2026-08-12T08:01:00Z",
-  counts: {
-    total: 2,
-    queued: 0,
-    processing: 0,
-    succeeded: 1,
-    failed: 1,
-    canceled: 0,
-    skipped: 0,
-    interrupted: 0,
-  },
-  tasks: [
-    {
-      id: "task-failed",
-      batchId: "batch-new",
-      originalFileName: "failed-order.png",
-      managedImagePath: "images/task-failed.png",
-      imageSha256: "hash",
-      status: "failed",
-      errorCode: "ocr_failed",
-      errorMessage: "识别失败",
-      warningMessage: null,
-      retryCount: 0,
-      createdAt: "2026-08-12T08:00:00Z",
-      startedAt: "2026-08-12T08:00:01Z",
-      completedAt: "2026-08-12T08:00:02Z",
-    },
-  ],
+const settings: AppSettings = {
+  orderRecognitionProvider: "aliyun_batch",
+  ollamaBaseUrl: "http://127.0.0.1:11434",
+  ollamaModel: "qwen3-vl:4b",
+  openaiBaseUrl: "https://example.com/v1",
+  openaiModel: "vision-model",
+  openaiApiKeyMasked: null,
+  openaiApiKeyConfigured: false,
+  aliyunBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  aliyunModel: "qwen-vl-max",
+  aliyunApiKeyMasked: "sk-****7890",
+  aliyunApiKeyConfigured: true,
+  aliyunEnableThinking: false,
+  maxConcurrency: 3,
+  tencentSecretIdMasked: null,
+  tencentCredentialsConfigured: false,
+  invoiceOcrConcurrency: 3,
+  matchMaxOrders: 10,
+  matchMaxCandidates: 100,
+  settingsPath: "/data/settings.toml",
+  permissionWarning: null,
 }
 
-const history: ImportBatchesPage = {
-  items: [{
-    id: detail.id,
-    platform: detail.platform,
-    status: detail.status,
-    createdAt: detail.createdAt,
-    completedAt: detail.completedAt,
-    counts: detail.counts,
+const pool: OrderImportPool = {
+  pending: 1,
+  processing: 0,
+  failed: 1,
+  tasks: [
+    {
+      id: "task-pending",
+      originalFileName: "pending-order.png",
+      status: "pending",
+      batchShortNumber: null,
+      errorCode: null,
+      errorMessage: null,
+      retryCount: 0,
+      createdAt: "2026-08-12T08:00:00Z",
+      startedAt: null,
+    },
+    {
+      id: "task-failed",
+      originalFileName: "failed-order.png",
+      status: "failed",
+      batchShortNumber: null,
+      errorCode: "recognition_failed",
+      errorMessage: "识别失败",
+      retryCount: 1,
+      createdAt: "2026-08-12T08:01:00Z",
+      startedAt: null,
+    },
+  ],
+  batches: [{
+    id: "batch-1",
+    shortNumber: "B000001",
+    status: "in_progress",
+    model: "qwen-vl-max",
+    taskCount: 2,
+    errorMessage: null,
+    createdAt: "2026-08-12T08:02:00Z",
+    completedAt: null,
   }],
-  total: 21,
+}
+
+const logs: OrderImportLogsPage = {
+  items: [{
+    taskId: "task-completed",
+    orderId: "order-1",
+    originalFileName: "completed-order.png",
+    provider: "aliyun_batch",
+    model: "qwen-vl-max",
+    batchShortNumber: "B000000",
+    warningMessage: null,
+    completedAt: "2026-08-12T08:03:00Z",
+  }],
+  total: 1,
   page: 1,
   pageSize: 20,
 }
 
-function Harness() {
-  const [selected, setSelected] = useState<string | null>(null)
-  return (
+function renderPage(overrides: Partial<AppSettings> = {}) {
+  return render(
     <ImportTasksPage
-      activeBatch={null}
-      selectedBatchId={selected}
-      onSelectedBatchChange={setSelected}
-      onBatchChange={vi.fn()}
+      settings={{ ...settings, ...overrides }}
+      orderRefreshToken={0}
       activeInvoiceBatch={null}
       selectedInvoiceBatchId={null}
       onSelectedInvoiceBatchChange={vi.fn()}
       onInvoiceBatchChange={vi.fn()}
-    />
+    />,
   )
 }
 
@@ -91,48 +119,81 @@ describe("ImportTasksPage", () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    apiMocks.listImportBatches.mockResolvedValue(history)
-    apiMocks.getBatch.mockResolvedValue(detail)
+    apiMocks.getOrderImportPool.mockResolvedValue(pool)
+    apiMocks.listOrderImportLogs.mockResolvedValue(logs)
+    apiMocks.retryOrderImportTask.mockResolvedValue(true)
+    apiMocks.retryFailedOrderImportTasks.mockResolvedValue(1)
+    apiMocks.deleteOrderImportTask.mockResolvedValue(undefined)
+    apiMocks.submitOrderRecognitionBatch.mockResolvedValue("batch-2")
+    apiMocks.cancelOrderRecognitionBatch.mockResolvedValue(undefined)
   })
 
-  it("shows persisted order batches and loads the selected batch detail", async () => {
-    render(<Harness />)
+  it("shows the live pool beside immutable completion logs", async () => {
+    renderPage()
 
-    expect(screen.getByRole("tab", { name: "订单" })).toHaveAttribute("data-active")
-    expect(screen.getByRole("tab", { name: "发票" })).not.toHaveAttribute("aria-disabled", "true")
-    expect(await screen.findByText("failed-order.png")).toBeInTheDocument()
-    expect(apiMocks.listImportBatches).toHaveBeenCalledWith({ page: 1, pageSize: 20 })
-    expect(apiMocks.getBatch).toHaveBeenCalledWith("batch-new")
+    expect((await screen.findAllByText("pending-order.png")).length).toBeGreaterThan(0)
+    expect(screen.getAllByText("failed-order.png").length).toBeGreaterThan(0)
+    expect(screen.getAllByText("completed-order.png").length).toBeGreaterThan(0)
+    expect(screen.getAllByText("B000001").length).toBeGreaterThan(0)
+    expect(apiMocks.getOrderImportPool).toHaveBeenCalled()
+    expect(apiMocks.listOrderImportLogs).toHaveBeenCalledWith({ page: 1, pageSize: 20 })
   })
 
-  it("loads the next page and resets to page one when page size changes", async () => {
+  it("submits every currently pending task as a new Aliyun batch", async () => {
     const user = userEvent.setup()
-    render(<Harness />)
-    await screen.findByText("failed-order.png")
+    renderPage()
+    await screen.findAllByText("pending-order.png")
 
-    await user.click(screen.getByTitle("下一页"))
-    await waitFor(() => {
-      expect(apiMocks.listImportBatches).toHaveBeenCalledWith({ page: 2, pageSize: 20 })
-    })
+    await user.click(screen.getAllByRole("button", { name: "提交批次" })[0])
 
-    await user.click(screen.getByRole("combobox", { name: "每页条数" }))
-    await user.click(await screen.findByRole("option", { name: "50 条" }))
-    await waitFor(() => {
-      expect(apiMocks.listImportBatches).toHaveBeenCalledWith({ page: 1, pageSize: 50 })
-    })
+    await waitFor(() => expect(apiMocks.submitOrderRecognitionBatch).toHaveBeenCalledTimes(1))
   })
 
-  it("shows a retryable error state when persisted history cannot be loaded", async () => {
-    apiMocks.listImportBatches
-      .mockRejectedValueOnce(new Error("数据库不可用"))
-      .mockResolvedValueOnce(history)
+  it("allows a failed task to be retried without creating a batch", async () => {
     const user = userEvent.setup()
-    render(<Harness />)
+    renderPage({ orderRecognitionProvider: "ollama" })
+    await screen.findAllByText("failed-order.png")
 
-    expect(await screen.findByText("导入历史加载失败")).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "重新加载" }))
+    expect(screen.queryByRole("button", { name: "提交批次" })).not.toBeInTheDocument()
+    await user.click(screen.getAllByTitle("重试")[0])
 
-    expect(await screen.findByText("failed-order.png")).toBeInTheDocument()
-    expect(apiMocks.listImportBatches).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(apiMocks.retryOrderImportTask).toHaveBeenCalledWith("task-failed"))
+  })
+
+  it("cancels an active remote batch by its durable id", async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findAllByText("B000001")
+
+    await user.click(screen.getAllByTitle("取消批次 B000001")[0])
+
+    await waitFor(() => expect(apiMocks.cancelOrderRecognitionBatch).toHaveBeenCalledWith("batch-1"))
+  })
+
+  it("requires confirmation before deleting a pool task and its image", async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findAllByText("pending-order.png")
+
+    await user.click(screen.getAllByTitle("删除任务")[0])
+    expect(apiMocks.deleteOrderImportTask).not.toHaveBeenCalled()
+    expect(screen.getByRole("heading", { name: "删除识别任务？" })).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "删除" }))
+
+    await waitFor(() => expect(apiMocks.deleteOrderImportTask).toHaveBeenCalledWith("task-pending"))
+  })
+
+  it("keeps the delete confirmation open when deleting the image fails", async () => {
+    const user = userEvent.setup()
+    apiMocks.deleteOrderImportTask.mockRejectedValue(new Error("删除失败"))
+    renderPage()
+    await screen.findAllByText("pending-order.png")
+
+    await user.click(screen.getAllByTitle("删除任务")[0])
+    await user.click(screen.getByRole("button", { name: "删除" }))
+
+    await waitFor(() => expect(apiMocks.deleteOrderImportTask).toHaveBeenCalledWith("task-pending"))
+    expect(screen.getByRole("heading", { name: "删除识别任务？" })).toBeInTheDocument()
   })
 })

@@ -1,229 +1,81 @@
 import {
   AlertCircle,
+  Ban,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  CircleEllipsis,
   Clock3,
+  CloudUpload,
   FileClock,
-  ListTodo,
+  LoaderCircle,
+  RefreshCw,
+  RotateCcw,
+  Trash2,
 } from "lucide-react"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 
-import { BatchPanel } from "@/components/batch-panel"
 import { InvoiceTasksTab } from "@/components/invoice-tasks-tab"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Progress } from "@/components/ui/progress"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { api, errorMessage } from "@/lib/api"
 import { formatDateTime } from "@/lib/format"
-import type { BatchDetail, ImportBatchesPage, ImportBatchSummary, InvoiceBatchDetail } from "@/lib/types"
+import type {
+  AppSettings,
+  InvoiceBatchDetail,
+  OrderImportLog,
+  OrderImportLogsPage,
+  OrderImportPool,
+  OrderImportTask,
+} from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 interface ImportTasksPageProps {
-  activeBatch: BatchDetail | null
-  selectedBatchId: string | null
-  onSelectedBatchChange: (id: string | null) => void
-  onBatchChange: (batch: BatchDetail) => void
+  settings: AppSettings
+  orderRefreshToken: number
   activeInvoiceBatch: InvoiceBatchDetail | null
   selectedInvoiceBatchId: string | null
   onSelectedInvoiceBatchChange: (id: string | null) => void
   onInvoiceBatchChange: (batch: InvoiceBatchDetail) => void
 }
 
-const emptyPage: ImportBatchesPage = { items: [], total: 0, page: 1, pageSize: 20 }
+const emptyPool: OrderImportPool = { tasks: [], batches: [], pending: 0, processing: 0, failed: 0 }
+const emptyLogs: OrderImportLogsPage = { items: [], total: 0, page: 1, pageSize: 20 }
 const pageSizes = [20, 50, 100]
 
-const batchStatusMeta: Record<BatchDetail["status"], {
-  label: string
-  icon: typeof Clock3
-  className: string
-}> = {
-  queued: { label: "排队", icon: Clock3, className: "text-zinc-600" },
-  processing: { label: "处理中", icon: CircleEllipsis, className: "text-blue-600" },
-  completed: { label: "已完成", icon: CheckCircle2, className: "text-emerald-600" },
-  completed_with_errors: { label: "部分失败", icon: AlertCircle, className: "text-amber-700" },
-}
-
-function progressOf(batch: ImportBatchSummary) {
-  const finished = batch.counts.succeeded + batch.counts.failed + batch.counts.canceled +
-    batch.counts.skipped + batch.counts.interrupted
-  return batch.counts.total ? Math.round((finished / batch.counts.total) * 100) : 0
-}
-
-function summaryFromDetail(batch: BatchDetail): ImportBatchSummary {
-  return {
-    id: batch.id,
-    platform: batch.platform,
-    status: batch.status,
-    createdAt: batch.createdAt,
-    completedAt: batch.completedAt,
-    counts: batch.counts,
-  }
-}
-
-function BatchHistoryItem({ batch, selected, onSelect }: {
-  batch: ImportBatchSummary
-  selected: boolean
-  onSelect: () => void
-}) {
-  const meta = batchStatusMeta[batch.status]
-  const Icon = meta.icon
-  const progress = progressOf(batch)
-
-  return (
-    <button
-      type="button"
-      className={cn(
-        "grid w-full gap-3 border-b bg-white px-5 py-4 text-left transition-colors hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-        selected && "bg-zinc-100 hover:bg-zinc-100",
-      )}
-      onClick={onSelect}
-    >
-      <div className="flex min-w-0 items-center justify-between gap-3">
-        <span className="truncate text-sm font-medium">{formatDateTime(batch.createdAt)}</span>
-        <span className={cn("flex shrink-0 items-center gap-1.5 text-xs", meta.className)}>
-          <Icon className={cn("size-3.5", batch.status === "processing" && "animate-pulse")} />
-          {meta.label}
-        </span>
-      </div>
-      <div className="flex items-center gap-3">
-        <Progress value={progress} className="h-1.5" />
-        <span className="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
-          {progress}%
-        </span>
-      </div>
-      <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <span>共 {batch.counts.total} 张</span>
-        <span>成功 {batch.counts.succeeded} · 失败 {batch.counts.failed}</span>
-      </div>
-    </button>
-  )
-}
+const taskStatus = {
+  pending: { label: "待处理", icon: Clock3, className: "text-zinc-600" },
+  processing: { label: "识别中", icon: LoaderCircle, className: "text-blue-600" },
+  batch_submitting: { label: "提交中", icon: CloudUpload, className: "text-blue-600" },
+  batch_locked: { label: "批次处理中", icon: LoaderCircle, className: "text-blue-600" },
+  failed: { label: "等待重试", icon: AlertCircle, className: "text-red-600" },
+} as const
 
 export default function ImportTasksPage({
-  activeBatch,
-  selectedBatchId,
-  onSelectedBatchChange,
-  onBatchChange,
+  settings,
+  orderRefreshToken,
   activeInvoiceBatch,
   selectedInvoiceBatchId,
   onSelectedInvoiceBatchChange,
   onInvoiceBatchChange,
 }: ImportTasksPageProps) {
-  const [history, setHistory] = useState<ImportBatchesPage>(emptyPage)
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
-  const [historyLoading, setHistoryLoading] = useState(true)
-  const [historyError, setHistoryError] = useState<string | null>(null)
-  const [detail, setDetail] = useState<BatchDetail | null>(null)
-  const [detailLoading, setDetailLoading] = useState(false)
-  const [detailError, setDetailError] = useState<string | null>(null)
-  const [historyVersion, setHistoryVersion] = useState(0)
-  const [detailVersion, setDetailVersion] = useState(0)
-  const selectedRef = useRef(selectedBatchId)
-  const listRequestRef = useRef(0)
-  const detailRequestRef = useRef(0)
-
-  useEffect(() => {
-    selectedRef.current = selectedBatchId
-  }, [selectedBatchId])
-
-  useEffect(() => {
-    const request = ++listRequestRef.current
-    setHistoryLoading(true)
-    setHistoryError(null)
-    api.listImportBatches({ page, pageSize })
-      .then((result) => {
-        if (request !== listRequestRef.current) return
-        setHistory(result)
-        const selected = selectedRef.current
-        if (!selected || !result.items.some((batch) => batch.id === selected)) {
-          onSelectedBatchChange(result.items[0]?.id ?? null)
-        }
-      })
-      .catch((error) => {
-        if (request !== listRequestRef.current) return
-        const message = errorMessage(error)
-        setHistory({ items: [], total: 0, page, pageSize })
-        setHistoryError(message)
-        onSelectedBatchChange(null)
-        toast.error(message)
-      })
-      .finally(() => {
-        if (request === listRequestRef.current) setHistoryLoading(false)
-      })
-  }, [historyVersion, onSelectedBatchChange, page, pageSize])
-
-  useEffect(() => {
-    const request = ++detailRequestRef.current
-    if (!selectedBatchId) {
-      setDetail(null)
-      setDetailLoading(false)
-      setDetailError(null)
-      return
-    }
-    setDetail(null)
-    setDetailLoading(true)
-    setDetailError(null)
-    api.getBatch(selectedBatchId)
-      .then((batch) => {
-        if (request === detailRequestRef.current) setDetail(batch)
-      })
-      .catch((error) => {
-        if (request !== detailRequestRef.current) return
-        const message = errorMessage(error)
-        setDetailError(message)
-        toast.error(message)
-      })
-      .finally(() => {
-        if (request === detailRequestRef.current) setDetailLoading(false)
-      })
-  }, [detailVersion, selectedBatchId])
-
-  useEffect(() => {
-    if (activeBatch?.id !== selectedBatchId) return
-    ++detailRequestRef.current
-    setDetail(activeBatch)
-    setDetailLoading(false)
-    setDetailError(null)
-  }, [activeBatch, selectedBatchId])
-
-  useEffect(() => {
-    if (!activeBatch) return
-    setHistory((current) => ({
-      ...current,
-      items: current.items.map((batch) =>
-        batch.id === activeBatch.id ? summaryFromDetail(activeBatch) : batch),
-    }))
-  }, [activeBatch])
-
-  const handleBatchChange = useCallback((batch: BatchDetail) => {
-    setDetail(batch)
-    setHistory((current) => ({
-      ...current,
-      items: current.items.map((item) => item.id === batch.id ? summaryFromDetail(batch) : item),
-    }))
-    onBatchChange(batch)
-  }, [onBatchChange])
-
-  const pages = Math.max(1, Math.ceil(history.total / history.pageSize))
-
   return (
     <div className="flex h-screen min-h-0 flex-col bg-white">
       <header className="flex min-h-20 shrink-0 items-center border-b bg-white px-6">
         <div>
           <h1 className="text-lg font-semibold">导入任务</h1>
-          <p className="mt-1 text-xs text-muted-foreground">查看和管理持久化的导入处理记录</p>
+          <p className="mt-1 text-xs text-muted-foreground">管理订单识别池与发票导入记录</p>
         </div>
       </header>
       <Tabs defaultValue="orders" className="min-h-0 flex-1 gap-0">
@@ -234,101 +86,7 @@ export default function ImportTasksPage({
           </TabsList>
         </div>
         <TabsContent value="orders" className="min-h-0 bg-zinc-100">
-          <div className="grid h-full min-h-0 grid-rows-[minmax(220px,38%)_minmax(0,1fr)] xl:grid-cols-[minmax(300px,34%)_minmax(0,1fr)] xl:grid-rows-1">
-            <section className="flex min-h-0 flex-col border-b bg-white xl:border-r xl:border-b-0" aria-label="导入批次">
-              <div className="flex h-11 shrink-0 items-center justify-between border-b px-5">
-                <span className="text-xs font-medium text-muted-foreground">历史批次</span>
-                <span className="text-xs tabular-nums text-muted-foreground">{history.total} 条</span>
-              </div>
-              <ScrollArea className={cn("min-h-0 flex-1 bg-white", historyLoading && "opacity-60")}>
-                {history.items.map((batch) => (
-                  <BatchHistoryItem
-                    key={batch.id}
-                    batch={batch}
-                    selected={batch.id === selectedBatchId}
-                    onSelect={() => onSelectedBatchChange(batch.id)}
-                  />
-                ))}
-                {!historyLoading && historyError && (
-                  <div className="flex h-72 flex-col items-center justify-center gap-3 px-6 text-center text-muted-foreground">
-                    <AlertCircle className="size-8 text-red-600" />
-                    <p className="text-sm">导入历史加载失败</p>
-                    <Button variant="outline" size="sm" onClick={() => setHistoryVersion((value) => value + 1)}>
-                      重新加载
-                    </Button>
-                  </div>
-                )}
-                {!historyLoading && !historyError && history.items.length === 0 && (
-                  <div className="flex h-72 flex-col items-center justify-center gap-3 text-muted-foreground">
-                    <FileClock className="size-8" />
-                    <p className="text-sm">暂无订单导入任务</p>
-                  </div>
-                )}
-              </ScrollArea>
-              <div className="flex h-14 shrink-0 items-center justify-between border-t bg-white px-4">
-                <Select
-                  value={String(pageSize)}
-                  onValueChange={(value) => {
-                    if (value === null) return
-                    setPageSize(Number(value))
-                    setPage(1)
-                  }}
-                >
-                  <SelectTrigger size="sm" className="w-20" aria-label="每页条数">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {pageSizes.map((size) => (
-                      <SelectItem key={size} value={String(size)}>{size} 条</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <div className="flex items-center gap-2">
-                  <span className="mr-1 text-xs tabular-nums text-muted-foreground">
-                    {history.page} / {pages}
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    disabled={page <= 1 || historyLoading}
-                    onClick={() => setPage((value) => value - 1)}
-                    title="上一页"
-                  >
-                    <ChevronLeft />
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    disabled={page >= pages || historyLoading}
-                    onClick={() => setPage((value) => value + 1)}
-                    title="下一页"
-                  >
-                    <ChevronRight />
-                  </Button>
-                </div>
-              </div>
-            </section>
-            <section className="min-h-0 bg-white" aria-label="批次详情">
-              {detail && <BatchPanel batch={detail} onBatchChange={handleBatchChange} />}
-              {!detail && (
-                <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
-                  {detailError ? (
-                    <AlertCircle className="size-8 text-red-600" />
-                  ) : (
-                    <ListTodo className={cn("size-8", detailLoading && "animate-pulse")} />
-                  )}
-                  <p className="text-sm">
-                    {detailLoading ? "正在加载批次详情" : detailError ? "批次详情加载失败" : "请选择一个导入批次"}
-                  </p>
-                  {detailError && (
-                    <Button variant="outline" size="sm" onClick={() => setDetailVersion((value) => value + 1)}>
-                      重新加载
-                    </Button>
-                  )}
-                </div>
-              )}
-            </section>
-          </div>
+          <OrderPoolWorkspace settings={settings} refreshToken={orderRefreshToken} />
         </TabsContent>
         <TabsContent value="invoices" className="min-h-0 bg-zinc-100">
           <InvoiceTasksTab
@@ -341,4 +99,301 @@ export default function ImportTasksPage({
       </Tabs>
     </div>
   )
+}
+
+function OrderPoolWorkspace({ settings, refreshToken }: { settings: AppSettings; refreshToken: number }) {
+  const [pool, setPool] = useState<OrderImportPool>(emptyPool)
+  const [logs, setLogs] = useState<OrderImportLogsPage>(emptyLogs)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
+  const [loading, setLoading] = useState(true)
+  const [pending, setPending] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<OrderImportTask | null>(null)
+  const [version, setVersion] = useState(0)
+
+  const reloadPool = useCallback(async () => {
+    try {
+      setPool(await api.getOrderImportPool())
+    } catch (error) {
+      toast.error(errorMessage(error))
+    }
+  }, [])
+
+  const reloadLogs = useCallback(async () => {
+    try {
+      const result = await api.listOrderImportLogs({ page, pageSize })
+      const pages = Math.max(1, Math.ceil(result.total / result.pageSize))
+      if (page > pages) setPage(pages)
+      else setLogs(result)
+    } catch (error) {
+      toast.error(errorMessage(error))
+    }
+  }, [page, pageSize])
+
+  useEffect(() => {
+    setLoading(true)
+    Promise.all([reloadPool(), reloadLogs()]).finally(() => setLoading(false))
+  }, [refreshToken, version, reloadLogs, reloadPool])
+
+  const run = async (key: string, action: () => Promise<unknown>, success?: string) => {
+    setPending(key)
+    try {
+      await action()
+      if (success) toast.success(success)
+      setVersion((value) => value + 1)
+      return true
+    } catch (error) {
+      toast.error(errorMessage(error), { duration: 6000 })
+      return false
+    } finally {
+      setPending(null)
+    }
+  }
+
+  const poolPanel = (
+    <PoolPanel
+      pool={pool}
+      provider={settings.orderRecognitionProvider}
+      disabled={pending !== null}
+      pendingKey={pending}
+      onRetry={(id) => run(id, () => api.retryOrderImportTask(id), "任务已重新排队")}
+      onDelete={(id) => setDeleteTarget(pool.tasks.find((task) => task.id === id) ?? null)}
+      onRetryAll={() => run("retry-all", () => api.retryFailedOrderImportTasks(), "失败任务已重新排队")}
+      onSubmit={() => run("submit", () => api.submitOrderRecognitionBatch(), "批次正在提交")}
+      onCancelBatch={(id) => run(`cancel:${id}`, () => api.cancelOrderRecognitionBatch(id), "已请求取消批次")}
+    />
+  )
+  const logsPanel = (
+    <LogsPanel
+      logs={logs}
+      page={page}
+      pageSize={pageSize}
+      loading={loading}
+      onPageChange={setPage}
+      onPageSizeChange={(value) => { setPageSize(value); setPage(1) }}
+    />
+  )
+
+  return (
+    <>
+      <div className={cn("hidden h-full min-h-0 grid-cols-[minmax(0,1.15fr)_minmax(360px,.85fr)] divide-x xl:grid", loading && "opacity-80")}>
+        {poolPanel}
+        {logsPanel}
+      </div>
+      <Tabs defaultValue="pool" className="h-full min-h-0 gap-0 xl:hidden">
+        <div className="flex h-11 items-end border-b bg-white px-4">
+          <TabsList variant="line">
+            <TabsTrigger value="pool">任务池 {pool.tasks.length}</TabsTrigger>
+            <TabsTrigger value="logs">导入完成 {logs.total}</TabsTrigger>
+          </TabsList>
+        </div>
+        <TabsContent value="pool" className="min-h-0">{poolPanel}</TabsContent>
+        <TabsContent value="logs" className="min-h-0">{logsPanel}</TabsContent>
+      </Tabs>
+      <Dialog open={deleteTarget !== null} onOpenChange={(open) => !open && pending === null && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>删除识别任务？</DialogTitle>
+            <DialogDescription>
+              {deleteTarget?.originalFileName} 将从任务池移除，同时删除已管理的图片。此操作无法撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" disabled={pending !== null} onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button
+              variant="destructive"
+              disabled={pending !== null || deleteTarget === null}
+              onClick={() => {
+                if (!deleteTarget) return
+                const task = deleteTarget
+                void run(task.id, () => api.deleteOrderImportTask(task.id), "任务与图片已删除")
+                  .then((deleted) => deleted && setDeleteTarget(null))
+              }}
+            >
+              <Trash2 />删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
+function PoolPanel({ pool, provider, disabled, pendingKey, onRetry, onDelete, onRetryAll, onSubmit, onCancelBatch }: {
+  pool: OrderImportPool
+  provider: AppSettings["orderRecognitionProvider"]
+  disabled: boolean
+  pendingKey: string | null
+  onRetry: (id: string) => void
+  onDelete: (id: string) => void
+  onRetryAll: () => void
+  onSubmit: () => void
+  onCancelBatch: (id: string) => void
+}) {
+  return (
+    <section className="flex min-h-0 flex-col bg-white" aria-label="订单识别任务池">
+      <div className="flex min-h-20 shrink-0 flex-wrap items-center gap-3 border-b px-5 py-3">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm font-medium">任务池</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            待处理 {pool.pending} · 处理中 {pool.processing} · 失败 {pool.failed}
+          </p>
+        </div>
+        {pool.failed > 0 && (
+          <Button variant="outline" size="sm" disabled={disabled} onClick={onRetryAll}>
+            <RefreshCw className={cn(pendingKey === "retry-all" && "animate-spin")} />重试全部
+          </Button>
+        )}
+        {provider === "aliyun_batch" && (
+          <Button size="sm" disabled={disabled || pool.pending === 0} onClick={onSubmit}>
+            <CloudUpload className={cn(pendingKey === "submit" && "animate-pulse")} />提交批次
+          </Button>
+        )}
+      </div>
+      {pool.batches.length > 0 && (
+        <div className="shrink-0 border-b bg-zinc-50 px-5 py-3">
+          <p className="mb-2 text-xs font-medium text-muted-foreground">运行批次</p>
+          <div className="flex flex-wrap gap-2">
+            {pool.batches.map((batch) => (
+              <div key={batch.id} className="flex h-9 items-center gap-2 rounded-md border bg-white px-3 text-xs">
+                <Badge variant="outline">{batch.shortNumber}</Badge>
+                <LoaderCircle className="size-3.5 animate-spin text-blue-600" />
+                <span>{batch.taskCount} 项</span>
+                <span className="max-w-32 truncate text-muted-foreground">{batch.model}</span>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  title={`取消批次 ${batch.shortNumber}`}
+                  disabled={disabled || batch.status === "canceling"}
+                  onClick={() => onCancelBatch(batch.id)}
+                >
+                  <Ban />
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="grid h-10 shrink-0 grid-cols-[minmax(0,1fr)_120px_96px] items-center gap-3 border-b px-5 text-xs font-medium text-muted-foreground">
+        <span>图片</span><span>状态</span><span className="text-right">操作</span>
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        {pool.tasks.map((task) => (
+          <TaskRow
+            key={task.id}
+            task={task}
+            disabled={disabled}
+            pending={pendingKey === task.id}
+            onRetry={() => onRetry(task.id)}
+            onDelete={() => onDelete(task.id)}
+          />
+        ))}
+        {pool.tasks.length === 0 && (
+          <div className="flex h-72 flex-col items-center justify-center gap-3 text-muted-foreground">
+            <Clock3 className="size-8" /><p className="text-sm">任务池为空</p>
+          </div>
+        )}
+      </ScrollArea>
+    </section>
+  )
+}
+
+function TaskRow({ task, disabled, pending, onRetry, onDelete }: {
+  task: OrderImportTask
+  disabled: boolean
+  pending: boolean
+  onRetry: () => void
+  onDelete: () => void
+}) {
+  const meta = taskStatus[task.status]
+  const Icon = meta.icon
+  const removable = task.status === "pending" || task.status === "failed"
+  return (
+    <div className={cn("grid min-h-14 grid-cols-[minmax(0,1fr)_120px_96px] items-center gap-3 border-b px-5 py-2", pending && "opacity-60")}>
+      <div className="min-w-0">
+        <p className="truncate text-sm font-medium">{task.originalFileName}</p>
+        <p className={cn("truncate text-xs", task.errorMessage ? "text-red-600" : "text-muted-foreground")}>
+          {task.errorMessage ?? (task.batchShortNumber ? `批次 ${task.batchShortNumber}` : formatDateTime(task.createdAt))}
+        </p>
+      </div>
+      <div className={cn("flex items-center gap-2 text-xs", meta.className)}>
+        <Icon className={cn("size-3.5", ["processing", "batch_locked"].includes(task.status) && "animate-spin")} />{meta.label}
+      </div>
+      <div className="flex justify-end gap-1">
+        {task.status === "failed" && (
+          <Button variant="ghost" size="icon-sm" title="重试" disabled={disabled} onClick={onRetry}><RotateCcw /></Button>
+        )}
+        {removable && (
+          <Button variant="ghost" size="icon-sm" title="删除任务" disabled={disabled} onClick={onDelete}><Trash2 /></Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function LogsPanel({ logs, page, pageSize, loading, onPageChange, onPageSizeChange }: {
+  logs: OrderImportLogsPage
+  page: number
+  pageSize: number
+  loading: boolean
+  onPageChange: (value: number) => void
+  onPageSizeChange: (value: number) => void
+}) {
+  const pages = Math.max(1, Math.ceil(logs.total / logs.pageSize))
+  return (
+    <section className="flex min-h-0 flex-col bg-white" aria-label="订单导入完成日志">
+      <div className="flex min-h-20 shrink-0 items-center border-b px-5 py-3">
+        <div><h2 className="text-sm font-medium">导入完成</h2><p className="mt-1 text-xs text-muted-foreground">{logs.total} 条不可变识别日志</p></div>
+      </div>
+      <ScrollArea className={cn("min-h-0 flex-1", loading && "opacity-70")}>
+        {logs.items.map((log) => <LogRow key={log.taskId} log={log} />)}
+        {!loading && logs.items.length === 0 && (
+          <div className="flex h-72 flex-col items-center justify-center gap-3 text-muted-foreground">
+            <FileClock className="size-8" /><p className="text-sm">暂无完成记录</p>
+          </div>
+        )}
+      </ScrollArea>
+      <div className="flex h-14 shrink-0 items-center justify-between border-t px-4">
+        <Select
+          value={String(pageSize)}
+          onValueChange={(value) => value !== null && onPageSizeChange(Number(value))}
+        >
+          <SelectTrigger size="sm" className="w-20" aria-label="完成日志每页条数">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {pageSizes.map((size) => <SelectItem key={size} value={String(size)}>{size} 条</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <div className="flex items-center gap-2">
+          <span className="text-xs tabular-nums text-muted-foreground">{logs.page} / {pages}</span>
+          <Button variant="outline" size="icon-sm" title="上一页" disabled={page <= 1 || loading} onClick={() => onPageChange(page - 1)}><ChevronLeft /></Button>
+          <Button variant="outline" size="icon-sm" title="下一页" disabled={page >= pages || loading} onClick={() => onPageChange(page + 1)}><ChevronRight /></Button>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function LogRow({ log }: { log: OrderImportLog }) {
+  return (
+    <div className="grid min-h-16 grid-cols-[minmax(0,1fr)_120px] items-center gap-3 border-b px-5 py-2">
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
+          <p className="truncate text-sm font-medium">{log.originalFileName}</p>
+          {log.batchShortNumber && <Badge variant="outline">{log.batchShortNumber}</Badge>}
+        </div>
+        <p className="mt-1 truncate text-xs text-muted-foreground">{providerLabel(log.provider)} · {log.model}{log.warningMessage ? ` · ${log.warningMessage}` : ""}</p>
+      </div>
+      <span className="text-right text-xs text-muted-foreground">{formatDateTime(log.completedAt)}</span>
+    </div>
+  )
+}
+
+function providerLabel(provider: string) {
+  if (provider === "ollama") return "Ollama"
+  if (provider === "openai") return "OpenAI 兼容"
+  if (provider === "aliyun_batch") return "阿里云百炼批量"
+  return provider
 }

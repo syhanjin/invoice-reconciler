@@ -16,9 +16,13 @@ use crate::entities::{
 use crate::error::{AppError, AppResult};
 use crate::migration::Migrator;
 use crate::models::{
-    AppSettings, BatchCounts, BatchDetail, DEFAULT_MAX_CONCURRENCY, ImportBatchSummary,
-    ImportBatchesPage, ImportBatchesQuery, ImportTask, NormalizedOrder, OrderDetail, OrderListItem,
-    OrderSort, OrdersPage, OrdersQuery, Platform, SortDirection, UpdateOrderRequest,
+    AppSettings, DEFAULT_MAX_CONCURRENCY, OrderDetail, OrderListItem, OrderSort, OrdersPage,
+    OrdersQuery, SortDirection, UpdateOrderRequest,
+};
+#[cfg(test)]
+use crate::models::{
+    BatchCounts, ImportBatchSummary, ImportBatchesPage, ImportBatchesQuery, ImportTask,
+    NormalizedOrder, Platform,
 };
 
 #[derive(Clone)]
@@ -59,6 +63,14 @@ impl Database {
                 [now().into()],
             ))
             .await?;
+        connection
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "UPDATE order_import_pool SET status = 'failed', recognition_batch_id = NULL, \
+                 error_code = 'app_interrupted', error_message = '应用在实时识别完成前退出，可手动重试' \
+                 WHERE status = 'processing'",
+            ))
+            .await?;
         let database = Self { connection };
         database.refresh_open_batches().await?;
         database.refresh_open_invoice_batches().await?;
@@ -97,14 +109,21 @@ impl Database {
     }
 
     pub async fn hash_exists(&self, hash: &str) -> AppResult<bool> {
-        Ok(import_task::Entity::find()
-            .filter(import_task::Column::ImageSha256.eq(hash))
-            .filter(import_task::Column::ManagedImagePath.is_not_null())
-            .one(&self.connection)
-            .await?
-            .is_some())
+        let row = self
+            .connection
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT EXISTS(SELECT 1 FROM order_import_pool WHERE image_sha256 = ? UNION ALL SELECT 1 FROM orders WHERE image_sha256 = ? AND managed_image_path IS NOT NULL) AS claimed",
+                [hash.into(), hash.into()],
+            ))
+            .await?;
+        Ok(row
+            .and_then(|row| row.try_get::<i64>("", "claimed").ok())
+            .unwrap_or(0)
+            != 0)
     }
 
+    #[cfg(test)]
     pub async fn create_batch(&self, id: &str, platform: Platform) -> AppResult<()> {
         import_batch::ActiveModel {
             id: Set(id.to_owned()),
@@ -118,14 +137,8 @@ impl Database {
         Ok(())
     }
 
-    pub async fn delete_batch(&self, id: &str) -> AppResult<()> {
-        import_batch::Entity::delete_by_id(id)
-            .exec(&self.connection)
-            .await?;
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub async fn create_task(
         &self,
         id: &str,
@@ -156,6 +169,7 @@ impl Database {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn task(&self, id: &str) -> AppResult<ImportTask> {
         import_task::Entity::find_by_id(id)
             .one(&self.connection)
@@ -164,6 +178,7 @@ impl Database {
             .ok_or_else(|| AppError::NotFound(format!("导入任务 {id}")))
     }
 
+    #[cfg(test)]
     pub async fn mark_processing(&self, id: &str) -> AppResult<bool> {
         let result = self
             .connection
@@ -178,112 +193,7 @@ impl Database {
         Ok(result.rows_affected() == 1)
     }
 
-    pub async fn mark_failed(&self, id: &str, code: &str, message: &str) -> AppResult<()> {
-        let task = self.task(id).await?;
-        let result = self
-            .connection
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                "UPDATE import_tasks SET status = 'failed', error_code = ?, error_message = ?, \
-                 completed_at = ? WHERE id = ?",
-                [code.into(), message.into(), now().into(), id.into()],
-            ))
-            .await?;
-        if result.rows_affected() != 1 {
-            return Err(AppError::NotFound(format!("导入任务 {id}")));
-        }
-        self.refresh_batch_status(&task.batch_id).await
-    }
-
-    pub async fn mark_canceled(&self, id: &str) -> AppResult<bool> {
-        let result = self
-            .connection
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                "UPDATE import_tasks SET status = 'canceled', error_code = NULL, error_message = NULL, \
-                 completed_at = ? WHERE id = ? AND status = 'queued'",
-                [now().into(), id.into()],
-            ))
-            .await?;
-        if result.rows_affected() == 1 {
-            let task = self.task(id).await?;
-            self.refresh_batch_status(&task.batch_id).await?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub async fn cancel_batch_queued(&self, batch_id: &str) -> AppResult<u64> {
-        let result = self
-            .connection
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                "UPDATE import_tasks SET status = 'canceled', completed_at = ? \
-                 WHERE batch_id = ? AND status = 'queued'",
-                [now().into(), batch_id.into()],
-            ))
-            .await?;
-        self.refresh_batch_status(batch_id).await?;
-        Ok(result.rows_affected())
-    }
-
-    pub async fn prepare_retry(&self, id: &str) -> AppResult<ImportTask> {
-        let result = self
-            .connection
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                "UPDATE import_tasks SET status = 'queued', error_code = NULL, error_message = NULL, \
-                 warning_message = NULL, retry_count = retry_count + 1, started_at = NULL, completed_at = NULL \
-                 WHERE id = ? AND status IN ('failed', 'interrupted')",
-                [id.into()],
-            ))
-            .await?;
-        if result.rows_affected() != 1 {
-            return Err(AppError::InvalidInput(
-                "只有失败或已中断的任务可以重试".into(),
-            ));
-        }
-        let task = self.task(id).await?;
-        self.set_batch_processing(&task.batch_id).await?;
-        Ok(task)
-    }
-
-    pub async fn prepare_retries(&self, ids: &[String]) -> AppResult<()> {
-        let transaction = self.connection.begin().await?;
-        for id in ids {
-            let result = transaction
-                .execute(Statement::from_sql_and_values(
-                    DbBackend::Sqlite,
-                    "UPDATE import_tasks SET status = 'queued', error_code = NULL, error_message = NULL, \
-                     warning_message = NULL, retry_count = retry_count + 1, started_at = NULL, completed_at = NULL \
-                     WHERE id = ? AND status IN ('failed', 'interrupted')",
-                    [id.as_str().into()],
-                ))
-                .await?;
-            if result.rows_affected() != 1 {
-                transaction.rollback().await?;
-                return Err(AppError::InvalidInput(format!(
-                    "任务 {id} 已不处于可重试状态"
-                )));
-            }
-        }
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    pub async fn retryable_task_ids(&self, batch_id: &str) -> AppResult<Vec<String>> {
-        Ok(import_task::Entity::find()
-            .select_only()
-            .column(import_task::Column::Id)
-            .filter(import_task::Column::BatchId.eq(batch_id))
-            .filter(import_task::Column::Status.is_in(["failed", "interrupted"]))
-            .order_by_asc(import_task::Column::CreatedAt)
-            .into_tuple::<String>()
-            .all(&self.connection)
-            .await?)
-    }
-
+    #[cfg(test)]
     pub async fn persist_recognized_order(
         &self,
         task_id: &str,
@@ -303,6 +213,10 @@ impl Database {
             possible_duplicate: Set(false),
             created_at: Set(timestamp.clone()),
             updated_at: Set(timestamp.clone()),
+            original_file_name: NotSet,
+            managed_image_path: NotSet,
+            image_sha256: NotSet,
+            warning_message: NotSet,
         }
         .insert(&transaction)
         .await?;
@@ -325,46 +239,7 @@ impl Database {
         self.refresh_batch_status(&task.batch_id).await
     }
 
-    pub async fn batch(&self, id: &str) -> AppResult<BatchDetail> {
-        let batch = import_batch::Entity::find_by_id(id)
-            .one(&self.connection)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("导入批次 {id}")))?;
-        let tasks = batch
-            .find_related(import_task::Entity)
-            .order_by_asc(import_task::Column::CreatedAt)
-            .order_by_asc(import_task::Column::Id)
-            .all(&self.connection)
-            .await?
-            .into_iter()
-            .map(ImportTask::from)
-            .collect::<Vec<_>>();
-        let counts = counts_from_tasks(&tasks);
-        Ok(BatchDetail {
-            id: batch.id,
-            platform: batch.platform,
-            status: batch.status,
-            created_at: batch.created_at,
-            completed_at: batch.completed_at,
-            counts,
-            tasks,
-        })
-    }
-
-    pub async fn latest_batch(&self) -> AppResult<Option<BatchDetail>> {
-        let id = import_batch::Entity::find()
-            .select_only()
-            .column(import_batch::Column::Id)
-            .order_by_desc(import_batch::Column::CreatedAt)
-            .into_tuple::<String>()
-            .one(&self.connection)
-            .await?;
-        match id {
-            Some(id) => self.batch(&id).await.map(Some),
-            None => Ok(None),
-        }
-    }
-
+    #[cfg(test)]
     pub async fn list_import_batches(
         &self,
         query: ImportBatchesQuery,
@@ -482,11 +357,6 @@ impl Database {
             .one(&self.connection)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("订单 {id}")))?;
-        let task = order_model
-            .find_related(import_task::Entity)
-            .one(&self.connection)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("订单图片 {id}")))?;
         let product_names = order_model
             .find_related(order_item::Entity)
             .order_by_asc(order_item::Column::Position)
@@ -512,9 +382,9 @@ impl Database {
             possible_duplicate: order_model.possible_duplicate,
             created_at: order_model.created_at,
             updated_at: order_model.updated_at,
-            original_file_name: task.original_file_name,
-            image_path: task.managed_image_path.unwrap_or_default(),
-            warning_message: task.warning_message,
+            original_file_name: order_model.original_file_name.unwrap_or_default(),
+            image_path: order_model.managed_image_path.unwrap_or_default(),
+            warning_message: order_model.warning_message,
             is_matched,
         })
     }
@@ -580,36 +450,17 @@ impl Database {
         if result.rows_affected != 1 {
             return Err(AppError::NotFound(format!("订单 {id}")));
         }
-        let result = import_task::Entity::update_many()
-            .col_expr(
-                import_task::Column::ManagedImagePath,
-                Expr::value(Option::<String>::None),
-            )
-            .filter(import_task::Column::Id.eq(id))
-            .exec(&transaction)
-            .await?;
-        if result.rows_affected != 1 {
-            return Err(AppError::NotFound(format!("导入记录 {id}")));
-        }
         refresh_duplicate_group(&transaction, old_number.as_deref()).await?;
         transaction.commit().await?;
         Ok(())
     }
 
     pub async fn image_relative_path(&self, id: &str) -> AppResult<String> {
-        import_task::Entity::find_by_id(id)
+        order::Entity::find_by_id(id)
             .one(&self.connection)
             .await?
-            .and_then(|task| task.managed_image_path)
+            .and_then(|order| order.managed_image_path)
             .ok_or_else(|| AppError::NotFound(format!("订单图片 {id}")))
-    }
-
-    pub async fn mark_batch_processing(&self, batch_id: &str) -> AppResult<()> {
-        self.set_batch_processing(batch_id).await
-    }
-
-    pub async fn finalize_batch(&self, batch_id: &str) -> AppResult<()> {
-        self.refresh_batch_status(batch_id).await
     }
 
     async fn set_batch_processing(&self, batch_id: &str) -> AppResult<()> {
@@ -669,6 +520,7 @@ impl Database {
     }
 }
 
+#[cfg(test)]
 #[derive(FromQueryResult)]
 struct ImportBatchSummaryRow {
     id: String,
@@ -686,6 +538,7 @@ struct ImportBatchSummaryRow {
     interrupted: i64,
 }
 
+#[cfg(test)]
 impl From<ImportBatchSummaryRow> for ImportBatchSummary {
     fn from(row: ImportBatchSummaryRow) -> Self {
         Self {
@@ -708,6 +561,7 @@ impl From<ImportBatchSummaryRow> for ImportBatchSummary {
     }
 }
 
+#[cfg(test)]
 impl From<import_task::Model> for ImportTask {
     fn from(model: import_task::Model) -> Self {
         Self {
@@ -730,8 +584,18 @@ impl From<import_task::Model> for ImportTask {
 
 fn settings_from_model(model: app_setting::Model) -> AppSettings {
     AppSettings {
+        order_recognition_provider: crate::models::OrderRecognitionProvider::Ollama,
         ollama_base_url: model.ollama_base_url,
         ollama_model: model.ollama_model,
+        openai_base_url: crate::models::DEFAULT_OPENAI_BASE_URL.into(),
+        openai_model: crate::models::DEFAULT_OPENAI_MODEL.into(),
+        openai_api_key_masked: None,
+        openai_api_key_configured: false,
+        aliyun_base_url: crate::models::DEFAULT_ALIYUN_BASE_URL.into(),
+        aliyun_model: crate::models::DEFAULT_ALIYUN_MODEL.into(),
+        aliyun_api_key_masked: None,
+        aliyun_api_key_configured: false,
+        aliyun_enable_thinking: false,
         max_concurrency: u8::try_from(model.max_concurrency).unwrap_or(DEFAULT_MAX_CONCURRENCY),
         tencent_secret_id_masked: None,
         tencent_credentials_configured: false,
@@ -743,7 +607,7 @@ fn settings_from_model(model: app_setting::Model) -> AppSettings {
     }
 }
 
-async fn insert_products<C: ConnectionTrait>(
+pub(crate) async fn insert_products<C: ConnectionTrait>(
     connection: &C,
     order_id: &str,
     product_names: &[String],
@@ -769,7 +633,7 @@ async fn insert_products<C: ConnectionTrait>(
     Ok(())
 }
 
-async fn refresh_duplicate_group(
+pub(crate) async fn refresh_duplicate_group(
     transaction: &DatabaseTransaction,
     order_number: Option<&str>,
 ) -> AppResult<()> {
@@ -786,26 +650,6 @@ async fn refresh_duplicate_group(
         ))
         .await?;
     Ok(())
-}
-
-fn counts_from_tasks(tasks: &[ImportTask]) -> BatchCounts {
-    let mut counts = BatchCounts {
-        total: tasks.len() as i64,
-        ..Default::default()
-    };
-    for task in tasks {
-        match task.status.as_str() {
-            "queued" => counts.queued += 1,
-            "processing" => counts.processing += 1,
-            "succeeded" => counts.succeeded += 1,
-            "failed" => counts.failed += 1,
-            "canceled" => counts.canceled += 1,
-            "skipped" => counts.skipped += 1,
-            "interrupted" => counts.interrupted += 1,
-            _ => {}
-        }
-    }
-    counts
 }
 
 fn validate_order_update(request: &UpdateOrderRequest) -> AppResult<()> {
@@ -924,6 +768,10 @@ mod tests {
             possible_duplicate: Set(seed.duplicate),
             created_at: Set(seed.created_at.into()),
             updated_at: Set(seed.created_at.into()),
+            original_file_name: Set(Some("order.png".into())),
+            managed_image_path: Set(None),
+            image_sha256: Set(None),
+            warning_message: Set(None),
         }
         .insert(&db.connection)
         .await

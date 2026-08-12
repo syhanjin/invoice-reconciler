@@ -3,7 +3,6 @@ import { atomWithStorage } from "jotai/utils"
 
 import type {
   AppSettings,
-  BatchDetail,
   NavigationView,
   OrderSortBy,
   OrderTableColumnId,
@@ -101,25 +100,21 @@ export const orderTablePreferencesAtom = atom(
 
 export const navigationAtom = atom<NavigationView>("orders")
 export const settingsAtom = atom<AppSettings | null>(null)
-export const activeBatchAtom = atom<BatchDetail | null>(null)
 export const selectedOrderIdAtom = atom<string | null>(null)
 export const ordersRefreshAtom = atom(0)
+export const orderImportRefreshAtom = atom(0)
 export const activeInvoiceBatchAtom = atom<InvoiceBatchDetail | null>(null)
 export const invoicesRefreshAtom = atom(0)
 
-export const mergeBatchAtom = atom(null, (get, set, batch: BatchDetail) => {
-  const previousSucceeded = get(activeBatchAtom)?.counts.succeeded ?? 0
-  set(activeBatchAtom, batch)
-  if (batch.counts.succeeded > previousSucceeded) {
-    set(ordersRefreshAtom, (value) => value + 1)
-  }
-})
-
-export const mergeBatchEventAtom = atom(null, (get, set, batch: BatchDetail) => {
-  const activeBatch = get(activeBatchAtom)
-  if (activeBatch && activeBatch.id !== batch.id) return
-  set(mergeBatchAtom, batch)
-})
+export const mergeOrderImportEventAtom = atom(
+  null,
+  (_get, set, event: import("@/lib/types").OrderImportUpdateEvent) => {
+    set(orderImportRefreshAtom, (value) => value + 1)
+    if (event.kind === "task_completed") {
+      set(ordersRefreshAtom, (value) => value + 1)
+    }
+  },
+)
 
 export const mergeInvoiceBatchAtom = atom(null, (get, set, batch: InvoiceBatchDetail) => {
   const previousSucceeded = get(activeInvoiceBatchAtom)?.counts.succeeded ?? 0

@@ -3,16 +3,16 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 
 import type {
   AppSettings,
-  BatchDetail,
   BootstrapState,
   DeleteOrdersResult,
-  ImportBatchesPage,
-  ImportBatchesQuery,
-  OllamaStatus,
+  OrderImportLogsPage,
+  OrderImportPool,
+  OrderImportUpdateEvent,
+  ImportOrderImagesResult,
+  RecognizerStatus,
   OrderDetail,
   OrdersPage,
   OrdersQuery,
-  TaskUpdateEvent,
   UpdateOrderRequest,
   SaveSettingsRequest,
   InvoiceBatchPreview,
@@ -37,20 +37,25 @@ export const api = {
   getSettings: () => invoke<AppSettings>("get_settings"),
   saveSettings: (request: SaveSettingsRequest) =>
     invoke<AppSettings>("save_settings", { request }),
-  checkOllama: (request: SaveSettingsRequest) =>
-    invoke<OllamaStatus>("check_ollama", { request }),
-  createImportBatch: (imagePaths: string[]) =>
-    invoke<BatchDetail>("create_import_batch", {
+  checkOrderRecognizer: (request: SaveSettingsRequest) =>
+    invoke<RecognizerStatus>("check_order_recognizer", { request }),
+  importOrderImages: (imagePaths: string[]) =>
+    invoke<ImportOrderImagesResult>("import_order_images", {
       request: { platform: "taobao", imagePaths },
     }),
-  getBatch: (id: string) => invoke<BatchDetail>("get_batch", { request: { id } }),
-  listImportBatches: (query: ImportBatchesQuery) =>
-    invoke<ImportBatchesPage>("list_import_batches", { query }),
-  cancelTask: (id: string) => invoke<boolean>("cancel_task", { request: { id } }),
-  cancelBatch: (id: string) => invoke<number>("cancel_batch", { request: { id } }),
-  retryTask: (id: string) => invoke<BatchDetail>("retry_task", { request: { id } }),
-  retryFailedBatch: (id: string) =>
-    invoke<BatchDetail>("retry_failed_batch", { request: { id } }),
+  getOrderImportPool: () => invoke<OrderImportPool>("get_order_import_pool"),
+  listOrderImportLogs: (query: { page?: number; pageSize?: number }) =>
+    invoke<OrderImportLogsPage>("list_order_import_logs", { query }),
+  retryOrderImportTask: (id: string) =>
+    invoke<boolean>("retry_order_import_task", { request: { id } }),
+  retryFailedOrderImportTasks: () =>
+    invoke<number>("retry_failed_order_import_tasks"),
+  deleteOrderImportTask: (id: string) =>
+    invoke<void>("delete_order_import_task", { request: { id } }),
+  submitOrderRecognitionBatch: () =>
+    invoke<string>("submit_order_recognition_batch"),
+  cancelOrderRecognitionBatch: (id: string) =>
+    invoke<void>("cancel_order_recognition_batch", { request: { id } }),
   listOrders: (query: OrdersQuery) => invoke<OrdersPage>("list_orders", { query }),
   getOrder: (id: string) => invoke<OrderDetail>("get_order", { request: { id } }),
   updateOrder: (request: UpdateOrderRequest) =>
@@ -87,10 +92,10 @@ export const api = {
     invoke<ConfirmInvoiceMatchResult[]>("confirm_invoice_matches", { request: { matches } }),
   unconfirmInvoiceMatch: (id: string) =>
     invoke<void>("unconfirm_invoice_match", { request: { id } }),
-  listenForTaskUpdates: (
-    handler: (payload: TaskUpdateEvent) => void,
+  listenForOrderImportUpdates: (
+    handler: (payload: OrderImportUpdateEvent) => void,
   ): Promise<UnlistenFn> =>
-    listen<TaskUpdateEvent>("import-task-updated", (event) => handler(event.payload)),
+    listen<OrderImportUpdateEvent>("order-import-updated", (event) => handler(event.payload)),
   listenForInvoiceTaskUpdates: (
     handler: (payload: InvoiceTaskUpdateEvent) => void,
   ): Promise<UnlistenFn> =>

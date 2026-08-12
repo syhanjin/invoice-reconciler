@@ -7,17 +7,18 @@ use tokio::sync::RwLock;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    DEFAULT_INVOICE_OCR_CONCURRENCY, DEFAULT_MATCH_MAX_CANDIDATES, DEFAULT_MATCH_MAX_ORDERS,
-    MAX_MATCH_MAX_CANDIDATES, MAX_MATCH_MAX_ORDERS, MIN_MATCH_MAX_CANDIDATES, MIN_MATCH_MAX_ORDERS,
-    PrivateAppSettings, UpdateSettingsRequest,
+    DEFAULT_ALIYUN_BASE_URL, DEFAULT_ALIYUN_MODEL, DEFAULT_INVOICE_OCR_CONCURRENCY,
+    DEFAULT_MATCH_MAX_CANDIDATES, DEFAULT_MATCH_MAX_ORDERS, DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_OPENAI_MODEL, MAX_MATCH_MAX_CANDIDATES, MAX_MATCH_MAX_ORDERS, MIN_MATCH_MAX_CANDIDATES,
+    MIN_MATCH_MAX_ORDERS, OrderRecognitionProvider, PrivateAppSettings, UpdateSettingsRequest,
 };
 
-const SETTINGS_VERSION: u32 = 1;
+const SETTINGS_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SettingsFile {
     version: u32,
-    ollama: OllamaSettings,
+    order_recognition: OrderRecognitionFile,
     tencent_cloud: TencentSettings,
     #[serde(default)]
     matching: MatchingSettings,
@@ -28,6 +29,45 @@ struct OllamaSettings {
     base_url: String,
     model: String,
     max_concurrency: u8,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LegacySettingsFile {
+    version: u32,
+    ollama: OllamaSettings,
+    tencent_cloud: TencentSettings,
+    #[serde(default)]
+    matching: MatchingSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct OrderRecognitionFile {
+    provider: OrderRecognitionProvider,
+    max_concurrency: u8,
+    ollama: ProviderEndpoint,
+    openai: AuthenticatedEndpoint,
+    aliyun_batch: AliyunBatchEndpoint,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ProviderEndpoint {
+    base_url: String,
+    model: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AuthenticatedEndpoint {
+    base_url: String,
+    model: String,
+    api_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AliyunBatchEndpoint {
+    base_url: String,
+    model: String,
+    api_key: String,
+    enable_thinking: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -69,23 +109,49 @@ impl SettingsStore {
             let content = tokio::fs::read_to_string(&path).await.map_err(|error| {
                 AppError::Settings(format!("无法读取 {}：{error}", path.display()))
             })?;
-            let parsed: SettingsFile = toml::from_str(&content).map_err(|_| {
-                AppError::Settings("设置格式无效，请检查 settings.toml 的字段和版本".into())
-            })?;
-            if parsed.version != SETTINGS_VERSION {
-                return Err(AppError::Settings(format!(
-                    "不支持的设置文件版本 {}",
-                    parsed.version
-                )));
+            let version = toml::from_str::<toml::Value>(&content)
+                .ok()
+                .and_then(|value| value.get("version")?.as_integer())
+                .ok_or_else(|| {
+                    AppError::Settings("设置格式无效，请检查 settings.toml 的字段和版本".into())
+                })?;
+            match version {
+                1 => {
+                    let legacy: LegacySettingsFile = toml::from_str(&content).map_err(|_| {
+                        AppError::Settings("设置格式无效，请检查 settings.toml 的字段和版本".into())
+                    })?;
+                    let upgraded = from_legacy_file(legacy);
+                    write_file(&path, &upgraded).await?;
+                    upgraded
+                }
+                value if value == i64::from(SETTINGS_VERSION) => {
+                    toml::from_str(&content).map_err(|_| {
+                        AppError::Settings("设置格式无效，请检查 settings.toml 的字段和版本".into())
+                    })?
+                }
+                value => return Err(AppError::Settings(format!("不支持的设置文件版本 {value}"))),
             }
-            parsed
         } else {
             let initial = SettingsFile {
                 version: SETTINGS_VERSION,
-                ollama: OllamaSettings {
-                    base_url: legacy.ollama_base_url,
-                    model: legacy.ollama_model,
+                order_recognition: OrderRecognitionFile {
+                    provider: OrderRecognitionProvider::Ollama,
                     max_concurrency: legacy.max_concurrency,
+                    ollama: ProviderEndpoint {
+                        base_url: legacy.ollama_base_url,
+                        model: legacy.ollama_model,
+                    },
+                    openai: AuthenticatedEndpoint {
+                        base_url: DEFAULT_OPENAI_BASE_URL.into(),
+                        model: DEFAULT_OPENAI_MODEL.into(),
+                        api_key: String::new(),
+                    },
+                    aliyun_batch: AliyunBatchEndpoint {
+                        base_url: DEFAULT_ALIYUN_BASE_URL.into(),
+                        model: DEFAULT_ALIYUN_MODEL.into(),
+                        api_key: String::new(),
+                        enable_thinking: false,
+                    },
                 },
                 tencent_cloud: TencentSettings {
                     secret_id: String::new(),
@@ -121,6 +187,25 @@ impl SettingsStore {
     ) -> AppResult<crate::models::AppSettings> {
         let validated = request.clone().validate()?;
         let mut current = self.current.write().await;
+        let openai_api_key = update_secret(
+            &current.openai_api_key,
+            request.openai_api_key.as_deref(),
+            request.clear_openai_api_key,
+        );
+        let aliyun_api_key = update_secret(
+            &current.aliyun_api_key,
+            request.aliyun_api_key.as_deref(),
+            request.clear_aliyun_api_key,
+        );
+        if matches!(
+            request.order_recognition_provider,
+            OrderRecognitionProvider::AliyunBatch
+        ) && aliyun_api_key.is_empty()
+        {
+            return Err(AppError::InvalidInput(
+                "阿里云百炼 Batch 模式必须配置 API Key".into(),
+            ));
+        }
         let secret_id = if request.clear_tencent_credentials {
             String::new()
         } else {
@@ -150,10 +235,24 @@ impl SettingsStore {
         }
         let file = SettingsFile {
             version: SETTINGS_VERSION,
-            ollama: OllamaSettings {
-                base_url: validated.ollama_base_url,
-                model: validated.ollama_model,
+            order_recognition: OrderRecognitionFile {
+                provider: validated.order_recognition_provider,
                 max_concurrency: validated.max_concurrency,
+                ollama: ProviderEndpoint {
+                    base_url: validated.ollama_base_url,
+                    model: validated.ollama_model,
+                },
+                openai: AuthenticatedEndpoint {
+                    base_url: validated.openai_base_url,
+                    model: validated.openai_model,
+                    api_key: openai_api_key,
+                },
+                aliyun_batch: AliyunBatchEndpoint {
+                    base_url: validated.aliyun_base_url,
+                    model: validated.aliyun_model,
+                    api_key: aliyun_api_key,
+                    enable_thinking: request.aliyun_enable_thinking,
+                },
             },
             tencent_cloud: TencentSettings {
                 secret_id,
@@ -179,9 +278,32 @@ impl SettingsStore {
 
 fn to_private(file: SettingsFile, path: &Path, warning: Option<String>) -> PrivateAppSettings {
     PrivateAppSettings {
-        ollama_base_url: file.ollama.base_url.trim_end_matches('/').to_owned(),
-        ollama_model: file.ollama.model,
-        max_concurrency: file.ollama.max_concurrency.clamp(1, 8),
+        order_recognition_provider: file.order_recognition.provider,
+        ollama_base_url: file
+            .order_recognition
+            .ollama
+            .base_url
+            .trim_end_matches('/')
+            .to_owned(),
+        ollama_model: file.order_recognition.ollama.model,
+        openai_base_url: file
+            .order_recognition
+            .openai
+            .base_url
+            .trim_end_matches('/')
+            .to_owned(),
+        openai_model: file.order_recognition.openai.model,
+        openai_api_key: file.order_recognition.openai.api_key,
+        aliyun_base_url: file
+            .order_recognition
+            .aliyun_batch
+            .base_url
+            .trim_end_matches('/')
+            .to_owned(),
+        aliyun_model: file.order_recognition.aliyun_batch.model,
+        aliyun_api_key: file.order_recognition.aliyun_batch.api_key,
+        aliyun_enable_thinking: file.order_recognition.aliyun_batch.enable_thinking,
+        max_concurrency: file.order_recognition.max_concurrency.clamp(1, 8),
         tencent_secret_id: file.tencent_cloud.secret_id,
         tencent_secret_key: file.tencent_cloud.secret_key,
         invoice_ocr_concurrency: file.tencent_cloud.invoice_ocr_concurrency.clamp(1, 5),
@@ -195,6 +317,45 @@ fn to_private(file: SettingsFile, path: &Path, warning: Option<String>) -> Priva
             .clamp(MIN_MATCH_MAX_CANDIDATES, MAX_MATCH_MAX_CANDIDATES),
         settings_path: path.to_string_lossy().into_owned(),
         permission_warning: warning,
+    }
+}
+
+fn update_secret(current: &str, requested: Option<&str>, clear: bool) -> String {
+    if clear {
+        return String::new();
+    }
+    requested
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| current.to_owned())
+}
+
+fn from_legacy_file(legacy: LegacySettingsFile) -> SettingsFile {
+    debug_assert_eq!(legacy.version, 1);
+    SettingsFile {
+        version: SETTINGS_VERSION,
+        order_recognition: OrderRecognitionFile {
+            provider: OrderRecognitionProvider::Ollama,
+            max_concurrency: legacy.ollama.max_concurrency,
+            ollama: ProviderEndpoint {
+                base_url: legacy.ollama.base_url,
+                model: legacy.ollama.model,
+            },
+            openai: AuthenticatedEndpoint {
+                base_url: DEFAULT_OPENAI_BASE_URL.into(),
+                model: DEFAULT_OPENAI_MODEL.into(),
+                api_key: String::new(),
+            },
+            aliyun_batch: AliyunBatchEndpoint {
+                base_url: DEFAULT_ALIYUN_BASE_URL.into(),
+                model: DEFAULT_ALIYUN_MODEL.into(),
+                api_key: String::new(),
+                enable_thinking: false,
+            },
+        },
+        tencent_cloud: legacy.tencent_cloud,
+        matching: legacy.matching,
     }
 }
 
@@ -305,8 +466,18 @@ mod tests {
 
     fn legacy() -> AppSettings {
         AppSettings {
+            order_recognition_provider: OrderRecognitionProvider::Ollama,
             ollama_base_url: "http://127.0.0.1:11434".into(),
             ollama_model: "qwen".into(),
+            openai_base_url: DEFAULT_OPENAI_BASE_URL.into(),
+            openai_model: DEFAULT_OPENAI_MODEL.into(),
+            openai_api_key_masked: None,
+            openai_api_key_configured: false,
+            aliyun_base_url: DEFAULT_ALIYUN_BASE_URL.into(),
+            aliyun_model: DEFAULT_ALIYUN_MODEL.into(),
+            aliyun_api_key_masked: None,
+            aliyun_api_key_configured: false,
+            aliyun_enable_thinking: false,
             max_concurrency: 3,
             tencent_secret_id_masked: None,
             tencent_credentials_configured: false,
@@ -326,8 +497,18 @@ mod tests {
             .unwrap();
         let saved = store
             .save(UpdateSettingsRequest {
+                order_recognition_provider: OrderRecognitionProvider::Openai,
                 ollama_base_url: "http://localhost:11434".into(),
                 ollama_model: "qwen".into(),
+                openai_base_url: "https://api.example.com/v1".into(),
+                openai_model: "vision-model".into(),
+                openai_api_key: Some("openai-private".into()),
+                clear_openai_api_key: false,
+                aliyun_base_url: DEFAULT_ALIYUN_BASE_URL.into(),
+                aliyun_model: DEFAULT_ALIYUN_MODEL.into(),
+                aliyun_api_key: Some("aliyun-private".into()),
+                clear_aliyun_api_key: false,
+                aliyun_enable_thinking: false,
                 max_concurrency: 2,
                 tencent_secret_id: Some("AKID1234567890".into()),
                 tencent_secret_key: Some("private-value".into()),
@@ -339,6 +520,8 @@ mod tests {
             .await
             .unwrap();
         assert!(saved.tencent_credentials_configured);
+        assert!(saved.openai_api_key_configured);
+        assert!(saved.aliyun_api_key_configured);
         assert!(
             !serde_json::to_string(&saved)
                 .unwrap()
@@ -381,7 +564,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_one_settings_without_matching_section_use_defaults() {
+    async fn version_one_settings_upgrade_to_provider_settings() {
         let directory = tempfile::tempdir().unwrap();
         tokio::fs::write(
             directory.path().join("settings.toml"),
@@ -394,7 +577,16 @@ mod tests {
             .await
             .unwrap();
         let public = store.public().await;
+        assert_eq!(
+            public.order_recognition_provider,
+            OrderRecognitionProvider::Ollama
+        );
         assert_eq!(public.match_max_orders, DEFAULT_MATCH_MAX_ORDERS);
         assert_eq!(public.match_max_candidates, DEFAULT_MATCH_MAX_CANDIDATES);
+        let upgraded = tokio::fs::read_to_string(directory.path().join("settings.toml"))
+            .await
+            .unwrap();
+        assert!(upgraded.contains("version = 2"));
+        assert!(upgraded.contains("provider = \"ollama\""));
     }
 }

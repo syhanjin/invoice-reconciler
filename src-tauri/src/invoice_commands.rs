@@ -730,10 +730,6 @@ mod tests {
 
     use super::*;
     use crate::db::Database;
-    use crate::ocr::OllamaClient;
-    use crate::queue::QueueManager;
-    use crate::settings::SettingsStore;
-    use crate::tencent_ocr::TencentOcrClient;
 
     async fn test_state() -> (TempDir, AppState) {
         let directory = tempfile::tempdir().unwrap();
@@ -741,30 +737,8 @@ mod tests {
         let images_dir = app_data_dir.join("images");
         tokio::fs::create_dir_all(&images_dir).await.unwrap();
         let database = Database::in_memory().await.unwrap();
-        let ollama = OllamaClient::new().unwrap();
-        let queue = QueueManager::new(database.clone(), ollama.clone(), app_data_dir.clone());
-        let legacy = database.settings().await.unwrap();
-        let settings = SettingsStore::load_or_migrate(&app_data_dir, legacy)
-            .await
-            .unwrap();
-        let invoice_queue = crate::invoice_queue::InvoiceQueueManager::new(
-            database.clone(),
-            TencentOcrClient::new().unwrap(),
-            app_data_dir.clone(),
-        );
-        (
-            directory,
-            AppState {
-                database,
-                ollama,
-                queue,
-                invoice_queue,
-                invoice_preflights: InvoicePreflightStore::default(),
-                settings,
-                app_data_dir,
-                images_dir,
-            },
-        )
+        let state = AppState::test(database, app_data_dir, images_dir).await;
+        (directory, state)
     }
 
     #[tokio::test]

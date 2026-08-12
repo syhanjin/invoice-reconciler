@@ -1,8 +1,18 @@
 export type NavigationView = "orders" | "invoices" | "matching" | "importTasks" | "settings"
 
 export interface AppSettings {
+  orderRecognitionProvider: OrderRecognitionProvider
   ollamaBaseUrl: string
   ollamaModel: string
+  openaiBaseUrl: string
+  openaiModel: string
+  openaiApiKeyMasked: string | null
+  openaiApiKeyConfigured: boolean
+  aliyunBaseUrl: string
+  aliyunModel: string
+  aliyunApiKeyMasked: string | null
+  aliyunApiKeyConfigured: boolean
+  aliyunEnableThinking: boolean
   maxConcurrency: number
   tencentSecretIdMasked: string | null
   tencentCredentialsConfigured: boolean
@@ -14,8 +24,18 @@ export interface AppSettings {
 }
 
 export interface SaveSettingsRequest {
+  orderRecognitionProvider: OrderRecognitionProvider
   ollamaBaseUrl: string
   ollamaModel: string
+  openaiBaseUrl: string
+  openaiModel: string
+  openaiApiKey: string | null
+  clearOpenaiApiKey: boolean
+  aliyunBaseUrl: string
+  aliyunModel: string
+  aliyunApiKey: string | null
+  clearAliyunApiKey: boolean
+  aliyunEnableThinking: boolean
   maxConcurrency: number
   tencentSecretId: string | null
   tencentSecretKey: string | null
@@ -25,85 +45,83 @@ export interface SaveSettingsRequest {
   matchMaxCandidates: number
 }
 
-export type TaskStatus =
-  | "queued"
-  | "processing"
-  | "succeeded"
-  | "failed"
-  | "canceled"
-  | "skipped"
-  | "interrupted"
+export type OrderRecognitionProvider = "ollama" | "openai" | "aliyun_batch"
 
-export interface ImportTask {
+export type OrderImportTaskStatus =
+  | "pending"
+  | "processing"
+  | "batch_submitting"
+  | "batch_locked"
+  | "failed"
+
+export interface OrderImportTask {
   id: string
-  batchId: string
   originalFileName: string
-  managedImagePath: string | null
-  imageSha256: string
-  status: TaskStatus
+  status: OrderImportTaskStatus
+  batchShortNumber: string | null
   errorCode: string | null
   errorMessage: string | null
-  warningMessage: string | null
   retryCount: number
   createdAt: string
   startedAt: string | null
+}
+
+export interface OrderRecognitionBatch {
+  id: string
+  shortNumber: string
+  status: "uploading" | "submitted" | "validating" | "in_progress" | "finalizing" | "canceling"
+  model: string
+  taskCount: number
+  errorMessage: string | null
+  createdAt: string
   completedAt: string | null
 }
 
-export interface BatchCounts {
-  total: number
-  queued: number
+export interface OrderImportPool {
+  tasks: OrderImportTask[]
+  batches: OrderRecognitionBatch[]
+  pending: number
   processing: number
-  succeeded: number
   failed: number
-  canceled: number
+}
+
+export interface ImportOrderImagesResult {
+  imported: number
   skipped: number
-  interrupted: number
 }
 
-export interface BatchDetail {
-  id: string
-  platform: "taobao"
-  status: "queued" | "processing" | "completed" | "completed_with_errors"
-  createdAt: string
-  completedAt: string | null
-  counts: BatchCounts
-  tasks: ImportTask[]
+export interface OrderImportLog {
+  taskId: string
+  orderId: string
+  originalFileName: string
+  provider: string
+  model: string
+  batchShortNumber: string | null
+  warningMessage: string | null
+  completedAt: string
 }
 
-export interface ImportBatchSummary {
-  id: string
-  platform: "taobao"
-  status: BatchDetail["status"]
-  createdAt: string
-  completedAt: string | null
-  counts: BatchCounts
-}
-
-export interface ImportBatchesPage {
-  items: ImportBatchSummary[]
+export interface OrderImportLogsPage {
+  items: OrderImportLog[]
   total: number
   page: number
   pageSize: number
 }
 
-export interface ImportBatchesQuery {
-  page?: number
-  pageSize?: number
-}
-
 export interface BootstrapState {
   settings: AppSettings
-  latestBatch: BatchDetail | null
   latestInvoiceBatch: InvoiceBatchDetail | null
 }
 
-export interface TaskUpdateEvent {
-  task: ImportTask
-  batch: BatchDetail
+export interface OrderImportUpdateEvent {
+  kind: string
+  taskId: string | null
+  orderId: string | null
+  recognitionBatchId: string | null
 }
 
-export interface OllamaStatus {
+export interface RecognizerStatus {
+  provider: OrderRecognitionProvider
   reachable: boolean
   modelAvailable: boolean
   version: string | null

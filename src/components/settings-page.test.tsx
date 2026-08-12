@@ -6,7 +6,7 @@ import type { AppSettings } from "@/lib/types"
 
 const mocks = vi.hoisted(() => ({
   saveSettings: vi.fn(),
-  checkOllama: vi.fn(),
+  checkOrderRecognizer: vi.fn(),
 }))
 
 vi.mock("@/lib/api", () => ({
@@ -17,8 +17,18 @@ vi.mock("@/lib/api", () => ({
 import SettingsPage from "./settings-page"
 
 const settings: AppSettings = {
+  orderRecognitionProvider: "ollama",
   ollamaBaseUrl: "http://127.0.0.1:11434",
   ollamaModel: "qwen3-vl:4b",
+  openaiBaseUrl: "https://example.com/v1",
+  openaiModel: "vision-model",
+  openaiApiKeyMasked: "sk-****1234",
+  openaiApiKeyConfigured: true,
+  aliyunBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  aliyunModel: "qwen-vl-max",
+  aliyunApiKeyMasked: "sk-****7890",
+  aliyunApiKeyConfigured: true,
+  aliyunEnableThinking: false,
   maxConcurrency: 3,
   tencentSecretIdMasked: "AKID****7890",
   tencentCredentialsConfigured: true,
@@ -34,6 +44,13 @@ describe("SettingsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.saveSettings.mockResolvedValue(settings)
+    mocks.checkOrderRecognizer.mockResolvedValue({
+      provider: "ollama",
+      reachable: true,
+      modelAvailable: true,
+      version: "1.0",
+      message: "连接正常",
+    })
   })
 
   it("keeps stored credentials when both secret inputs stay empty", async () => {

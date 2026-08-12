@@ -10,15 +10,14 @@ import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { api, errorMessage } from "@/lib/api"
 import {
-  activeBatchAtom,
   activeInvoiceBatchAtom,
   invoicesRefreshAtom,
-  mergeBatchAtom,
-  mergeBatchEventAtom,
+  mergeOrderImportEventAtom,
   mergeInvoiceBatchAtom,
   mergeInvoiceBatchEventAtom,
   navigationAtom,
   ordersRefreshAtom,
+  orderImportRefreshAtom,
   settingsAtom,
 } from "@/lib/store"
 
@@ -45,23 +44,19 @@ function Initializing() {
 export function App() {
   const [view, setView] = useAtom(navigationAtom)
   const [settings, setSettings] = useAtom(settingsAtom)
-  const [activeBatch, setActiveBatch] = useAtom(activeBatchAtom)
-  const mergeBatch = useSetAtom(mergeBatchAtom)
-  const mergeBatchEvent = useSetAtom(mergeBatchEventAtom)
+  const mergeOrderImportEvent = useSetAtom(mergeOrderImportEventAtom)
   const refreshToken = useAtomValue(ordersRefreshAtom)
+  const orderImportRefreshToken = useAtomValue(orderImportRefreshAtom)
   const invoiceRefreshToken = useAtomValue(invoicesRefreshAtom)
   const [activeInvoiceBatch, setActiveInvoiceBatch] = useAtom(activeInvoiceBatchAtom)
   const mergeInvoiceBatch = useSetAtom(mergeInvoiceBatchAtom)
   const mergeInvoiceBatchEvent = useSetAtom(mergeInvoiceBatchEventAtom)
   const [ready, setReady] = useState(false)
-  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null)
   const [selectedInvoiceBatchId, setSelectedInvoiceBatchId] = useState<string | null>(null)
 
-  const handleBatchCreated = useCallback((batch: Parameters<typeof mergeBatch>[0]) => {
-    mergeBatch(batch)
-    setSelectedBatchId(batch.id)
+  const handleOrderImagesImported = useCallback(() => {
     setView("importTasks")
-  }, [mergeBatch, setView])
+  }, [setView])
 
   const handleInvoiceBatchCreated = useCallback((batch: Parameters<typeof mergeInvoiceBatch>[0]) => {
     mergeInvoiceBatch(batch)
@@ -78,7 +73,6 @@ export function App() {
       .then((state) => {
         if (disposed) return
         setSettings(state.settings)
-        setActiveBatch(state.latestBatch)
         setActiveInvoiceBatch(state.latestInvoiceBatch)
         setReady(true)
       })
@@ -86,7 +80,7 @@ export function App() {
         toast.error(errorMessage(error), { duration: 8000 })
         setReady(true)
       })
-    api.listenForTaskUpdates((event) => mergeBatchEvent(event.batch)).then((dispose) => {
+    api.listenForOrderImportUpdates((event) => mergeOrderImportEvent(event)).then((dispose) => {
       if (disposed) dispose()
       else unlisten = dispose
     })
@@ -99,7 +93,7 @@ export function App() {
       unlisten?.()
       unlistenInvoice?.()
     }
-  }, [mergeBatchEvent, mergeInvoiceBatchEvent, setActiveBatch, setActiveInvoiceBatch, setSettings])
+  }, [mergeOrderImportEvent, mergeInvoiceBatchEvent, setActiveInvoiceBatch, setSettings])
 
   return (
     <TooltipProvider>
@@ -109,7 +103,7 @@ export function App() {
         <AppShell view={view} onViewChange={setView}>
           {view === "orders" && (
             <OrdersPage
-              onBatchCreated={handleBatchCreated}
+              onImagesImported={handleOrderImagesImported}
               refreshToken={refreshToken}
             />
           )}
@@ -124,13 +118,11 @@ export function App() {
               <MatchingPage refreshToken={`${refreshToken}:${invoiceRefreshToken}`} />
             </Suspense>
           )}
-          {view === "importTasks" && (
+          {view === "importTasks" && settings && (
             <Suspense fallback={<Initializing />}>
               <ImportTasksPage
-                activeBatch={activeBatch}
-                selectedBatchId={selectedBatchId}
-                onSelectedBatchChange={setSelectedBatchId}
-                onBatchChange={mergeBatch}
+                settings={settings}
+                orderRefreshToken={orderImportRefreshToken}
                 activeInvoiceBatch={activeInvoiceBatch}
                 selectedInvoiceBatchId={selectedInvoiceBatchId}
                 onSelectedInvoiceBatchChange={setSelectedInvoiceBatchId}

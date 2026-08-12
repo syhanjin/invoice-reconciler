@@ -8,7 +8,7 @@ import {
   LoaderCircle,
   PlugZap,
   Save,
-  Server,
+  ScanLine,
   Terminal,
 } from "lucide-react"
 import { useEffect, useState } from "react"
@@ -22,14 +22,27 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api, errorMessage } from "@/lib/api"
-import type { AppSettings, OllamaStatus } from "@/lib/types"
+import type { AppSettings, OrderRecognitionProvider, RecognizerStatus, SaveSettingsRequest } from "@/lib/types"
+
+const httpUrl = z
+  .url("请输入有效地址")
+  .refine((value) => value.startsWith("http://") || value.startsWith("https://"), "仅支持 HTTP(S) 地址")
 
 const settingsSchema = z.object({
-  ollamaBaseUrl: z
-    .url("请输入有效地址")
-    .refine((value) => value.startsWith("http://") || value.startsWith("https://"), "仅支持 HTTP(S) 地址"),
+  orderRecognitionProvider: z.enum(["ollama", "openai", "aliyun_batch"]),
+  ollamaBaseUrl: httpUrl,
   ollamaModel: z.string().trim().min(1, "模型名称不能为空").max(200),
+  openaiBaseUrl: httpUrl,
+  openaiModel: z.string().trim().min(1, "模型名称不能为空").max(200),
+  openaiApiKey: z.string().trim().max(500),
+  clearOpenaiApiKey: z.boolean(),
+  aliyunBaseUrl: httpUrl,
+  aliyunModel: z.string().trim().min(1, "模型名称不能为空").max(200),
+  aliyunApiKey: z.string().trim().max(500),
+  clearAliyunApiKey: z.boolean(),
+  aliyunEnableThinking: z.boolean(),
   maxConcurrency: z.number().int().min(1).max(8),
   tencentSecretId: z.string().trim().max(200),
   tencentSecretKey: z.string().trim().max(200),
@@ -51,59 +64,67 @@ interface SettingsPageProps {
   onSettingsChange: (settings: AppSettings) => void
 }
 
+const providerNames: Record<OrderRecognitionProvider, string> = {
+  ollama: "Ollama",
+  openai: "OpenAI 兼容",
+  aliyun_batch: "阿里云百炼批处理",
+}
+
 export default function SettingsPage({ settings, onSettingsChange }: SettingsPageProps) {
-  const [status, setStatus] = useState<OllamaStatus | null>(null)
+  const [status, setStatus] = useState<RecognizerStatus | null>(null)
   const [checking, setChecking] = useState(false)
   const form = useForm<SettingsForm>({
     resolver: zodResolver(settingsSchema),
     defaultValues: formValues(settings),
   })
-  const clearCredentials = form.watch("clearTencentCredentials")
+  const provider = form.watch("orderRecognitionProvider")
+  const clearOpenaiApiKey = form.watch("clearOpenaiApiKey")
+  const clearAliyunApiKey = form.watch("clearAliyunApiKey")
+  const clearTencentCredentials = form.watch("clearTencentCredentials")
 
   useEffect(() => form.reset(formValues(settings)), [form, settings])
-
-  const requestFrom = (values: SettingsForm) => ({
-    ollamaBaseUrl: values.ollamaBaseUrl,
-    ollamaModel: values.ollamaModel,
-    maxConcurrency: values.maxConcurrency,
-    tencentSecretId: values.tencentSecretId || null,
-    tencentSecretKey: values.tencentSecretKey || null,
-    clearTencentCredentials: values.clearTencentCredentials,
-    invoiceOcrConcurrency: values.invoiceOcrConcurrency,
-    matchMaxOrders: values.matchMaxOrders,
-    matchMaxCandidates: values.matchMaxCandidates,
-  })
 
   const save = form.handleSubmit(async (values) => {
     try {
       const saved = await api.saveSettings(requestFrom(values))
       onSettingsChange(saved)
       form.reset(formValues(saved))
-      toast.success("设置已保存，将从下一个批次开始生效")
+      setStatus(null)
+      toast.success("设置已保存")
     } catch (error) {
       toast.error(errorMessage(error))
     }
   })
 
   const check = async () => {
-    const valid = await form.trigger(["ollamaBaseUrl", "ollamaModel", "maxConcurrency"])
-    if (!valid) return
+    const fields = provider === "ollama"
+      ? (["ollamaBaseUrl", "ollamaModel"] as const)
+      : provider === "openai"
+        ? (["openaiBaseUrl", "openaiModel"] as const)
+        : (["aliyunBaseUrl", "aliyunModel"] as const)
+    if (!await form.trigger(fields)) return
     setChecking(true)
     setStatus(null)
     try {
-      setStatus(await api.checkOllama(requestFrom(form.getValues())))
+      setStatus(await api.checkOrderRecognizer(requestFrom(form.getValues())))
     } catch (error) {
-      setStatus({ reachable: false, modelAvailable: false, version: null, message: errorMessage(error) })
+      setStatus({
+        provider,
+        reachable: false,
+        modelAvailable: false,
+        version: null,
+        message: errorMessage(error),
+      })
     } finally {
       setChecking(false)
     }
   }
 
   return (
-    <div className="h-screen overflow-y-auto px-8 py-7">
+    <div className="h-screen overflow-y-auto px-5 py-6 md:px-8 md:py-7">
       <header className="mb-6">
         <h1 className="text-xl font-semibold">设置</h1>
-        <p className="mt-1 text-sm text-muted-foreground">管理本地识别服务、腾讯云凭据与任务并发。</p>
+        <p className="mt-1 text-sm text-muted-foreground">管理订单识别、发票识别与自动匹配参数。</p>
       </header>
       <form onSubmit={save} className="max-w-3xl space-y-5">
         {settings.permissionWarning && (
@@ -117,27 +138,106 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
         <Card className="rounded-md shadow-none">
           <CardHeader>
             <div className="flex items-center gap-3">
-              <div className="flex size-9 items-center justify-center rounded-md bg-zinc-100"><Server className="size-4" /></div>
-              <div><CardTitle className="text-base">Ollama</CardTitle><CardDescription>订单截图使用的本地视觉模型</CardDescription></div>
+              <div className="flex size-9 items-center justify-center rounded-md bg-zinc-100"><ScanLine className="size-4" /></div>
+              <div><CardTitle className="text-base">订单识别</CardTitle><CardDescription>实时服务自动排队，阿里云批处理由任务池手动提交</CardDescription></div>
             </div>
           </CardHeader>
           <CardContent className="space-y-5">
-            <div className="grid grid-cols-[1fr_220px] gap-4">
-              <Field label="服务地址" error={form.formState.errors.ollamaBaseUrl?.message}>
-                <Input {...form.register("ollamaBaseUrl")} />
-              </Field>
-              <Field label="视觉模型" error={form.formState.errors.ollamaModel?.message}>
-                <Input {...form.register("ollamaModel")} />
-              </Field>
-            </div>
-            <Field label="最大同时请求数">
-              <Input type="number" min={1} max={8} className="w-28" {...form.register("maxConcurrency", { valueAsNumber: true })} />
+            <Field label="识别方案">
+              <Select
+                value={provider}
+                onValueChange={(value) => {
+                  form.setValue("orderRecognitionProvider", value as OrderRecognitionProvider, { shouldDirty: true })
+                  setStatus(null)
+                }}
+              >
+                <SelectTrigger className="w-full sm:w-64"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ollama">Ollama</SelectItem>
+                  <SelectItem value="openai">OpenAI 兼容</SelectItem>
+                  <SelectItem value="aliyun_batch">阿里云百炼批处理</SelectItem>
+                </SelectContent>
+              </Select>
             </Field>
+
+            {provider === "ollama" && (
+              <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px]">
+                <Field label="服务地址" error={form.formState.errors.ollamaBaseUrl?.message}>
+                  <Input {...form.register("ollamaBaseUrl")} />
+                </Field>
+                <Field label="视觉模型" error={form.formState.errors.ollamaModel?.message}>
+                  <Input {...form.register("ollamaModel")} />
+                </Field>
+              </div>
+            )}
+
+            {provider === "openai" && (
+              <>
+                <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px]">
+                  <Field label="API 地址" error={form.formState.errors.openaiBaseUrl?.message}>
+                    <Input {...form.register("openaiBaseUrl")} />
+                  </Field>
+                  <Field label="视觉模型" error={form.formState.errors.openaiModel?.message}>
+                    <Input {...form.register("openaiModel")} />
+                  </Field>
+                </div>
+                <CredentialField
+                  label="API Key"
+                  configured={settings.openaiApiKeyConfigured}
+                  masked={settings.openaiApiKeyMasked}
+                  clear={clearOpenaiApiKey}
+                  onClearChange={(checked) => form.setValue("clearOpenaiApiKey", checked, { shouldDirty: true })}
+                  inputProps={form.register("openaiApiKey")}
+                />
+              </>
+            )}
+
+            {provider === "aliyun_batch" && (
+              <>
+                <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px]">
+                  <Field label="API 地址" error={form.formState.errors.aliyunBaseUrl?.message}>
+                    <Input {...form.register("aliyunBaseUrl")} />
+                  </Field>
+                  <Field label="视觉模型" error={form.formState.errors.aliyunModel?.message}>
+                    <Input {...form.register("aliyunModel")} />
+                  </Field>
+                </div>
+                <CredentialField
+                  label="API Key"
+                  configured={settings.aliyunApiKeyConfigured}
+                  masked={settings.aliyunApiKeyMasked}
+                  clear={clearAliyunApiKey}
+                  onClearChange={(checked) => form.setValue("clearAliyunApiKey", checked, { shouldDirty: true })}
+                  inputProps={form.register("aliyunApiKey")}
+                />
+                <label className="flex w-fit cursor-pointer items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={form.watch("aliyunEnableThinking")}
+                    onCheckedChange={(checked) => form.setValue("aliyunEnableThinking", checked === true, { shouldDirty: true })}
+                  />
+                  启用模型思考模式
+                </label>
+              </>
+            )}
+
+            {provider !== "aliyun_batch" && (
+              <Field label="最大同时请求数" error={form.formState.errors.maxConcurrency?.message}>
+                <Input type="number" min={1} max={8} className="w-28" {...form.register("maxConcurrency", { valueAsNumber: true })} />
+              </Field>
+            )}
             <Button type="button" variant="outline" disabled={checking} onClick={check}>
-              {checking ? <LoaderCircle className="animate-spin" /> : <PlugZap />}测试 Ollama
+              {checking ? <LoaderCircle className="animate-spin" /> : <PlugZap />}测试连接
             </Button>
           </CardContent>
         </Card>
+
+        {status && (
+          <Alert className={status.reachable && status.modelAvailable ? "rounded-md border-emerald-200 bg-emerald-50" : "rounded-md border-amber-200 bg-amber-50"}>
+            {status.reachable && status.modelAvailable ? <CheckCircle2 /> : <Terminal />}
+            <AlertTitle>{status.reachable && status.modelAvailable ? `${providerNames[status.provider]} 连接正常` : `${providerNames[status.provider]} 需要处理`}</AlertTitle>
+            <AlertDescription>{status.message}</AlertDescription>
+          </Alert>
+        )}
 
         <Card className="rounded-md shadow-none">
           <CardHeader>
@@ -146,7 +246,7 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
               <div><CardTitle className="text-base">自动匹配</CardTitle><CardDescription>限制多订单候选组合的搜索规模</CardDescription></div>
             </div>
           </CardHeader>
-          <CardContent className="grid grid-cols-2 gap-4">
+          <CardContent className="grid gap-4 sm:grid-cols-2">
             <Field label="单个组合最多订单数" error={form.formState.errors.matchMaxOrders?.message}>
               <Input type="number" min={2} max={20} className="w-32" {...form.register("matchMaxOrders", { valueAsNumber: true })} />
             </Field>
@@ -172,36 +272,28 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
               <AlertTitle>凭据保存在本机设置文件</AlertTitle>
               <AlertDescription className="break-all">{settings.settingsPath}</AlertDescription>
             </Alert>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-4 sm:grid-cols-2">
               <Field label="SecretId">
-                <Input aria-label="SecretId" autoComplete="off" disabled={clearCredentials} placeholder={settings.tencentCredentialsConfigured ? "留空保持现有值" : "AKID..."} {...form.register("tencentSecretId")} />
+                <Input aria-label="SecretId" autoComplete="off" disabled={clearTencentCredentials} placeholder={settings.tencentCredentialsConfigured ? "留空保持现有值" : "AKID..."} {...form.register("tencentSecretId")} />
               </Field>
               <Field label="SecretKey" error={form.formState.errors.tencentSecretKey?.message}>
-                <Input aria-label="SecretKey" type="password" autoComplete="new-password" disabled={clearCredentials} placeholder={settings.tencentCredentialsConfigured ? "留空保持现有值" : "输入 SecretKey"} {...form.register("tencentSecretKey")} />
+                <Input aria-label="SecretKey" type="password" autoComplete="new-password" disabled={clearTencentCredentials} placeholder={settings.tencentCredentialsConfigured ? "留空保持现有值" : "输入 SecretKey"} {...form.register("tencentSecretKey")} />
               </Field>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <Field label="OCR 最大同时请求数">
                 <Input type="number" min={1} max={5} className="w-28" {...form.register("invoiceOcrConcurrency", { valueAsNumber: true })} />
               </Field>
-              <p className="mt-6 text-xs text-muted-foreground">取值 1-5，系统同时限制全局请求频率不超过 5 次/秒。</p>
+              <p className="mt-6 text-xs text-muted-foreground">取值 1-5，全局请求频率上限为 5 次/秒。</p>
             </div>
             {settings.tencentCredentialsConfigured && (
               <label className="flex w-fit cursor-pointer items-center gap-2 text-sm">
-                <Checkbox checked={clearCredentials} onCheckedChange={(checked) => form.setValue("clearTencentCredentials", checked === true)} />
+                <Checkbox checked={clearTencentCredentials} onCheckedChange={(checked) => form.setValue("clearTencentCredentials", checked === true, { shouldDirty: true })} />
                 清除已保存的腾讯云凭据
               </label>
             )}
           </CardContent>
         </Card>
-
-        {status && (
-          <Alert className={status.reachable && status.modelAvailable ? "rounded-md border-emerald-200 bg-emerald-50" : "rounded-md border-amber-200 bg-amber-50"}>
-            {status.reachable && status.modelAvailable ? <CheckCircle2 /> : <Terminal />}
-            <AlertTitle>{status.reachable && status.modelAvailable ? "Ollama 连接正常" : "Ollama 需要处理"}</AlertTitle>
-            <AlertDescription>{status.message}</AlertDescription>
-          </Alert>
-        )}
 
         <div className="sticky bottom-0 flex justify-end border-t bg-background/95 py-4 backdrop-blur">
           <Button type="submit" disabled={form.formState.isSubmitting}>
@@ -213,10 +305,44 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
   )
 }
 
+function requestFrom(values: SettingsForm): SaveSettingsRequest {
+  return {
+    orderRecognitionProvider: values.orderRecognitionProvider,
+    ollamaBaseUrl: values.ollamaBaseUrl,
+    ollamaModel: values.ollamaModel,
+    openaiBaseUrl: values.openaiBaseUrl,
+    openaiModel: values.openaiModel,
+    openaiApiKey: values.openaiApiKey || null,
+    clearOpenaiApiKey: values.clearOpenaiApiKey,
+    aliyunBaseUrl: values.aliyunBaseUrl,
+    aliyunModel: values.aliyunModel,
+    aliyunApiKey: values.aliyunApiKey || null,
+    clearAliyunApiKey: values.clearAliyunApiKey,
+    aliyunEnableThinking: values.aliyunEnableThinking,
+    maxConcurrency: values.maxConcurrency,
+    tencentSecretId: values.tencentSecretId || null,
+    tencentSecretKey: values.tencentSecretKey || null,
+    clearTencentCredentials: values.clearTencentCredentials,
+    invoiceOcrConcurrency: values.invoiceOcrConcurrency,
+    matchMaxOrders: values.matchMaxOrders,
+    matchMaxCandidates: values.matchMaxCandidates,
+  }
+}
+
 function formValues(settings: AppSettings): SettingsForm {
   return {
+    orderRecognitionProvider: settings.orderRecognitionProvider,
     ollamaBaseUrl: settings.ollamaBaseUrl,
     ollamaModel: settings.ollamaModel,
+    openaiBaseUrl: settings.openaiBaseUrl,
+    openaiModel: settings.openaiModel,
+    openaiApiKey: "",
+    clearOpenaiApiKey: false,
+    aliyunBaseUrl: settings.aliyunBaseUrl,
+    aliyunModel: settings.aliyunModel,
+    aliyunApiKey: "",
+    clearAliyunApiKey: false,
+    aliyunEnableThinking: settings.aliyunEnableThinking,
     maxConcurrency: settings.maxConcurrency,
     tencentSecretId: "",
     tencentSecretKey: "",
@@ -225,6 +351,35 @@ function formValues(settings: AppSettings): SettingsForm {
     matchMaxOrders: settings.matchMaxOrders,
     matchMaxCandidates: settings.matchMaxCandidates,
   }
+}
+
+function CredentialField({ label, configured, masked, clear, onClearChange, inputProps }: {
+  label: string
+  configured: boolean
+  masked: string | null
+  clear: boolean
+  onClearChange: (checked: boolean) => void
+  inputProps: React.ComponentProps<typeof Input>
+}) {
+  return (
+    <div className="space-y-3">
+      <Field label={label}>
+        <Input
+          type="password"
+          autoComplete="new-password"
+          disabled={clear}
+          placeholder={configured ? `已配置 ${masked ?? "访问密钥"}，留空保持` : "输入访问密钥"}
+          {...inputProps}
+        />
+      </Field>
+      {configured && (
+        <label className="flex w-fit cursor-pointer items-center gap-2 text-sm">
+          <Checkbox checked={clear} onCheckedChange={(checked) => onClearChange(checked === true)} />
+          清除已保存的 {label}
+        </label>
+      )}
+    </div>
+  )
 }
 
 function Field({ label, error, children }: { label: string; error?: string; children: React.ReactNode }) {

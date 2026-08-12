@@ -20,6 +20,108 @@ pub mod app_setting {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod order_recognition_batch {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "order_recognition_batches")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: String,
+        pub short_number: String,
+        pub provider: String,
+        pub base_url: String,
+        pub model: String,
+        pub enable_thinking: bool,
+        pub status: String,
+        pub input_file_id: Option<String>,
+        pub remote_batch_id: Option<String>,
+        pub output_file_id: Option<String>,
+        pub error_file_id: Option<String>,
+        pub error_message: Option<String>,
+        pub created_at: String,
+        pub completed_at: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(has_many = "super::order_import_pool::Entity")]
+        Tasks,
+    }
+
+    impl Related<super::order_import_pool::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Tasks.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod order_import_pool {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "order_import_pool")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: String,
+        pub original_file_name: String,
+        pub managed_image_path: String,
+        pub image_sha256: String,
+        pub status: String,
+        pub recognition_batch_id: Option<String>,
+        pub error_code: Option<String>,
+        pub error_message: Option<String>,
+        pub retry_count: i32,
+        pub created_at: String,
+        pub started_at: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::order_recognition_batch::Entity",
+            from = "Column::RecognitionBatchId",
+            to = "super::order_recognition_batch::Column::Id",
+            on_update = "NoAction",
+            on_delete = "SetNull"
+        )]
+        RecognitionBatch,
+    }
+
+    impl Related<super::order_recognition_batch::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::RecognitionBatch.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod order_import_log {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "order_import_logs")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub task_id: String,
+        pub order_id: String,
+        pub original_file_name: String,
+        pub provider: String,
+        pub model: String,
+        pub batch_short_number: Option<String>,
+        pub warning_message: Option<String>,
+        pub completed_at: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod import_batch {
     use super::*;
 
@@ -117,6 +219,10 @@ pub mod order {
         pub possible_duplicate: bool,
         pub created_at: String,
         pub updated_at: String,
+        pub original_file_name: Option<String>,
+        pub managed_image_path: Option<String>,
+        pub image_sha256: Option<String>,
+        pub warning_message: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
