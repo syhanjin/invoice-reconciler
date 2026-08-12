@@ -8,9 +8,10 @@ use crate::AppState;
 use crate::error::{AppError, AppResult, CommandResult};
 use crate::files::{copy_managed_image, normalized_extension, resolve_managed_path, sha256_file};
 use crate::models::{
-    AppSettings, BatchDetail, BootstrapState, CreateBatchRequest, IdRequest, ImportBatchesPage,
-    ImportBatchesQuery, OllamaStatus, OrderDetail, OrdersPage, OrdersQuery, TaskUpdateEvent,
-    UpdateOrderRequest, UpdateSettingsRequest,
+    AppSettings, BatchDetail, BootstrapState, CreateBatchRequest, DeleteOrderResult,
+    DeleteOrdersRequest, DeleteOrdersResult, IdRequest, ImportBatchesPage, ImportBatchesQuery,
+    OllamaStatus, OrderDetail, OrdersPage, OrdersQuery, TaskUpdateEvent, UpdateOrderRequest,
+    UpdateSettingsRequest,
 };
 
 struct PreparedImage {
@@ -362,6 +363,51 @@ pub async fn delete_order(state: State<'_, AppState>, request: IdRequest) -> Com
         .map_err(Into::into)
 }
 
+#[tauri::command]
+pub async fn delete_orders(
+    state: State<'_, AppState>,
+    request: DeleteOrdersRequest,
+) -> CommandResult<DeleteOrdersResult> {
+    delete_orders_inner(&state, request)
+        .await
+        .map_err(Into::into)
+}
+
+async fn delete_orders_inner(
+    state: &AppState,
+    request: DeleteOrdersRequest,
+) -> AppResult<DeleteOrdersResult> {
+    if request.ids.is_empty() {
+        return Err(AppError::InvalidInput("请至少选择一个订单".into()));
+    }
+    if request.ids.len() > 100 {
+        return Err(AppError::InvalidInput("单次最多删除 100 个订单".into()));
+    }
+
+    let mut seen = HashSet::new();
+    let mut results = Vec::with_capacity(request.ids.len());
+    for id in request.ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        match delete_order_inner(state, &id).await {
+            Ok(()) => results.push(DeleteOrderResult {
+                id,
+                deleted: true,
+                error_code: None,
+                error_message: None,
+            }),
+            Err(error) => results.push(DeleteOrderResult {
+                id,
+                deleted: false,
+                error_code: Some(error.code().to_owned()),
+                error_message: Some(error.to_string()),
+            }),
+        }
+    }
+    Ok(DeleteOrdersResult { results })
+}
+
 async fn delete_order_inner(state: &AppState, id: &str) -> AppResult<()> {
     let relative = state.database.image_relative_path(id).await?;
     let source = resolve_managed_path(&state.app_data_dir, &relative)?;
@@ -400,4 +446,160 @@ fn resolve_detail_image(state: &AppState, detail: &mut OrderDetail) -> AppResult
         .to_string_lossy()
         .into_owned();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::db::Database;
+    use crate::models::{NormalizedOrder, Platform};
+    use crate::ocr::OllamaClient;
+    use crate::queue::QueueManager;
+
+    async fn test_state() -> (TempDir, AppState) {
+        let directory = tempfile::tempdir().unwrap();
+        let app_data_dir = directory.path().to_path_buf();
+        let images_dir = app_data_dir.join("images");
+        tokio::fs::create_dir_all(&images_dir).await.unwrap();
+        let database = Database::in_memory().await.unwrap();
+        let ollama = OllamaClient::new().unwrap();
+        let queue = QueueManager::new(database.clone(), ollama.clone(), app_data_dir.clone());
+        (
+            directory,
+            AppState {
+                database,
+                ollama,
+                queue,
+                app_data_dir,
+                images_dir,
+            },
+        )
+    }
+
+    async fn insert_order(state: &AppState, id: &str, number: &str) -> PathBuf {
+        state
+            .database
+            .create_batch("delete-batch", Platform::Taobao)
+            .await
+            .ok();
+        let relative = format!("images/{id}.png");
+        let image = state.app_data_dir.join(&relative);
+        tokio::fs::write(&image, b"managed image").await.unwrap();
+        state
+            .database
+            .create_task(
+                id,
+                "delete-batch",
+                "order.png",
+                Some(&relative),
+                id,
+                "queued",
+                None,
+            )
+            .await
+            .unwrap();
+        state.database.mark_processing(id).await.unwrap();
+        state
+            .database
+            .persist_recognized_order(
+                id,
+                Platform::Taobao,
+                &NormalizedOrder {
+                    order_number: Some(number.into()),
+                    product_names: vec!["商品".into()],
+                    paid_amount_fen: Some(100),
+                    ordered_at: None,
+                    shop_name: None,
+                    warning: None,
+                    raw_json: "{}".into(),
+                },
+            )
+            .await
+            .unwrap();
+        image
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_reports_partial_results_and_deduplicates_ids() {
+        let (_directory, state) = test_state().await;
+        let first_image = insert_order(&state, "order-a", "duplicate").await;
+        let second_image = insert_order(&state, "order-b", "duplicate").await;
+
+        let result = delete_orders_inner(
+            &state,
+            DeleteOrdersRequest {
+                ids: vec!["order-a".into(), "missing".into(), "order-a".into()],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.results.len(), 2);
+        assert!(result.results[0].deleted);
+        assert_eq!(result.results[0].id, "order-a");
+        assert!(!first_image.exists());
+        assert!(state.database.order_detail("order-a").await.is_err());
+        assert!(!result.results[1].deleted);
+        assert_eq!(result.results[1].id, "missing");
+        assert_eq!(result.results[1].error_code.as_deref(), Some("not_found"));
+        assert!(second_image.exists());
+        assert!(
+            !state
+                .database
+                .order_detail("order-b")
+                .await
+                .unwrap()
+                .possible_duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_restores_image_when_database_delete_fails() {
+        let (_directory, state) = test_state().await;
+        let image = insert_order(&state, "order-a", "10001").await;
+        state
+            .database
+            .execute_test_statement(
+                "CREATE TRIGGER fail_order_delete BEFORE DELETE ON import_tasks \
+                 WHEN OLD.id = 'order-a' BEGIN SELECT RAISE(FAIL, 'forced delete failure'); END",
+            )
+            .await
+            .unwrap();
+
+        let result = delete_orders_inner(
+            &state,
+            DeleteOrdersRequest {
+                ids: vec!["order-a".into()],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert!(!result.results[0].deleted);
+        assert_eq!(
+            result.results[0].error_code.as_deref(),
+            Some("database_error")
+        );
+        assert!(image.exists());
+        assert!(state.database.order_detail("order-a").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_validates_request_size() {
+        let (_directory, state) = test_state().await;
+        let empty = delete_orders_inner(&state, DeleteOrdersRequest { ids: vec![] }).await;
+        assert!(matches!(empty, Err(AppError::InvalidInput(_))));
+
+        let oversized = delete_orders_inner(
+            &state,
+            DeleteOrdersRequest {
+                ids: (0..101).map(|index| format!("order-{index}")).collect(),
+            },
+        )
+        .await;
+        assert!(matches!(oversized, Err(AppError::InvalidInput(_))));
+    }
 }

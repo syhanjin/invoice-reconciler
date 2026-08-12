@@ -20,6 +20,7 @@ api.listOrders(query: OrdersQuery): Promise<OrdersPage>
 api.getOrder(id: string): Promise<OrderDetail>
 api.updateOrder(request: UpdateOrderRequest): Promise<OrderDetail>
 api.deleteOrder(id: string): Promise<void>
+api.deleteOrders(ids: string[]): Promise<DeleteOrdersResult>
 api.listenForTaskUpdates(handler): Promise<UnlistenFn>
 ```
 
@@ -38,6 +39,9 @@ Rust serializes public structs with `camelCase`. Tauri command names remain snak
 - Search, duplicate-only, sort, and page-size changes reset to page `1`. If a response makes the current page invalid, request the last valid page. Empty results remain on page `1` of `1`.
 - Persist only table presentation preferences under a versioned local-storage key: page size, sort, column visibility, constrained column sizing, and comfortable/compact density. Normalize unknown columns and invalid values on read. Never persist search, duplicate-only, current page, or the open order.
 - The order-number column is always visible. Optional columns may be hidden, table preferences may be reset together, and resize/header controls must not activate a data row.
+- Order selection is controlled by `OrdersPage` and scoped to `OrdersPage.items`, the currently loaded server page. The always-visible selection column is not hideable or resizable; row checkboxes must stop row activation, and the header checkbox must represent checked, unchecked, and indeterminate current-page states.
+- Clear selection before page, page-size, committed-search, duplicate-filter, or sort changes. Preserve it across presentation-only preference changes, and prune IDs that are absent after a same-query refresh.
+- Bulk deletion requires one confirmation and one `api.deleteOrders` call. Disable repeat confirmation while it runs. Remove successful IDs from selection, preserve failed IDs that remain on the current page, refresh from SQLite, and identify failures by visible order number or ID.
 - Order forms use React Hook Form plus Zod. Convert yuan display input to integer fen before invoking the backend.
 - Raw OCR JSON is read-only. Product order in the submitted array is significant.
 - Use `convertFileSrc` only for the absolute path returned by `get_order`; do not construct filesystem or asset URLs in components.
@@ -61,13 +65,18 @@ Rust serializes public structs with `camelCase`. Tauri command names remain snak
 | Import-history page becomes empty | Select no detail and show the order-task empty state |
 | Component unmount | Call the `UnlistenFn` to remove the Tauri event listener |
 | Delete confirmation declined | Perform no command and preserve the open record |
+| Bulk delete request is empty or exceeds `100` IDs | Backend rejects with `invalid_input`; the current-page UI must never produce more than `100` IDs |
+| Bulk delete returns mixed per-order results | Report the success count, identify failures, retain failed current-page rows as selected, and reload the server query |
+| Bulk delete invoke rejects before a result | Preserve all selections and the open confirmation so the user can retry |
+| Same-query refresh removes a selected row | Prune its ID; close bulk confirmation if no selected IDs remain |
 
 ### 5. Good/Base/Bad Cases
 
 - Good: a task event replaces the matching batch snapshot, the task center updates its selected detail and summary, and successful OCR causes the server-paged order table to refresh.
 - Good: sorting a supported header resets to page one, requests the backend sort field, and retains column layout and density preferences after remount.
+- Good: selecting two current-page rows and deleting them sends one typed request; a one-success/one-failure result clears only the successful selection and refreshes persisted rows.
 - Base: a small window switches task history/detail to stacked sections while keeping their independent scroll areas and actions accessible.
-- Bad: issuing SQL in React, client-sorting only the visible server page, persisting a transient search/page selection, loading every historical task into one response, replacing selected history with an unrelated live event, duplicating backend queue counters in component state, importing Tauri `invoke` throughout the component tree, or displaying a managed path directly as an image URL.
+- Bad: issuing SQL in React, client-sorting only the visible server page, persisting a transient search/page selection, retaining selection across a server-query change, invoking `delete_order` concurrently from React, loading every historical task into one response, replacing selected history with an unrelated live event, duplicating backend queue counters in component state, importing Tauri `invoke` throughout the component tree, or displaying a managed path directly as an image URL.
 
 ### 6. Tests Required
 
@@ -76,6 +85,7 @@ Rust serializes public structs with `camelCase`. Tauri command names remain snak
 - API contract test or TypeScript build asserting camel-case invoke argument names.
 - Component tests for settings validation and nullable order edit fields when those flows change.
 - Component tests for all order sort-field mappings and sort cycles; search/filter/page-size reset; first/previous/next/last and validated page jumps; invalid-page correction; column visibility/resizing; density; reset; preference normalization; and reload failure preserving successful rows.
+- Component tests for row selection without detail activation; header checked/unchecked/indeterminate states; clearing on server-query changes; confirmation cancel; and mixed bulk-delete results retaining only failed selections.
 - Component tests for task-history pagination, disabled invoice tab, detail loading/error retry, and post-import navigation when those flows change.
 - Desktop smoke tests at the default and minimum window sizes for table, task-center history/detail scrolling, image preview, edit/delete sheet, and settings.
 - Always run `bun run build`, `bun run lint`, and `bun run test` before commit.
@@ -111,3 +121,13 @@ Keep invoke payload construction in `api.ts` and pass the entire typed `request`
 Do not use a `BatchDetail[]` history response. Use `ImportBatchSummary[]` for the page and `api.getBatch(id)` for the selected detail.
 
 For orders, do not pass the current server page through a TanStack sorted row model. Update the controlled `OrdersQuery` and reload through `api.listOrders` instead.
+
+Do not fan out single-order commands from React:
+
+```ts
+// Wrong: concurrent side effects and no structured partial result.
+await Promise.all(selectedIds.map((id) => api.deleteOrder(id)))
+
+// Correct: one typed command returns a result for every unique ID.
+const { results } = await api.deleteOrders(selectedIds)
+```

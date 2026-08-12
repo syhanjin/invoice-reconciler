@@ -69,6 +69,14 @@ impl Database {
         Ok(Self { connection })
     }
 
+    #[cfg(test)]
+    pub async fn execute_test_statement(&self, sql: &str) -> AppResult<()> {
+        self.connection
+            .execute(Statement::from_string(DbBackend::Sqlite, sql))
+            .await?;
+        Ok(())
+    }
+
     pub async fn settings(&self) -> AppResult<AppSettings> {
         let model = app_setting::Entity::find_by_id(1)
             .one(&self.connection)

@@ -9,18 +9,32 @@ import type { OrdersPage, OrderTablePreferences } from "@/lib/types"
 import { OrdersTable } from "./orders-table"
 
 const page: OrdersPage = {
-  items: [{
-    id: "order-1",
-    platform: "taobao",
-    externalOrderNumber: "10001",
-    paidAmountFen: 1299,
-    orderedAt: "2026-08-11 10:00",
-    shopName: "示例店铺",
-    possibleDuplicate: false,
-    createdAt: "2026-08-12T08:00:00Z",
-    productSummary: "测试商品",
-    productCount: 1,
-  }],
+  items: [
+    {
+      id: "order-1",
+      platform: "taobao",
+      externalOrderNumber: "10001",
+      paidAmountFen: 1299,
+      orderedAt: "2026-08-11 10:00",
+      shopName: "示例店铺",
+      possibleDuplicate: false,
+      createdAt: "2026-08-12T08:00:00Z",
+      productSummary: "测试商品",
+      productCount: 1,
+    },
+    {
+      id: "order-2",
+      platform: "taobao",
+      externalOrderNumber: "10002",
+      paidAmountFen: 2599,
+      orderedAt: "2026-08-11 11:00",
+      shopName: "另一店铺",
+      possibleDuplicate: true,
+      createdAt: "2026-08-12T09:00:00Z",
+      productSummary: "另一件商品",
+      productCount: 1,
+    },
+  ],
   total: 95,
   page: 2,
   pageSize: 20,
@@ -31,19 +45,25 @@ function Harness({
   onPageChange = vi.fn(),
   onPageSizeChange = vi.fn(),
   onSortChange = vi.fn(),
+  onDeleteSelected = vi.fn(),
 }: {
   onSelect?: (id: string) => void
   onPageChange?: (page: number) => void
   onPageSizeChange?: (pageSize: number) => void
   onSortChange?: (sortBy: "created_at" | "ordered_at" | "paid_amount" | "shop_name", direction: "asc" | "desc") => void
+  onDeleteSelected?: () => void
 }) {
   const [preferences, setPreferences] = useState<OrderTablePreferences>(defaultOrderTablePreferences)
+  const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([])
   return (
     <OrdersTable
       data={page}
       loading={false}
       preferences={preferences}
+      selectedOrderIds={selectedOrderIds}
       onSelect={onSelect}
+      onSelectionChange={setSelectedOrderIds}
+      onDeleteSelected={onDeleteSelected}
       onPageChange={onPageChange}
       onPageSizeChange={onPageSizeChange}
       onSortChange={onSortChange}
@@ -121,6 +141,29 @@ describe("OrdersTable", () => {
     expect(onSelect).toHaveBeenCalledWith("order-1")
   })
 
+  it("selects current-page rows without opening details and exposes bulk actions", async () => {
+    const user = userEvent.setup()
+    const onSelect = vi.fn()
+    const onDeleteSelected = vi.fn()
+    render(<Harness onSelect={onSelect} onDeleteSelected={onDeleteSelected} />)
+
+    await user.click(screen.getByRole("checkbox", { name: "选择订单 10001" }))
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(screen.getByRole("checkbox", { name: "选择当前页全部订单" })).toHaveAttribute("aria-checked", "mixed")
+    expect(screen.getByText("已选择 1 项")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "删除" }))
+    expect(onDeleteSelected).toHaveBeenCalledOnce()
+    await user.click(screen.getByRole("button", { name: "清除选择" }))
+    expect(screen.queryByText(/已选择/)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("checkbox", { name: "选择当前页全部订单" }))
+    expect(screen.getByText("已选择 2 项")).toBeInTheDocument()
+    expect(screen.getByRole("checkbox", { name: "选择当前页全部订单" })).toHaveAttribute("aria-checked", "true")
+    await user.click(screen.getByRole("checkbox", { name: "选择当前页全部订单" }))
+    expect(screen.queryByText(/已选择/)).not.toBeInTheDocument()
+  })
+
   it("cycles an active sortable header through descending and the default sort", async () => {
     const user = userEvent.setup()
     const onSortChange = vi.fn()
@@ -136,7 +179,10 @@ describe("OrdersTable", () => {
           data={page}
           loading={false}
           preferences={preferences}
+          selectedOrderIds={[]}
           onSelect={vi.fn()}
+          onSelectionChange={vi.fn()}
+          onDeleteSelected={vi.fn()}
           onPageChange={vi.fn()}
           onPageSizeChange={vi.fn()}
           onSortChange={(sortBy, sortDirection) => {

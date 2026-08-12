@@ -1,6 +1,7 @@
 import {
   type ColumnDef,
   type ColumnSizingState,
+  type RowSelectionState,
   type VisibilityState,
   flexRender,
   functionalUpdate,
@@ -19,11 +20,13 @@ import {
   PackageOpen,
   RotateCcw,
   Rows3,
+  Trash2,
 } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -66,7 +69,10 @@ interface OrdersTableProps {
   data: OrdersPage
   loading: boolean
   preferences: OrderTablePreferences
+  selectedOrderIds: string[]
   onSelect: (id: string) => void
+  onSelectionChange: (ids: string[]) => void
+  onDeleteSelected: () => void
   onPageChange: (page: number) => void
   onPageSizeChange: (pageSize: number) => void
   onSortChange: (sortBy: OrderSortBy, sortDirection: SortDirection) => void
@@ -133,13 +139,50 @@ export function OrdersTable({
   data,
   loading,
   preferences,
+  selectedOrderIds,
   onSelect,
+  onSelectionChange,
+  onDeleteSelected,
   onPageChange,
   onPageSizeChange,
   onSortChange,
   onPreferencesChange,
 }: OrdersTableProps) {
+  const selectedCurrentPageCount = data.items.filter((order) => selectedOrderIds.includes(order.id)).length
+  const allCurrentPageSelected = data.items.length > 0 && selectedCurrentPageCount === data.items.length
+  const someCurrentPageSelected = selectedCurrentPageCount > 0 && !allCurrentPageSelected
   const columns = useMemo<ColumnDef<OrderListItem>[]>(() => [
+    {
+      id: "select",
+      header: () => (
+        <div className="flex justify-center">
+          <Checkbox
+            checked={allCurrentPageSelected}
+            indeterminate={someCurrentPageSelected}
+            disabled={loading || data.items.length === 0}
+            aria-label="选择当前页全部订单"
+            onClick={(event) => event.stopPropagation()}
+            onCheckedChange={(checked) => onSelectionChange(checked ? data.items.map((order) => order.id) : [])}
+          />
+        </div>
+      ),
+      cell: ({ row }) => (
+        <div className="flex justify-center">
+          <Checkbox
+            checked={row.getIsSelected()}
+            disabled={loading}
+            aria-label={`选择订单 ${row.original.externalOrderNumber ?? row.original.id}`}
+            onClick={(event) => event.stopPropagation()}
+            onCheckedChange={(checked) => row.toggleSelected(checked)}
+          />
+        </div>
+      ),
+      size: 44,
+      minSize: 44,
+      maxSize: 44,
+      enableHiding: false,
+      enableResizing: false,
+    },
     {
       accessorKey: "externalOrderNumber",
       header: "订单号",
@@ -251,7 +294,7 @@ export function OrdersTable({
       maxSize: 130,
       cell: () => <Badge variant="outline" className="border-red-200 text-red-700">淘宝</Badge>,
     },
-  ], [onSortChange, preferences.sortBy, preferences.sortDirection])
+  ], [allCurrentPageSelected, data.items, loading, onSelectionChange, onSortChange, preferences.sortBy, preferences.sortDirection, someCurrentPageSelected])
 
   const updateVisibility = (updater: VisibilityState | ((old: VisibilityState) => VisibilityState)) => {
     const next = functionalUpdate(updater, preferences.columnVisibility as VisibilityState)
@@ -266,6 +309,7 @@ export function OrdersTable({
   const table = useReactTable({
     data: data.items,
     columns,
+    getRowId: (row) => row.id,
     getCoreRowModel: getCoreRowModel(),
     manualPagination: true,
     manualSorting: true,
@@ -274,9 +318,16 @@ export function OrdersTable({
     state: {
       columnVisibility: preferences.columnVisibility,
       columnSizing: preferences.columnSizing,
+      rowSelection: Object.fromEntries(selectedOrderIds.map((id) => [id, true])),
     },
+    enableRowSelection: true,
     onColumnVisibilityChange: updateVisibility,
     onColumnSizingChange: updateSizing,
+    onRowSelectionChange: (updater) => {
+      const current = Object.fromEntries(selectedOrderIds.map((id) => [id, true])) as RowSelectionState
+      const next = functionalUpdate(updater, current)
+      onSelectionChange(Object.keys(next).filter((id) => next[id]))
+    },
   })
   const pages = Math.max(1, Math.ceil(data.total / data.pageSize))
   const rangeStart = data.total === 0 ? 0 : (data.page - 1) * data.pageSize + 1
@@ -298,7 +349,30 @@ export function OrdersTable({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-white">
-      <div className="flex h-11 shrink-0 items-center justify-end gap-2 border-b px-6">
+      <div className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto border-b px-6">
+        {selectedOrderIds.length > 0 && (
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="text-xs font-medium tabular-nums">已选择 {selectedOrderIds.length} 项</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={loading}
+              onClick={() => onSelectionChange([])}
+            >
+              清除选择
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={loading}
+              onClick={onDeleteSelected}
+            >
+              <Trash2 />
+              删除
+            </Button>
+          </div>
+        )}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
         <div className="flex h-8 items-center rounded-md border p-0.5" aria-label="表格密度">
           <Button
             variant={preferences.density === "comfortable" ? "secondary" : "ghost"}
@@ -346,6 +420,7 @@ export function OrdersTable({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         <Table className="table-fixed" style={{ minWidth: "100%", width: table.getTotalSize() }}>
@@ -355,7 +430,10 @@ export function OrdersTable({
                 {group.headers.map((header) => (
                   <TableHead
                     key={header.id}
-                    className="relative h-10 overflow-hidden whitespace-nowrap"
+                    className={cn(
+                      "relative h-10 overflow-hidden whitespace-nowrap",
+                      header.column.id === "select" && "px-0",
+                    )}
                     style={{ width: header.getSize() }}
                   >
                     {flexRender(header.column.columnDef.header, header.getContext())}
@@ -388,6 +466,7 @@ export function OrdersTable({
             {table.getRowModel().rows.map((row) => (
               <TableRow
                 key={row.id}
+                data-state={row.getIsSelected() ? "selected" : undefined}
                 className={cn(
                   "cursor-pointer",
                   preferences.density === "compact" ? "h-11" : "h-16",
@@ -395,7 +474,11 @@ export function OrdersTable({
                 onClick={() => onSelect(row.original.id)}
               >
                 {row.getVisibleCells().map((cell) => (
-                  <TableCell key={cell.id} className="overflow-hidden" style={{ width: cell.column.getSize() }}>
+                  <TableCell
+                    key={cell.id}
+                    className={cn("overflow-hidden", cell.column.id === "select" && "px-0")}
+                    style={{ width: cell.column.getSize() }}
+                  >
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </TableCell>
                 ))}

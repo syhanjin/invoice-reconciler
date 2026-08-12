@@ -1,6 +1,6 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview"
 import { open } from "@tauri-apps/plugin-dialog"
-import { Filter, ImagePlus, LoaderCircle, Search, X } from "lucide-react"
+import { Filter, ImagePlus, LoaderCircle, Search, Trash2, X } from "lucide-react"
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { useAtom } from "jotai"
@@ -8,6 +8,14 @@ import { useAtom } from "jotai"
 import { OrdersTable } from "@/components/orders-table"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -46,7 +54,16 @@ export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
   const [importing, setImporting] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [selectedOrder, setSelectedOrder] = useState<string | null>(null)
+  const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([])
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
+  const [localRefreshToken, setLocalRefreshToken] = useState(0)
   const refreshRef = useRef(0)
+
+  const clearSelection = useCallback(() => {
+    setSelectedOrderIds([])
+    setBulkDeleteOpen(false)
+  }, [])
 
   const loadOrders = useCallback(async () => {
     const request = ++refreshRef.current
@@ -62,17 +79,53 @@ export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
       })
       if (request === refreshRef.current) {
         const pages = Math.max(1, Math.ceil(result.total / result.pageSize))
-        if (page > pages) setPage(pages)
-        else setOrders(result)
+        if (page > pages) {
+          clearSelection()
+          setPage(pages)
+        } else {
+          setOrders(result)
+          const visibleIds = new Set(result.items.map((order) => order.id))
+          setSelectedOrderIds((current) => current.filter((id) => visibleIds.has(id)))
+        }
       }
     } catch (error) {
       toast.error(errorMessage(error))
     } finally {
       if (request === refreshRef.current) setLoading(false)
     }
-  }, [committedSearch, duplicateOnly, page, preferences.pageSize, preferences.sortBy, preferences.sortDirection])
+  }, [clearSelection, committedSearch, duplicateOnly, page, preferences.pageSize, preferences.sortBy, preferences.sortDirection])
 
-  useEffect(() => void loadOrders(), [loadOrders, refreshToken])
+  useEffect(() => void loadOrders(), [loadOrders, localRefreshToken, refreshToken])
+
+  useEffect(() => {
+    if (!selectedOrderIds.length && !bulkDeleting) setBulkDeleteOpen(false)
+  }, [bulkDeleting, selectedOrderIds.length])
+
+  const deleteSelectedOrders = async () => {
+    if (!selectedOrderIds.length || bulkDeleting) return
+    const requestedIds = [...selectedOrderIds]
+    setBulkDeleting(true)
+    try {
+      const result = await api.deleteOrders(requestedIds)
+      const deletedIds = new Set(result.results.filter((item) => item.deleted).map((item) => item.id))
+      const failures = result.results.filter((item) => !item.deleted)
+      setSelectedOrderIds((current) => current.filter((id) => !deletedIds.has(id)))
+      setBulkDeleteOpen(false)
+
+      if (deletedIds.size > 0) toast.success(`已删除 ${deletedIds.size} 个订单`)
+      if (failures.length > 0) {
+        const orderLabels = new Map(orders.items.map((order) => [order.id, order.externalOrderNumber ?? order.id]))
+        const failedLabels = failures.slice(0, 3).map((item) => orderLabels.get(item.id) ?? item.id)
+        const remaining = failures.length - failedLabels.length
+        toast.error(`${failures.length} 个订单删除失败：${failedLabels.join("、")}${remaining > 0 ? ` 等 ${failures.length} 个` : ""}`)
+      }
+      setLocalRefreshToken((current) => current + 1)
+    } catch (error) {
+      toast.error(errorMessage(error), { duration: 6000 })
+    } finally {
+      setBulkDeleting(false)
+    }
+  }
 
   const importPaths = useCallback(
     async (paths: string[]) => {
@@ -165,6 +218,7 @@ export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
           className="relative w-full max-w-sm"
           onSubmit={(event) => {
             event.preventDefault()
+            clearSelection()
             setPage(1)
             setCommittedSearch(search.trim())
           }}
@@ -183,6 +237,7 @@ export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
               size="icon-sm"
               className="absolute right-1 top-1/2 -translate-y-1/2"
               onClick={() => {
+                clearSelection()
                 setSearch("")
                 setCommittedSearch("")
                 setPage(1)
@@ -203,6 +258,7 @@ export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
             id="duplicate-only"
             checked={duplicateOnly}
             onCheckedChange={(checked) => {
+              clearSelection()
               setDuplicateOnly(checked === true)
               setPage(1)
             }}
@@ -216,13 +272,21 @@ export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
         data={orders}
         loading={loading}
         preferences={preferences}
+        selectedOrderIds={selectedOrderIds}
         onSelect={setSelectedOrder}
-        onPageChange={setPage}
+        onSelectionChange={setSelectedOrderIds}
+        onDeleteSelected={() => setBulkDeleteOpen(true)}
+        onPageChange={(nextPage) => {
+          clearSelection()
+          setPage(nextPage)
+        }}
         onPageSizeChange={(pageSize) => {
+          clearSelection()
           setPreferences((current) => ({ ...current, pageSize }))
           setPage(1)
         }}
         onSortChange={(sortBy: OrderSortBy, sortDirection: SortDirection) => {
+          clearSelection()
           setPreferences((current) => ({ ...current, sortBy, sortDirection }))
           setPage(1)
         }}
@@ -231,9 +295,44 @@ export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
             || nextPreferences.sortBy !== preferences.sortBy
             || nextPreferences.sortDirection !== preferences.sortDirection
           setPreferences(nextPreferences)
-          if (queryChanged) setPage(1)
+          if (queryChanged) {
+            clearSelection()
+            setPage(1)
+          }
         }}
       />
+      <Dialog
+        open={bulkDeleteOpen}
+        onOpenChange={(open) => {
+          if (!bulkDeleting) setBulkDeleteOpen(open)
+        }}
+      >
+        <DialogContent showCloseButton={!bulkDeleting}>
+          <DialogHeader>
+            <DialogTitle>删除选中的订单？</DialogTitle>
+            <DialogDescription>
+              将删除 {selectedOrderIds.length} 个订单及其商品记录和原始截图。此操作无法撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={bulkDeleting}
+              onClick={() => setBulkDeleteOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={bulkDeleting}
+              onClick={() => void deleteSelectedOrders()}
+            >
+              {bulkDeleting ? <LoaderCircle className="animate-spin" /> : <Trash2 />}
+              确认删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Suspense fallback={null}>
         <OrderSheet
           orderId={selectedOrder}

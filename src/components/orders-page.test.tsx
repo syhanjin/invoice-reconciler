@@ -2,11 +2,12 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { OrdersPage as OrdersPageData, OrdersQuery } from "@/lib/types"
+import type { DeleteOrdersResult, OrdersPage as OrdersPageData, OrdersQuery } from "@/lib/types"
 
 const apiMocks = vi.hoisted(() => ({
   listOrders: vi.fn<(query: OrdersQuery) => Promise<OrdersPageData>>(),
   createImportBatch: vi.fn(),
+  deleteOrders: vi.fn<(ids: string[]) => Promise<DeleteOrdersResult>>(),
 }))
 
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -30,19 +31,34 @@ describe("OrdersPage query controls", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.clear()
+    apiMocks.deleteOrders.mockResolvedValue({ results: [] })
     apiMocks.listOrders.mockImplementation(async (query) => ({
-      items: [{
-        id: "order-1",
-        platform: "taobao",
-        externalOrderNumber: "10001",
-        paidAmountFen: 1299,
-        orderedAt: "2026-08-11 10:00",
-        shopName: "示例店铺",
-        possibleDuplicate: false,
-        createdAt: "2026-08-12T08:00:00Z",
-        productSummary: "测试商品",
-        productCount: 1,
-      }],
+      items: [
+        {
+          id: "order-1",
+          platform: "taobao",
+          externalOrderNumber: "10001",
+          paidAmountFen: 1299,
+          orderedAt: "2026-08-11 10:00",
+          shopName: "示例店铺",
+          possibleDuplicate: false,
+          createdAt: "2026-08-12T08:00:00Z",
+          productSummary: "测试商品",
+          productCount: 1,
+        },
+        {
+          id: "order-2",
+          platform: "taobao",
+          externalOrderNumber: "10002",
+          paidAmountFen: 2599,
+          orderedAt: "2026-08-11 11:00",
+          shopName: "另一店铺",
+          possibleDuplicate: false,
+          createdAt: "2026-08-12T09:00:00Z",
+          productSummary: "另一件商品",
+          productCount: 1,
+        },
+      ],
       total: 41,
       page: query.page ?? 1,
       pageSize: query.pageSize ?? 20,
@@ -124,5 +140,45 @@ describe("OrdersPage query controls", () => {
 
     await waitFor(() => expect(apiMocks.listOrders).toHaveBeenCalledWith(expect.objectContaining({ duplicateOnly: true })))
     expect(screen.getByText("10001")).toBeInTheDocument()
+  })
+
+  it("clears current-page selection when the query changes", async () => {
+    const user = userEvent.setup()
+    render(<OrdersPage onBatchCreated={vi.fn()} refreshToken={0} />)
+    await screen.findByText("10001")
+
+    await user.click(screen.getByRole("checkbox", { name: "选择订单 10001" }))
+    expect(screen.getByText("已选择 1 项")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "店铺排序" }))
+
+    expect(screen.queryByText(/已选择/)).not.toBeInTheDocument()
+    await waitFor(() => expect(apiMocks.listOrders).toHaveBeenCalledWith(expect.objectContaining({ sortBy: "shop_name" })))
+  })
+
+  it("confirms bulk deletion and keeps only failed orders selected", async () => {
+    const user = userEvent.setup()
+    render(<OrdersPage onBatchCreated={vi.fn()} refreshToken={0} />)
+    await screen.findByText("10001")
+
+    await user.click(screen.getByRole("checkbox", { name: "选择当前页全部订单" }))
+    expect(screen.getByText("已选择 2 项")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "删除" }))
+    expect(screen.getByRole("dialog")).toHaveTextContent("将删除 2 个订单")
+    await user.click(screen.getByRole("button", { name: "取消" }))
+    expect(apiMocks.deleteOrders).not.toHaveBeenCalled()
+
+    apiMocks.deleteOrders.mockResolvedValueOnce({
+      results: [
+        { id: "order-1", deleted: true, errorCode: null, errorMessage: null },
+        { id: "order-2", deleted: false, errorCode: "io_error", errorMessage: "截图被占用" },
+      ],
+    })
+    await user.click(screen.getByRole("button", { name: "删除" }))
+    await user.click(screen.getByRole("button", { name: "确认删除" }))
+
+    await waitFor(() => expect(apiMocks.deleteOrders).toHaveBeenCalledWith(["order-1", "order-2"]))
+    await waitFor(() => expect(screen.getByText("已选择 1 项")).toBeInTheDocument())
+    expect(screen.getByRole("checkbox", { name: "选择订单 10002" })).toHaveAttribute("aria-checked", "true")
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
   })
 })

@@ -232,6 +232,27 @@ pub struct OrdersPage {
     pub page_size: u32,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteOrdersRequest {
+    pub ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteOrderResult {
+    pub id: String,
+    pub deleted: bool,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteOrdersResult {
+    pub results: Vec<DeleteOrderResult>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderDetail {

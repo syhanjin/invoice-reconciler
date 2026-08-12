@@ -5,6 +5,7 @@ import type {
   AppSettings,
   BatchDetail,
   BootstrapState,
+  DeleteOrdersResult,
   ImportBatchesPage,
   ImportBatchesQuery,
   OllamaStatus,
@@ -39,6 +40,8 @@ export const api = {
   updateOrder: (request: UpdateOrderRequest) =>
     invoke<OrderDetail>("update_order", { request }),
   deleteOrder: (id: string) => invoke<void>("delete_order", { request: { id } }),
+  deleteOrders: (ids: string[]) =>
+    invoke<DeleteOrdersResult>("delete_orders", { request: { ids } }),
   listenForTaskUpdates: (
     handler: (payload: TaskUpdateEvent) => void,
   ): Promise<UnlistenFn> =>

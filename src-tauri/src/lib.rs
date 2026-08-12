@@ -69,6 +69,7 @@ pub fn run() {
             commands::get_order,
             commands::update_order,
             commands::delete_order,
+            commands::delete_orders,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Bill");

@@ -110,6 +110,17 @@ export interface OrdersPage {
   pageSize: number
 }
 
+export interface DeleteOrderResult {
+  id: string
+  deleted: boolean
+  errorCode: string | null
+  errorMessage: string | null
+}
+
+export interface DeleteOrdersResult {
+  results: DeleteOrderResult[]
+}
+
 export type OrderSortBy = "created_at" | "ordered_at" | "paid_amount" | "shop_name"
 export type SortDirection = "asc" | "desc"
 

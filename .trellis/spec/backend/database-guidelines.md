@@ -43,6 +43,7 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 
 - Import: copy the UUID-named image, then insert task data; on any creation failure, delete the batch and copied files.
 - Delete: move the managed image to a temporary trash path, delete database rows transactionally, then remove the trash file. Restore the image if the database operation fails.
+- Bulk delete: apply the same compensated single-order operation sequentially per unique ID. Return per-ID outcomes so one failure neither hides prior successes nor prevents later IDs from being attempted.
 - Resolve all managed paths under the configured application-data directory before reading, deleting, or exposing them.
 
 ## Forbidden Patterns
@@ -59,4 +60,5 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Duplicate order-number group creation, edit between groups, and delete recalculation.
 - Unique SHA-256 behavior for managed images while skipped tasks remain recordable.
 - Transaction rollback for failed order/item mutations.
+- Bulk-delete partial-result coverage, duplicate-group recalculation after successful items, and a fault-injection test proving the managed image is restored when database deletion fails.
 - Startup conversion of `queued` and `processing` tasks to `interrupted`.
