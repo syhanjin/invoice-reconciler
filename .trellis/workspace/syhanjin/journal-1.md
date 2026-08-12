@@ -147,3 +147,36 @@ Added server-controlled order sorting and pagination, persisted table display pr
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: Order Selection And Bulk Deletion
+
+**Date**: 2026-08-12
+**Task**: Order Selection And Bulk Deletion
+**Branch**: `main`
+
+### Summary
+
+Added current-page order selection with checked and indeterminate states, confirmation-driven bulk deletion, structured per-order Tauri results, safe sequential file compensation, partial-failure recovery, tests, and synced cross-layer specs.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ba5e291` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

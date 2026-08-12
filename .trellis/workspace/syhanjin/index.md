@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 4
+- **Total Sessions**: 5
 - **Last Active**: 2026-08-12
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~149 | Active |
+| `journal-1.md` | ~182 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 5 | 2026-08-12 | Order Selection And Bulk Deletion | `ba5e291` | `main` |
 | 4 | 2026-08-12 | Complete order table controls | `4d78ba6` | `main` |
 | 3 | 2026-08-12 | Persistent import task center | `219777e` | `main` |
 | 2 | 2026-08-12 | Default Linux WebKit DMA-BUF renderer setting | `94e783c` | `main` |
