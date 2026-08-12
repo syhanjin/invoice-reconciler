@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/order-invoice-matching-contract.md","reason":"候选生成、确认事务、占用约束和编辑删除联动的后端契约"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"SeaORM、SQLite migration、唯一约束和批量事务规范"}
+{"file":".trellis/spec/frontend/matching-workspace-contract.md","reason":"双栏匹配工作台、冲突处理和自定义跨页选择交互契约"}
