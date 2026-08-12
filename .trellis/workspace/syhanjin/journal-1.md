@@ -180,3 +180,36 @@ Added current-page order selection with checked and indeterminate states, confir
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Invoice import and ledger
+
+**Date**: 2026-08-12
+**Task**: Invoice import and ledger
+**Branch**: `main`
+
+### Summary
+
+Implemented secure versioned settings, Tencent general-invoice OCR preflight and queue, robust SeaORM invoice migrations with restart recovery tests, invoice review and ledger workflows, PDF/image previews, and multi-select bulk deletion.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c01c542` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

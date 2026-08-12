@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
+- **Total Sessions**: 6
 - **Last Active**: 2026-08-12
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~182 | Active |
+| `journal-1.md` | ~215 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-08-12 | Invoice import and ledger | `c01c542` | `main` |
 | 5 | 2026-08-12 | Order Selection And Bulk Deletion | `ba5e291` | `main` |
 | 4 | 2026-08-12 | Complete order table controls | `4d78ba6` | `main` |
 | 3 | 2026-08-12 | Persistent import task center | `219777e` | `main` |
