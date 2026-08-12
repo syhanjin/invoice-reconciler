@@ -40,6 +40,8 @@ Durable tables are `app_settings`, `import_batches`, `import_tasks`, `orders`, a
 
 `ImportBatchesQuery` contains optional `page` and `pageSize` integers. Page defaults to `1` and is normalized to at least `1`; page size defaults to `20` and is clamped to `1..=100`. `ImportBatchesPage` contains `{ items, total, page, pageSize }`. Each item is an `ImportBatchSummary` with batch metadata plus aggregate `BatchCounts`, but no `tasks` array. Sort summaries by `created_at DESC, id DESC`, then load the selected batch through `get_batch`; this keeps IPC and memory bounded as history grows.
 
+`OrdersQuery` contains optional `page`, `pageSize`, `search`, `duplicateOnly`, `sortBy`, and `sortDirection`. Supported sort fields are `created_at`, `ordered_at`, `paid_amount`, and `shop_name`; directions are `asc` and `desc`. Every order sort appends `id DESC` as a stable tie-breaker so page boundaries do not drift between equivalent queries.
+
 The Ollama `/api/chat` request uses `stream: false`, `format` containing the JSON Schema, `options.temperature: 0`, and `options.num_ctx: 16384`. Its recognized JSON shape is:
 
 ```json
@@ -75,6 +77,7 @@ Queue concurrency is captured from settings when a run begins. The number of sen
 | Import history page below 1 | Normalize to page `1` |
 | Import history page size outside `1..=100` | Clamp it before applying `LIMIT` |
 | Import history is empty | Return an empty page with `total = 0`; do not synthesize a batch |
+| Orders query contains search and duplicate-only | Bind the search pattern, combine both filters, and calculate `total` from the same filter set used for page rows |
 
 ### 5. Good/Base/Bad Cases
 
@@ -87,6 +90,7 @@ Queue concurrency is captured from settings when a run begins. The number of sen
 - Migration integration test: all tables migrate and rerunning migrations succeeds.
 - Database integration test: same-number groups are flagged; editing between groups recalculates both groups.
 - Import-history database test: assert stable pagination, aggregate counts for every task status, empty results, and page-size clamping.
+- Orders-query database test: assert every supported sort field in both directions, `id DESC` tie-breaking, and search/duplicate filtering combined with pagination.
 - File unit test: extension and magic-byte validation agree, and the UUID basename is retained.
 - OCR mock-server test: assert the exact structured request fields and parse a valid response.
 - Queue async test: measure peak in-flight requests and assert `peak <= captured_concurrency`.

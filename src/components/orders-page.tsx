@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog"
 import { Filter, ImagePlus, LoaderCircle, Search, X } from "lucide-react"
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
+import { useAtom } from "jotai"
 
 import { OrdersTable } from "@/components/orders-table"
 import { Button } from "@/components/ui/button"
@@ -17,7 +18,13 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { api, errorMessage } from "@/lib/api"
-import type { BatchDetail, OrdersPage as OrdersPageData } from "@/lib/types"
+import { orderTablePreferencesAtom } from "@/lib/store"
+import type {
+  BatchDetail,
+  OrdersPage as OrdersPageData,
+  OrderSortBy,
+  SortDirection,
+} from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 interface OrdersPageProps {
@@ -30,6 +37,7 @@ const OrderSheet = lazy(() => import("@/components/order-sheet"))
 
 export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
   const [orders, setOrders] = useState<OrdersPageData>(emptyPage)
+  const [preferences, setPreferences] = useAtom(orderTablePreferencesAtom)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState("")
   const [committedSearch, setCommittedSearch] = useState("")
@@ -46,19 +54,23 @@ export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
     try {
       const result = await api.listOrders({
         page,
-        pageSize: 20,
+        pageSize: preferences.pageSize,
         search: committedSearch || undefined,
         duplicateOnly,
-        sortBy: "created_at",
-        sortDirection: "desc",
+        sortBy: preferences.sortBy,
+        sortDirection: preferences.sortDirection,
       })
-      if (request === refreshRef.current) setOrders(result)
+      if (request === refreshRef.current) {
+        const pages = Math.max(1, Math.ceil(result.total / result.pageSize))
+        if (page > pages) setPage(pages)
+        else setOrders(result)
+      }
     } catch (error) {
       toast.error(errorMessage(error))
     } finally {
       if (request === refreshRef.current) setLoading(false)
     }
-  }, [committedSearch, duplicateOnly, page])
+  }, [committedSearch, duplicateOnly, page, preferences.pageSize, preferences.sortBy, preferences.sortDirection])
 
   useEffect(() => void loadOrders(), [loadOrders, refreshToken])
 
@@ -203,8 +215,24 @@ export function OrdersPage({ onBatchCreated, refreshToken }: OrdersPageProps) {
       <OrdersTable
         data={orders}
         loading={loading}
+        preferences={preferences}
         onSelect={setSelectedOrder}
         onPageChange={setPage}
+        onPageSizeChange={(pageSize) => {
+          setPreferences((current) => ({ ...current, pageSize }))
+          setPage(1)
+        }}
+        onSortChange={(sortBy: OrderSortBy, sortDirection: SortDirection) => {
+          setPreferences((current) => ({ ...current, sortBy, sortDirection }))
+          setPage(1)
+        }}
+        onPreferencesChange={(nextPreferences) => {
+          const queryChanged = nextPreferences.pageSize !== preferences.pageSize
+            || nextPreferences.sortBy !== preferences.sortBy
+            || nextPreferences.sortDirection !== preferences.sortDirection
+          setPreferences(nextPreferences)
+          if (queryChanged) setPage(1)
+        }}
       />
       <Suspense fallback={null}>
         <OrderSheet

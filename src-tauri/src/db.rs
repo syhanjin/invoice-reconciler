@@ -839,6 +839,100 @@ mod tests {
             .unwrap();
     }
 
+    struct QueryOrderSeed<'a> {
+        id: &'a str,
+        number: &'a str,
+        product: &'a str,
+        shop: Option<&'a str>,
+        amount: Option<i64>,
+        ordered_at: Option<&'a str>,
+        created_at: &'a str,
+        duplicate: bool,
+    }
+
+    async fn insert_query_order(db: &Database, seed: QueryOrderSeed<'_>) {
+        db.create_batch("query-batch", Platform::Taobao).await.ok();
+        db.create_task(
+            seed.id,
+            "query-batch",
+            "order.png",
+            None,
+            seed.id,
+            "succeeded",
+            None,
+        )
+        .await
+        .unwrap();
+        order::ActiveModel {
+            id: Set(seed.id.into()),
+            platform: Set("taobao".into()),
+            external_order_number: Set(Some(seed.number.into())),
+            paid_amount_fen: Set(seed.amount),
+            ordered_at: Set(seed.ordered_at.map(str::to_owned)),
+            shop_name: Set(seed.shop.map(str::to_owned)),
+            raw_ocr_json: Set("{}".into()),
+            possible_duplicate: Set(seed.duplicate),
+            created_at: Set(seed.created_at.into()),
+            updated_at: Set(seed.created_at.into()),
+        }
+        .insert(&db.connection)
+        .await
+        .unwrap();
+        insert_products(&db.connection, seed.id, &[seed.product.into()])
+            .await
+            .unwrap();
+    }
+
+    fn order_query(sort_by: OrderSort, sort_direction: SortDirection) -> OrdersQuery {
+        OrdersQuery {
+            page: Some(1),
+            page_size: Some(100),
+            search: None,
+            duplicate_only: None,
+            sort_by: Some(sort_by),
+            sort_direction: Some(sort_direction),
+        }
+    }
+
+    async fn seeded_orders_for_query() -> Database {
+        let db = seeded_database().await;
+        for seed in [
+            QueryOrderSeed {
+                id: "order-a",
+                number: "1001",
+                product: "键盘",
+                shop: Some("北店"),
+                amount: Some(3000),
+                ordered_at: Some("2026-08-10 09:00"),
+                created_at: "2026-08-12T08:00:00Z",
+                duplicate: false,
+            },
+            QueryOrderSeed {
+                id: "order-b",
+                number: "1002",
+                product: "显示器",
+                shop: Some("南店"),
+                amount: Some(1000),
+                ordered_at: Some("2026-08-11 09:00"),
+                created_at: "2026-08-12T09:00:00Z",
+                duplicate: true,
+            },
+            QueryOrderSeed {
+                id: "order-c",
+                number: "1003",
+                product: "鼠标",
+                shop: Some("北店"),
+                amount: Some(2000),
+                ordered_at: Some("2026-08-12 09:00"),
+                created_at: "2026-08-12T09:00:00Z",
+                duplicate: false,
+            },
+        ] {
+            insert_query_order(&db, seed).await;
+        }
+        db
+    }
+
     #[tokio::test]
     async fn import_batch_history_is_stably_paged_with_aggregate_counts() {
         let db = seeded_database().await;
@@ -914,6 +1008,93 @@ mod tests {
         assert!(page.items.is_empty());
         assert_eq!(page.page, 1);
         assert_eq!(page.page_size, 100);
+    }
+
+    #[tokio::test]
+    async fn orders_support_every_sort_field_in_both_directions() {
+        let db = seeded_orders_for_query().await;
+        let cases = [
+            (
+                OrderSort::CreatedAt,
+                vec!["order-a", "order-c", "order-b"],
+                vec!["order-c", "order-b", "order-a"],
+            ),
+            (
+                OrderSort::OrderedAt,
+                vec!["order-a", "order-b", "order-c"],
+                vec!["order-c", "order-b", "order-a"],
+            ),
+            (
+                OrderSort::PaidAmount,
+                vec!["order-b", "order-c", "order-a"],
+                vec!["order-a", "order-c", "order-b"],
+            ),
+            (
+                OrderSort::ShopName,
+                vec!["order-c", "order-a", "order-b"],
+                vec!["order-b", "order-c", "order-a"],
+            ),
+        ];
+
+        for (sort, ascending_ids, descending_ids) in cases {
+            let ascending = db
+                .list_orders(order_query(sort, SortDirection::Asc))
+                .await
+                .unwrap();
+            assert_eq!(
+                ascending
+                    .items
+                    .iter()
+                    .map(|order| order.id.as_str())
+                    .collect::<Vec<_>>(),
+                ascending_ids,
+            );
+
+            let descending = db
+                .list_orders(order_query(sort, SortDirection::Desc))
+                .await
+                .unwrap();
+            assert_eq!(
+                descending
+                    .items
+                    .iter()
+                    .map(|order| order.id.as_str())
+                    .collect::<Vec<_>>(),
+                descending_ids,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn order_filters_combine_with_stable_pagination() {
+        let db = seeded_orders_for_query().await;
+        let duplicate_page = db
+            .list_orders(OrdersQuery {
+                page: Some(1),
+                page_size: Some(1),
+                search: Some("显示器".into()),
+                duplicate_only: Some(true),
+                sort_by: Some(OrderSort::CreatedAt),
+                sort_direction: Some(SortDirection::Desc),
+            })
+            .await
+            .unwrap();
+        assert_eq!(duplicate_page.total, 1);
+        assert_eq!(duplicate_page.items[0].id, "order-b");
+
+        let tied_page = db
+            .list_orders(OrdersQuery {
+                page: Some(2),
+                page_size: Some(1),
+                search: None,
+                duplicate_only: None,
+                sort_by: Some(OrderSort::CreatedAt),
+                sort_direction: Some(SortDirection::Desc),
+            })
+            .await
+            .unwrap();
+        assert_eq!(tied_page.total, 3);
+        assert_eq!(tied_page.items[0].id, "order-b");
     }
 
     #[tokio::test]

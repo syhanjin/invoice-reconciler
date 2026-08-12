@@ -110,13 +110,36 @@ export interface OrdersPage {
   pageSize: number
 }
 
+export type OrderSortBy = "created_at" | "ordered_at" | "paid_amount" | "shop_name"
+export type SortDirection = "asc" | "desc"
+
 export interface OrdersQuery {
   page?: number
   pageSize?: number
   search?: string
   duplicateOnly?: boolean
-  sortBy?: "created_at" | "ordered_at" | "paid_amount" | "shop_name"
-  sortDirection?: "asc" | "desc"
+  sortBy?: OrderSortBy
+  sortDirection?: SortDirection
+}
+
+export type OrderTableDensity = "comfortable" | "compact"
+
+export type OrderTableColumnId =
+  | "externalOrderNumber"
+  | "productSummary"
+  | "shopName"
+  | "paidAmountFen"
+  | "orderedAt"
+  | "createdAt"
+  | "platform"
+
+export interface OrderTablePreferences {
+  pageSize: number
+  sortBy: OrderSortBy
+  sortDirection: SortDirection
+  columnVisibility: Partial<Record<OrderTableColumnId, boolean>>
+  columnSizing: Partial<Record<OrderTableColumnId, number>>
+  density: OrderTableDensity
 }
 
 export interface OrderDetail {

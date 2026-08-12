@@ -28,6 +28,7 @@ Money is stored as integer fen. Date/time values are normalized strings in `YYYY
 
 - Use typed SeaORM entities for ordinary create, read, update, and delete work.
 - Raw SQL through `Statement` is allowed for aggregate/search queries that SeaORM cannot express clearly, but bind every user-provided value; never interpolate it into SQL.
+- Server-paged sort queries must whitelist SQL column and direction fragments from typed enums and append a deterministic unique-key tie-breaker; never interpolate client strings or rely on non-unique primary ordering alone.
 - Wrap order edits, product replacement, and duplicate-flag recalculation in one transaction.
 - External order numbers may repeat. After inserting, editing, or deleting an order, recalculate `possible_duplicate` for every affected non-empty order-number group.
 - Treat SQLite as the source of truth. In-memory queue and Jotai state are projections, not durable state.
