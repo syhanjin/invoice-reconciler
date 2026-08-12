@@ -222,6 +222,8 @@ mod tests {
             tencent_secret_id_masked: None,
             tencent_credentials_configured: false,
             invoice_ocr_concurrency: 3,
+            match_max_orders: crate::models::DEFAULT_MATCH_MAX_ORDERS,
+            match_max_candidates: crate::models::DEFAULT_MATCH_MAX_CANDIDATES,
             settings_path: String::new(),
             permission_warning: None,
         };

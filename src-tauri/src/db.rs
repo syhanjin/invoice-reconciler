@@ -10,7 +10,9 @@ use sea_orm::{
 };
 use sea_orm_migration::MigratorTrait;
 
-use crate::entities::{app_setting, import_batch, import_task, order, order_item};
+use crate::entities::{
+    app_setting, import_batch, import_task, invoice_match, invoice_match_order, order, order_item,
+};
 use crate::error::{AppError, AppResult};
 use crate::migration::Migrator;
 use crate::models::{
@@ -493,6 +495,11 @@ impl Database {
             .into_iter()
             .map(|item| item.product_name)
             .collect();
+        let is_matched = invoice_match_order::Entity::find()
+            .filter(invoice_match_order::Column::OrderId.eq(id))
+            .one(&self.connection)
+            .await?
+            .is_some();
         Ok(OrderDetail {
             id: order_model.id,
             platform: order_model.platform,
@@ -508,6 +515,7 @@ impl Database {
             original_file_name: task.original_file_name,
             image_path: task.managed_image_path.unwrap_or_default(),
             warning_message: task.warning_message,
+            is_matched,
         })
     }
 
@@ -520,11 +528,26 @@ impl Database {
             .ok_or_else(|| AppError::NotFound(format!("订单 {}", request.id)))?;
         let old_number = model.external_order_number.clone();
         let new_number = clean_optional(request.external_order_number);
+        let next_ordered_at = clean_optional(request.ordered_at);
+        let next_shop_name = clean_optional(request.shop_name);
+        let matching_fields_changed = model.paid_amount_fen != request.paid_amount_fen
+            || model.ordered_at != next_ordered_at
+            || model.shop_name != next_shop_name;
+        if matching_fields_changed
+            && let Some(link) = invoice_match_order::Entity::find()
+                .filter(invoice_match_order::Column::OrderId.eq(&request.id))
+                .one(&transaction)
+                .await?
+        {
+            invoice_match::Entity::delete_by_id(link.invoice_id)
+                .exec(&transaction)
+                .await?;
+        }
         let mut active = model.into_active_model();
         active.external_order_number = Set(new_number.clone());
         active.paid_amount_fen = Set(request.paid_amount_fen);
-        active.ordered_at = Set(clean_optional(request.ordered_at));
-        active.shop_name = Set(clean_optional(request.shop_name));
+        active.ordered_at = Set(next_ordered_at);
+        active.shop_name = Set(next_shop_name);
         active.updated_at = Set(now());
         active.update(&transaction).await?;
         order_item::Entity::delete_many()
@@ -545,6 +568,14 @@ impl Database {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("订单 {id}")))?;
         let old_number = model.external_order_number.clone();
+        if invoice_match_order::Entity::find()
+            .filter(invoice_match_order::Column::OrderId.eq(id))
+            .one(&transaction)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::MatchingLocked(format!("订单 {id}")));
+        }
         let result = import_task::Entity::delete_by_id(id)
             .exec(&transaction)
             .await?;
@@ -696,6 +727,8 @@ fn settings_from_model(model: app_setting::Model) -> AppSettings {
         tencent_secret_id_masked: None,
         tencent_credentials_configured: false,
         invoice_ocr_concurrency: crate::models::DEFAULT_INVOICE_OCR_CONCURRENCY,
+        match_max_orders: crate::models::DEFAULT_MATCH_MAX_ORDERS,
+        match_max_candidates: crate::models::DEFAULT_MATCH_MAX_CANDIDATES,
         settings_path: String::new(),
         permission_warning: None,
     }

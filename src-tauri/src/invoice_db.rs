@@ -8,8 +8,8 @@ use sea_orm::{
 
 use crate::db::{Database, now};
 use crate::entities::{
-    invoice, invoice_batch, invoice_line_item, invoice_recovery_marker, invoice_source_link,
-    invoice_task,
+    invoice, invoice_batch, invoice_line_item, invoice_match, invoice_recovery_marker,
+    invoice_source_link, invoice_task,
 };
 
 #[derive(Debug)]
@@ -658,6 +658,10 @@ impl Database {
             .into_iter()
             .map(InvoiceLineItem::from)
             .collect();
+        let is_matched = invoice_match::Entity::find_by_id(id)
+            .one(&self.connection)
+            .await?
+            .is_some();
         Ok(InvoiceDetail {
             id: value.id,
             task_id: value.task_id,
@@ -688,6 +692,7 @@ impl Database {
             created_at: value.created_at,
             updated_at: value.updated_at,
             items,
+            is_matched,
         })
     }
 
@@ -722,10 +727,20 @@ impl Database {
         let old_subtype = model.subtype.clone();
         let old_number = model.invoice_number.clone();
         let new_subtype = model.subtype.clone();
+        let next_invoice_date = clean(request.invoice_date);
+        let next_currency = request.currency.trim().to_uppercase();
+        let matching_fields_changed = model.invoice_date != next_invoice_date
+            || model.total_fen != request.total_fen
+            || model.currency != next_currency;
+        if matching_fields_changed {
+            invoice_match::Entity::delete_by_id(&request.id)
+                .exec(&transaction)
+                .await?;
+        }
         let mut active = model.into_active_model();
         active.invoice_code = Set(code);
         active.invoice_number = Set(number.clone());
-        active.invoice_date = Set(clean(request.invoice_date));
+        active.invoice_date = Set(next_invoice_date);
         active.buyer_name = Set(clean(request.buyer_name));
         active.buyer_tax_id = Set(clean(request.buyer_tax_id));
         active.seller_name = Set(clean(request.seller_name));
@@ -733,7 +748,7 @@ impl Database {
         active.amount_fen = Set(request.amount_fen);
         active.tax_fen = Set(request.tax_fen);
         active.total_fen = Set(request.total_fen);
-        active.currency = Set(request.currency.trim().to_uppercase());
+        active.currency = Set(next_currency);
         active.reliable_identity = Set(identity);
         if has_reliable_identity || number.is_none() {
             active.possible_duplicate = Set(false);
@@ -750,6 +765,13 @@ impl Database {
         &self,
         id: &str,
     ) -> AppResult<(String, String, String, bool)> {
+        if invoice_match::Entity::find_by_id(id)
+            .one(&self.connection)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::MatchingLocked(format!("发票 {id}")));
+        }
         let detail = self.invoice_detail(id).await?;
         let count = invoice::Entity::find()
             .filter(invoice::Column::TaskId.eq(&detail.task_id))

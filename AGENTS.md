@@ -42,6 +42,9 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - Invoice OCR uses Tencent Cloud `RecognizeGeneralInvoice` through the dedicated
   invoice queue. Preserve local preflight/confirmation, the global 5 QPS limit,
   durable raw-response auditing, and the separate `invoice-task-updated` event.
+- Order/invoice matching computes ephemeral candidates and persists only explicit
+  confirmations. Preserve exact-fen/CNY rules, missing-date comparison semantics,
+  global order uniqueness, atomic batch confirmation, and matched edit/delete guards.
 - Deleting an imported order releases its managed-image hash. Deleting an
   invoice records a source-hash plus subtype/number recovery marker so the same
   source can be reimported to restore only deleted invoices; source-less audit

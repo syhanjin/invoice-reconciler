@@ -23,6 +23,8 @@ const settings: AppSettings = {
   tencentSecretIdMasked: "AKID****7890",
   tencentCredentialsConfigured: true,
   invoiceOcrConcurrency: 3,
+  matchMaxOrders: 10,
+  matchMaxCandidates: 100,
   settingsPath: "/data/settings.toml",
   permissionWarning: null,
 }

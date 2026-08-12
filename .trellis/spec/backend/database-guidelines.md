@@ -27,6 +27,8 @@ Do not add a second application-facing database library. SeaORM may use SQLx int
 | `invoice_items` | integer | `(invoice_id, position)` is unique and cascades from invoice |
 | `invoice_source_links` | integer | invoice/task/page tuple is unique and cascades from both parents |
 | `invoice_recovery_markers` | `(source_sha256, recovery_identity)` | records deleted subtype/number identities and optionally binds one recovery task |
+| `invoice_matches` | invoice UUIDv7 text | one confirmed relationship per invoice; source is `automatic` or `custom` |
+| `invoice_match_orders` | `(invoice_id, order_id)` | order ID is globally unique and positions are unique within one invoice |
 
 Money is stored as integer fen. Date/time values are normalized strings in `YYYY-MM-DD HH:mm` form. Booleans use SQLite integers through SeaORM models. The task, order, and managed image basename share the same UUID.
 
@@ -39,6 +41,7 @@ Money is stored as integer fen. Date/time values are normalized strings in `YYYY
 - Write invoice recovery markers in the same transaction as invoice deletion. Claim all unclaimed markers for one source hash in the same transaction that creates its recovery task; consume matched markers and release unmatched markers in the persistence transaction.
 - External order numbers may repeat. After inserting, editing, or deleting an order, recalculate `possible_duplicate` for every affected non-empty order-number group.
 - Treat SQLite as the source of truth. In-memory queue and Jotai state are projections, not durable state.
+- Keep matching candidates ephemeral. Persist only confirmed `invoice_matches` and members; use one transaction for batch confirmation and rely on the unique order index as the final occupancy guard.
 
 ## Migrations
 
@@ -68,6 +71,7 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Do not use ad hoc schema creation outside `sea-orm-migration`.
 - Do not run restart-recovery SQL for new tables before `Migrator::up`.
 - Do not assume SQLite migration DDL is automatically atomic.
+- Do not persist matching candidates or confirm a multi-item batch with one transaction per item.
 
 ## Required Tests
 
@@ -79,3 +83,4 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Transaction rollback for failed order/item mutations.
 - Bulk-delete partial-result coverage, duplicate-group recalculation after successful items, and a fault-injection test proving the managed image is restored when database deletion fails.
 - Startup conversion of `queued` and `processing` tasks to `interrupted`.
+- Matching fresh-file/m0003-upgrade/interrupted-migration coverage, unique order occupancy, cascade cleanup, and atomic batch rollback.

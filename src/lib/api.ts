@@ -24,6 +24,12 @@ import type {
   InvoiceDetail,
   UpdateInvoiceRequest,
   DeleteInvoicesResult,
+  ConfirmInvoiceMatchRequest,
+  ConfirmInvoiceMatchResult,
+  MatchableOrdersPage,
+  MatchableOrdersQuery,
+  MatchingPageData,
+  MatchingQuery,
 } from "@/lib/types"
 
 export const api = {
@@ -71,6 +77,16 @@ export const api = {
   deleteInvoice: (id: string) => invoke<void>("delete_invoice", { request: { id } }),
   deleteInvoices: (ids: string[]) =>
     invoke<DeleteInvoicesResult>("delete_invoices", { request: { ids } }),
+  getMatchingPage: (query: MatchingQuery) =>
+    invoke<MatchingPageData>("get_matching_page", { query }),
+  listMatchableOrders: (query: MatchableOrdersQuery) =>
+    invoke<MatchableOrdersPage>("list_matchable_orders", { query }),
+  confirmInvoiceMatch: (request: ConfirmInvoiceMatchRequest) =>
+    invoke<ConfirmInvoiceMatchResult>("confirm_invoice_match", { request }),
+  confirmInvoiceMatches: (matches: ConfirmInvoiceMatchRequest[]) =>
+    invoke<ConfirmInvoiceMatchResult[]>("confirm_invoice_matches", { request: { matches } }),
+  unconfirmInvoiceMatch: (id: string) =>
+    invoke<void>("unconfirm_invoice_match", { request: { id } }),
   listenForTaskUpdates: (
     handler: (payload: TaskUpdateEvent) => void,
   ): Promise<UnlistenFn> =>

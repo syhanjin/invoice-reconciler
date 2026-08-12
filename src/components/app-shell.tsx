@@ -1,4 +1,4 @@
-import { ClipboardList, ListTodo, ReceiptText, Settings } from "lucide-react"
+import { ClipboardList, GitCompareArrows, ListTodo, ReceiptText, Settings } from "lucide-react"
 import type { ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
@@ -20,6 +20,7 @@ interface AppShellProps {
 const navigation = [
   { id: "orders" as const, label: "订单", icon: ClipboardList },
   { id: "invoices" as const, label: "发票", icon: ReceiptText },
+  { id: "matching" as const, label: "匹配", icon: GitCompareArrows },
   { id: "importTasks" as const, label: "导入任务", icon: ListTodo },
   { id: "settings" as const, label: "设置", icon: Settings },
 ]

@@ -57,6 +57,7 @@ interface OrderSheetProps {
 export default function OrderSheet({ orderId, onOpenChange, onChanged }: OrderSheetProps) {
   const [detail, setDetail] = useState<OrderDetail | null>(null)
   const [loading, setLoading] = useState(false)
+  const [pendingSave, setPendingSave] = useState<OrderForm | null>(null)
   const form = useForm<OrderForm>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -70,6 +71,7 @@ export default function OrderSheet({ orderId, onOpenChange, onChanged }: OrderSh
   const products = useFieldArray({ control: form.control, name: "products" })
 
   useEffect(() => {
+    setPendingSave(null)
     if (!orderId) {
       setDetail(null)
       return
@@ -91,7 +93,7 @@ export default function OrderSheet({ orderId, onOpenChange, onChanged }: OrderSh
       .finally(() => setLoading(false))
   }, [form, orderId])
 
-  const save = form.handleSubmit(async (values) => {
+  const persist = async (values: OrderForm) => {
     if (!orderId) return
     const paidAmountFen = parseYuanToFen(values.paidAmount)
     if (Number.isNaN(paidAmountFen)) {
@@ -113,6 +115,20 @@ export default function OrderSheet({ orderId, onOpenChange, onChanged }: OrderSh
     } catch (error) {
       toast.error(errorMessage(error))
     }
+  }
+
+  const save = form.handleSubmit(async (values) => {
+    const paidAmountFen = parseYuanToFen(values.paidAmount)
+    const changesMatchingFields = detail?.isMatched && (
+      paidAmountFen !== detail.paidAmountFen
+      || (values.orderedAt.trim() || null) !== detail.orderedAt
+      || (values.shopName.trim() || null) !== detail.shopName
+    )
+    if (changesMatchingFields) {
+      setPendingSave(values)
+      return
+    }
+    await persist(values)
   })
 
   return (
@@ -125,6 +141,7 @@ export default function OrderSheet({ orderId, onOpenChange, onChanged }: OrderSh
           <div className="flex items-center gap-3">
             <SheetTitle>订单详情</SheetTitle>
             {detail?.possibleDuplicate && <Badge variant="destructive">可能重复</Badge>}
+            {detail?.isMatched && <Badge variant="outline">已匹配</Badge>}
           </div>
           <SheetDescription>{detail?.originalFileName ?? "读取订单信息"}</SheetDescription>
         </SheetHeader>
@@ -252,7 +269,7 @@ export default function OrderSheet({ orderId, onOpenChange, onChanged }: OrderSh
                     <DialogHeader>
                       <DialogTitle>删除订单？</DialogTitle>
                       <DialogDescription>
-                        订单记录和受管截图将一起删除，此操作无法撤销。
+                        {detail.isMatched ? "该订单已确认匹配，请先在匹配页撤销确认。" : "订单记录和受管截图将一起删除，此操作无法撤销。"}
                       </DialogDescription>
                     </DialogHeader>
                     <DialogFooter>
@@ -261,6 +278,7 @@ export default function OrderSheet({ orderId, onOpenChange, onChanged }: OrderSh
                       </DialogClose>
                       <Button
                         variant="destructive"
+                        disabled={detail.isMatched}
                         onClick={async () => {
                           try {
                             await api.deleteOrder(detail.id)
@@ -291,6 +309,12 @@ export default function OrderSheet({ orderId, onOpenChange, onChanged }: OrderSh
           </div>
         )}
       </SheetContent>
+      <Dialog open={Boolean(pendingSave)} onOpenChange={(open) => !open && setPendingSave(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>保存并解除匹配？</DialogTitle><DialogDescription>实付款、下单时间或店铺名称发生变化。继续保存会解除该订单当前已确认的发票匹配。</DialogDescription></DialogHeader>
+          <DialogFooter><Button variant="outline" onClick={() => setPendingSave(null)}>取消</Button><Button onClick={async () => { const values = pendingSave; setPendingSave(null); if (values) await persist(values) }}>继续保存</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Sheet>
   )
 }

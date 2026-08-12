@@ -6,7 +6,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{DEFAULT_INVOICE_OCR_CONCURRENCY, PrivateAppSettings, UpdateSettingsRequest};
+use crate::models::{
+    DEFAULT_INVOICE_OCR_CONCURRENCY, DEFAULT_MATCH_MAX_CANDIDATES, DEFAULT_MATCH_MAX_ORDERS,
+    MAX_MATCH_MAX_CANDIDATES, MAX_MATCH_MAX_ORDERS, MIN_MATCH_MAX_CANDIDATES, MIN_MATCH_MAX_ORDERS,
+    PrivateAppSettings, UpdateSettingsRequest,
+};
 
 const SETTINGS_VERSION: u32 = 1;
 
@@ -15,6 +19,8 @@ struct SettingsFile {
     version: u32,
     ollama: OllamaSettings,
     tencent_cloud: TencentSettings,
+    #[serde(default)]
+    matching: MatchingSettings,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -29,6 +35,21 @@ struct TencentSettings {
     secret_id: String,
     secret_key: String,
     invoice_ocr_concurrency: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct MatchingSettings {
+    max_orders_per_candidate: u8,
+    max_candidates_per_invoice: u16,
+}
+
+impl Default for MatchingSettings {
+    fn default() -> Self {
+        Self {
+            max_orders_per_candidate: DEFAULT_MATCH_MAX_ORDERS,
+            max_candidates_per_invoice: DEFAULT_MATCH_MAX_CANDIDATES,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -71,6 +92,7 @@ impl SettingsStore {
                     secret_key: String::new(),
                     invoice_ocr_concurrency: DEFAULT_INVOICE_OCR_CONCURRENCY,
                 },
+                matching: MatchingSettings::default(),
             };
             write_file(&path, &initial).await?;
             initial
@@ -138,6 +160,10 @@ impl SettingsStore {
                 secret_key,
                 invoice_ocr_concurrency: request.invoice_ocr_concurrency,
             },
+            matching: MatchingSettings {
+                max_orders_per_candidate: request.match_max_orders,
+                max_candidates_per_invoice: request.match_max_candidates,
+            },
         };
         write_file(&self.path, &file).await?;
         let warning = tighten_permissions(&self.path)
@@ -159,6 +185,14 @@ fn to_private(file: SettingsFile, path: &Path, warning: Option<String>) -> Priva
         tencent_secret_id: file.tencent_cloud.secret_id,
         tencent_secret_key: file.tencent_cloud.secret_key,
         invoice_ocr_concurrency: file.tencent_cloud.invoice_ocr_concurrency.clamp(1, 5),
+        match_max_orders: file
+            .matching
+            .max_orders_per_candidate
+            .clamp(MIN_MATCH_MAX_ORDERS, MAX_MATCH_MAX_ORDERS),
+        match_max_candidates: file
+            .matching
+            .max_candidates_per_invoice
+            .clamp(MIN_MATCH_MAX_CANDIDATES, MAX_MATCH_MAX_CANDIDATES),
         settings_path: path.to_string_lossy().into_owned(),
         permission_warning: warning,
     }
@@ -277,6 +311,8 @@ mod tests {
             tencent_secret_id_masked: None,
             tencent_credentials_configured: false,
             invoice_ocr_concurrency: 3,
+            match_max_orders: DEFAULT_MATCH_MAX_ORDERS,
+            match_max_candidates: DEFAULT_MATCH_MAX_CANDIDATES,
             settings_path: String::new(),
             permission_warning: None,
         }
@@ -297,6 +333,8 @@ mod tests {
                 tencent_secret_key: Some("private-value".into()),
                 clear_tencent_credentials: false,
                 invoice_ocr_concurrency: 4,
+                match_max_orders: 10,
+                match_max_candidates: 100,
             })
             .await
             .unwrap();
@@ -340,5 +378,23 @@ mod tests {
         };
         assert!(!error.contains("SENSITIVE-SENTINEL"));
         assert!(!error.contains("secret_key"));
+    }
+
+    #[tokio::test]
+    async fn version_one_settings_without_matching_section_use_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            directory.path().join("settings.toml"),
+            "version = 1\n[ollama]\nbase_url = \"http://localhost:11434\"\nmodel = \"qwen\"\nmax_concurrency = 3\n[tencent_cloud]\nsecret_id = \"\"\nsecret_key = \"\"\ninvoice_ocr_concurrency = 3\n",
+        )
+        .await
+        .unwrap();
+
+        let store = SettingsStore::load_or_migrate(directory.path(), legacy())
+            .await
+            .unwrap();
+        let public = store.public().await;
+        assert_eq!(public.match_max_orders, DEFAULT_MATCH_MAX_ORDERS);
+        assert_eq!(public.match_max_candidates, DEFAULT_MATCH_MAX_CANDIDATES);
     }
 }

@@ -34,9 +34,11 @@ export default function InvoiceSheet({ invoiceId, onOpenChange, onChanged }: { i
   const [loading, setLoading] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [pendingSave, setPendingSave] = useState<FormValues | null>(null)
   const form = useForm<FormValues>({ resolver: zodResolver(schema), defaultValues: emptyValues })
 
   useEffect(() => {
+    setPendingSave(null)
     if (!invoiceId) { setDetail(null); return }
     setLoading(true)
     api.getInvoice(invoiceId).then((value) => {
@@ -45,7 +47,7 @@ export default function InvoiceSheet({ invoiceId, onOpenChange, onChanged }: { i
     }).catch((error) => toast.error(errorMessage(error))).finally(() => setLoading(false))
   }, [form, invoiceId])
 
-  const save = form.handleSubmit(async (values) => {
+  const persist = async (values: FormValues) => {
     if (!invoiceId) return
     try {
       const saved = await api.updateInvoice({
@@ -58,6 +60,15 @@ export default function InvoiceSheet({ invoiceId, onOpenChange, onChanged }: { i
       toast.success("发票已保存")
       onChanged()
     } catch (error) { toast.error(errorMessage(error)) }
+  }
+  const save = form.handleSubmit(async (values) => {
+    const changesMatchingFields = detail?.isMatched && (
+      optional(values.invoiceDate) !== detail.invoiceDate
+      || parseYuanToFen(values.total) !== detail.totalFen
+      || values.currency.trim().toUpperCase() !== detail.currency
+    )
+    if (changesMatchingFields) { setPendingSave(values); return }
+    await persist(values)
   })
 
   const previewUrl = detail ? convertFileSrc(detail.previewPath) : ""
@@ -67,7 +78,7 @@ export default function InvoiceSheet({ invoiceId, onOpenChange, onChanged }: { i
     <Sheet open={Boolean(invoiceId)} onOpenChange={onOpenChange}>
       <SheetContent className="w-full max-w-none gap-0 p-0" style={{ width: "min(980px, calc(100vw - 24px))", maxWidth: "none" }}>
         <SheetHeader className="border-b px-6 py-4">
-          <div className="flex items-center gap-3"><SheetTitle>发票详情</SheetTitle>{detail?.possibleDuplicate && <Badge variant="destructive">可能重复</Badge>}{detail && <Badge variant="secondary">{detail.subtypeDescription}</Badge>}</div>
+          <div className="flex items-center gap-3"><SheetTitle>发票详情</SheetTitle>{detail?.possibleDuplicate && <Badge variant="destructive">可能重复</Badge>}{detail?.isMatched && <Badge variant="outline">已匹配</Badge>}{detail && <Badge variant="secondary">{detail.subtypeDescription}</Badge>}</div>
           <SheetDescription>{detail?.originalFileName ?? "读取发票信息"}</SheetDescription>
         </SheetHeader>
         {loading || !detail ? <div className="grid flex-1 grid-cols-2 gap-6 p-6"><Skeleton className="h-[560px]" /><div className="space-y-4">{Array.from({ length: 8 }, (_, i) => <Skeleton key={i} className="h-12" />)}</div></div> : (
@@ -91,7 +102,8 @@ export default function InvoiceSheet({ invoiceId, onOpenChange, onChanged }: { i
           </div>
         )}
       </SheetContent>
-      <Dialog open={deleteOpen} onOpenChange={(open) => !deleting && setDeleteOpen(open)}><DialogContent><DialogHeader><DialogTitle>删除发票？</DialogTitle><DialogDescription>台账记录、拆分预览及最后一个引用的源文件将被删除。</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={deleting} onClick={() => setDeleteOpen(false)}>取消</Button><Button variant="destructive" disabled={deleting} onClick={async () => { if (!detail) return; setDeleting(true); try { await api.deleteInvoice(detail.id); toast.success("发票已删除"); setDeleteOpen(false); onOpenChange(false); onChanged() } catch (error) { toast.error(errorMessage(error)) } finally { setDeleting(false) } }}>{deleting ? <LoaderCircle className="animate-spin" /> : <Trash2 />}确认删除</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={deleteOpen} onOpenChange={(open) => !deleting && setDeleteOpen(open)}><DialogContent><DialogHeader><DialogTitle>删除发票？</DialogTitle><DialogDescription>{detail?.isMatched ? "该发票已确认匹配，请先在匹配页撤销确认。" : "台账记录、拆分预览及最后一个引用的源文件将被删除。"}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={deleting} onClick={() => setDeleteOpen(false)}>取消</Button><Button variant="destructive" disabled={deleting || detail?.isMatched} onClick={async () => { if (!detail) return; setDeleting(true); try { await api.deleteInvoice(detail.id); toast.success("发票已删除"); setDeleteOpen(false); onOpenChange(false); onChanged() } catch (error) { toast.error(errorMessage(error)) } finally { setDeleting(false) } }}>{deleting ? <LoaderCircle className="animate-spin" /> : <Trash2 />}确认删除</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={Boolean(pendingSave)} onOpenChange={(open) => !open && setPendingSave(null)}><DialogContent><DialogHeader><DialogTitle>保存并解除匹配？</DialogTitle><DialogDescription>价税合计、开票日期或币种发生变化。继续保存会解除该发票当前已确认的订单匹配。</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setPendingSave(null)}>取消</Button><Button onClick={async () => { const values = pendingSave; setPendingSave(null); if (values) await persist(values) }}>继续保存</Button></DialogFooter></DialogContent></Dialog>
     </Sheet>
   )
 }

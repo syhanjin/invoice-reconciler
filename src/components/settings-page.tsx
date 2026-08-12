@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   CloudCog,
   FileKey2,
+  GitCompareArrows,
   LoaderCircle,
   PlugZap,
   Save,
@@ -34,6 +35,8 @@ const settingsSchema = z.object({
   tencentSecretKey: z.string().trim().max(200),
   clearTencentCredentials: z.boolean(),
   invoiceOcrConcurrency: z.number().int().min(1).max(5),
+  matchMaxOrders: z.number().int().min(2).max(20),
+  matchMaxCandidates: z.number().int().min(10).max(500),
 }).refine(
   (value) => value.clearTencentCredentials
     || (!value.tencentSecretId && !value.tencentSecretKey)
@@ -67,6 +70,8 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
     tencentSecretKey: values.tencentSecretKey || null,
     clearTencentCredentials: values.clearTencentCredentials,
     invoiceOcrConcurrency: values.invoiceOcrConcurrency,
+    matchMaxOrders: values.matchMaxOrders,
+    matchMaxCandidates: values.matchMaxCandidates,
   })
 
   const save = form.handleSubmit(async (values) => {
@@ -137,6 +142,23 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
         <Card className="rounded-md shadow-none">
           <CardHeader>
             <div className="flex items-center gap-3">
+              <div className="flex size-9 items-center justify-center rounded-md bg-zinc-100"><GitCompareArrows className="size-4" /></div>
+              <div><CardTitle className="text-base">自动匹配</CardTitle><CardDescription>限制多订单候选组合的搜索规模</CardDescription></div>
+            </div>
+          </CardHeader>
+          <CardContent className="grid grid-cols-2 gap-4">
+            <Field label="单个组合最多订单数" error={form.formState.errors.matchMaxOrders?.message}>
+              <Input type="number" min={2} max={20} className="w-32" {...form.register("matchMaxOrders", { valueAsNumber: true })} />
+            </Field>
+            <Field label="每张发票最多候选数" error={form.formState.errors.matchMaxCandidates?.message}>
+              <Input type="number" min={10} max={500} className="w-32" {...form.register("matchMaxCandidates", { valueAsNumber: true })} />
+            </Field>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-md shadow-none">
+          <CardHeader>
+            <div className="flex items-center gap-3">
               <div className="flex size-9 items-center justify-center rounded-md bg-zinc-100"><CloudCog className="size-4" /></div>
               <div>
                 <CardTitle className="text-base">腾讯云发票识别</CardTitle>
@@ -200,6 +222,8 @@ function formValues(settings: AppSettings): SettingsForm {
     tencentSecretKey: "",
     clearTencentCredentials: false,
     invoiceOcrConcurrency: settings.invoiceOcrConcurrency,
+    matchMaxOrders: settings.matchMaxOrders,
+    matchMaxCandidates: settings.matchMaxCandidates,
   }
 }
 

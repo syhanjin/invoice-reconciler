@@ -7,6 +7,7 @@ mod invoice_commands;
 mod invoice_db;
 mod invoice_files;
 mod invoice_queue;
+mod matching;
 mod migration;
 mod models;
 mod normalize;
@@ -108,6 +109,11 @@ pub fn run() {
             invoice_commands::update_invoice,
             invoice_commands::delete_invoice,
             invoice_commands::delete_invoices,
+            matching::get_matching_page,
+            matching::list_matchable_orders,
+            matching::confirm_invoice_match,
+            matching::confirm_invoice_matches,
+            matching::unconfirm_invoice_match,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Bill");

@@ -24,6 +24,7 @@ import {
 
 const SettingsPage = lazy(() => import("@/components/settings-page"))
 const ImportTasksPage = lazy(() => import("@/components/import-tasks-page"))
+const MatchingPage = lazy(() => import("@/components/matching-page").then((module) => ({ default: module.MatchingPage })))
 
 function Initializing() {
   return (
@@ -117,6 +118,11 @@ export function App() {
               onBatchCreated={handleInvoiceBatchCreated}
               refreshToken={invoiceRefreshToken}
             />
+          )}
+          {view === "matching" && (
+            <Suspense fallback={<Initializing />}>
+              <MatchingPage refreshToken={`${refreshToken}:${invoiceRefreshToken}`} />
+            </Suspense>
           )}
           {view === "importTasks" && (
             <Suspense fallback={<Initializing />}>

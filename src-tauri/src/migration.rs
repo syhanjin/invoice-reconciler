@@ -10,6 +10,7 @@ impl MigratorTrait for Migrator {
             Box::new(M0001Initial),
             Box::new(M0002Invoices),
             Box::new(M0003InvoiceRecovery),
+            Box::new(M0004OrderInvoiceMatching),
         ]
     }
 }
@@ -173,6 +174,52 @@ const INVOICE_RECOVERY_UP_STATEMENTS: &[&str] = &[
 const INVOICE_RECOVERY_DOWN_STATEMENTS: &[&str] =
     &["DROP TABLE IF EXISTS invoice_recovery_markers"];
 
+pub struct M0004OrderInvoiceMatching;
+
+#[async_trait::async_trait]
+impl MigrationName for M0004OrderInvoiceMatching {
+    fn name(&self) -> &str {
+        "m0004_order_invoice_matching"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for M0004OrderInvoiceMatching {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        for sql in MATCHING_UP_STATEMENTS {
+            manager
+                .get_connection()
+                .execute(Statement::from_string(backend, *sql))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        for sql in MATCHING_DOWN_STATEMENTS {
+            manager
+                .get_connection()
+                .execute(Statement::from_string(backend, *sql))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+const MATCHING_UP_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS invoice_matches (invoice_id TEXT PRIMARY KEY REFERENCES invoices(id) ON DELETE CASCADE, source TEXT NOT NULL CHECK (source IN ('automatic', 'custom')), confirmed_at TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_matches_confirmed ON invoice_matches(confirmed_at DESC, invoice_id)",
+    "CREATE TABLE IF NOT EXISTS invoice_match_orders (invoice_id TEXT NOT NULL REFERENCES invoice_matches(invoice_id) ON DELETE CASCADE, order_id TEXT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE, position INTEGER NOT NULL, PRIMARY KEY (invoice_id, order_id), UNIQUE (invoice_id, position))",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_match_orders_invoice ON invoice_match_orders(invoice_id, position)",
+];
+
+const MATCHING_DOWN_STATEMENTS: &[&str] = &[
+    "DROP TABLE IF EXISTS invoice_match_orders",
+    "DROP TABLE IF EXISTS invoice_matches",
+];
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectOptions, ConnectionTrait, DbBackend, Statement, TryGetable};
@@ -205,18 +252,18 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery')",
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching')",
             )
             .await,
-            3
+            4
         );
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name IN ('invoice_batches', 'invoice_tasks', 'invoices', 'invoice_items', 'invoice_source_links', 'invoice_recovery_markers')",
+                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name IN ('invoice_batches', 'invoice_tasks', 'invoices', 'invoice_items', 'invoice_source_links', 'invoice_recovery_markers', 'invoice_matches', 'invoice_match_orders')",
             )
             .await,
-            6
+            8
         );
         assert_eq!(
             scalar(
@@ -442,5 +489,87 @@ mod tests {
                 "{table} should be removed through foreign-key cascade"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn upgrades_m0003_with_existing_orders_and_invoices() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade-matching.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(3)).await.unwrap();
+        connection.execute_unprepared(
+            "PRAGMA foreign_keys = ON;
+             INSERT INTO import_batches (id, platform, status, created_at) VALUES ('order-batch', 'taobao', 'completed', '2026-08-12T00:00:00Z');
+             INSERT INTO import_tasks (id, batch_id, original_file_name, image_sha256, status, retry_count, created_at) VALUES ('order-a', 'order-batch', 'order.png', 'order-hash', 'succeeded', 0, '2026-08-12T00:00:00Z');
+             INSERT INTO orders (id, platform, external_order_number, paid_amount_fen, raw_ocr_json, created_at, updated_at) VALUES ('order-a', 'taobao', 'ORDER-A', 1000, '{}', '2026-08-12T00:00:00Z', '2026-08-12T00:00:00Z');
+             INSERT INTO invoice_batches (id, status, created_at) VALUES ('invoice-batch', 'completed', '2026-08-12T00:00:00Z');
+             INSERT INTO invoice_tasks (id, batch_id, original_file_name, source_sha256, media_type, status, retry_count, created_at) VALUES ('invoice-task', 'invoice-batch', 'invoice.pdf', 'invoice-hash', 'application/pdf', 'succeeded', 0, '2026-08-12T00:00:00Z');
+             INSERT INTO invoices (id, task_id, type, subtype, type_description, subtype_description, total_fen, currency, preview_path, raw_invoice_json, created_at, updated_at) VALUES ('invoice-a', 'invoice-task', 3, 'VatInvoice', '增值税发票', '增值税发票', 1000, 'CNY', 'invoices/previews/a.pdf', '{}', '2026-08-12T00:00:00Z', '2026-08-12T00:00:00Z');"
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM orders WHERE id='order-a'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM invoices WHERE id='invoice-a'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM seaql_migrations WHERE version='m0004_order_invoice_matching'").await, 1);
+    }
+
+    #[tokio::test]
+    async fn resumes_interrupted_matching_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume-matching.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(3)).await.unwrap();
+        connection.execute_unprepared(
+            "CREATE TABLE invoice_matches (invoice_id TEXT PRIMARY KEY REFERENCES invoices(id) ON DELETE CASCADE, source TEXT NOT NULL CHECK (source IN ('automatic', 'custom')), confirmed_at TEXT NOT NULL)"
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM sqlite_master WHERE type='table' AND name IN ('invoice_matches','invoice_match_orders')").await, 2);
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM seaql_migrations WHERE version='m0004_order_invoice_matching'").await, 1);
+    }
+
+    #[tokio::test]
+    async fn matching_constraints_prevent_order_reuse_and_cascade() {
+        let database = Database::in_memory().await.unwrap();
+        database.connection.execute_unprepared(
+            "INSERT INTO import_batches (id, platform, status, created_at) VALUES ('ob', 'taobao', 'completed', '2026-08-12T00:00:00Z');
+             INSERT INTO import_tasks (id, batch_id, original_file_name, image_sha256, status, retry_count, created_at) VALUES ('order-a', 'ob', 'order.png', 'oh', 'succeeded', 0, '2026-08-12T00:00:00Z');
+             INSERT INTO orders (id, platform, paid_amount_fen, raw_ocr_json, created_at, updated_at) VALUES ('order-a', 'taobao', 1000, '{}', '2026-08-12T00:00:00Z', '2026-08-12T00:00:00Z');
+             INSERT INTO invoice_batches (id, status, created_at) VALUES ('ib', 'completed', '2026-08-12T00:00:00Z');
+             INSERT INTO invoice_tasks (id, batch_id, original_file_name, source_sha256, media_type, status, retry_count, created_at) VALUES ('it', 'ib', 'invoice.pdf', 'ih', 'application/pdf', 'succeeded', 0, '2026-08-12T00:00:00Z');
+             INSERT INTO invoices (id, task_id, type, subtype, type_description, subtype_description, currency, preview_path, raw_invoice_json, created_at, updated_at) VALUES ('invoice-a', 'it', 3, 'VatInvoice', '发票', '发票', 'CNY', 'a.pdf', '{}', '2026-08-12T00:00:00Z', '2026-08-12T00:00:00Z'), ('invoice-b', 'it', 3, 'VatInvoice', '发票', '发票', 'CNY', 'b.pdf', '{}', '2026-08-12T00:00:00Z', '2026-08-12T00:00:00Z');
+             INSERT INTO invoice_matches (invoice_id, source, confirmed_at) VALUES ('invoice-a','automatic','2026-08-12T00:00:00Z'), ('invoice-b','automatic','2026-08-12T00:00:00Z');
+             INSERT INTO invoice_match_orders (invoice_id, order_id, position) VALUES ('invoice-a','order-a',0);"
+        ).await.unwrap();
+        assert!(database.connection.execute_unprepared("INSERT INTO invoice_match_orders (invoice_id, order_id, position) VALUES ('invoice-b','order-a',0)").await.is_err());
+        database
+            .connection
+            .execute_unprepared("DELETE FROM invoice_matches WHERE invoice_id='invoice-a'")
+            .await
+            .unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM invoice_match_orders"
+            )
+            .await,
+            0
+        );
     }
 }

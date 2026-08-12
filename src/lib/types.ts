@@ -1,4 +1,4 @@
-export type NavigationView = "orders" | "invoices" | "importTasks" | "settings"
+export type NavigationView = "orders" | "invoices" | "matching" | "importTasks" | "settings"
 
 export interface AppSettings {
   ollamaBaseUrl: string
@@ -7,6 +7,8 @@ export interface AppSettings {
   tencentSecretIdMasked: string | null
   tencentCredentialsConfigured: boolean
   invoiceOcrConcurrency: number
+  matchMaxOrders: number
+  matchMaxCandidates: number
   settingsPath: string
   permissionWarning: string | null
 }
@@ -19,6 +21,8 @@ export interface SaveSettingsRequest {
   tencentSecretKey: string | null
   clearTencentCredentials: boolean
   invoiceOcrConcurrency: number
+  matchMaxOrders: number
+  matchMaxCandidates: number
 }
 
 export type TaskStatus =
@@ -184,6 +188,7 @@ export interface OrderDetail {
   originalFileName: string
   imagePath: string
   warningMessage: string | null
+  isMatched: boolean
 }
 
 export interface UpdateOrderRequest {
@@ -382,6 +387,7 @@ export interface InvoiceDetail {
   createdAt: string
   updatedAt: string
   items: InvoiceLineItem[]
+  isMatched: boolean
 }
 
 export interface UpdateInvoiceRequest {
@@ -397,6 +403,102 @@ export interface UpdateInvoiceRequest {
   taxFen: number | null
   totalFen: number | null
   currency: string
+}
+
+export type MatchingStatus = "suggested" | "conflict" | "unmatched" | "ineligible" | "confirmed"
+
+export interface MatchOrderSummary {
+  id: string
+  externalOrderNumber: string | null
+  paidAmountFen: number
+  orderedAt: string | null
+  shopName: string | null
+  productSummary: string
+}
+
+export interface MatchCandidate {
+  orderIds: string[]
+  orders: MatchOrderSummary[]
+  totalFen: number
+  shopName: string | null
+}
+
+export interface MatchingInvoiceItem {
+  id: string
+  invoiceNumber: string | null
+  subtypeDescription: string
+  invoiceDate: string | null
+  sellerName: string | null
+  totalFen: number | null
+  currency: string
+  status: MatchingStatus
+  reason: string | null
+  candidates: MatchCandidate[]
+  confirmedSource: "automatic" | "custom" | null
+  confirmedAt: string | null
+}
+
+export interface MatchingSummary {
+  total: number
+  suggested: number
+  conflict: number
+  unmatched: number
+  ineligible: number
+  confirmed: number
+}
+
+export interface MatchingPageData {
+  items: MatchingInvoiceItem[]
+  summary: MatchingSummary
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface MatchingQuery {
+  page?: number
+  pageSize?: number
+  search?: string
+  status?: MatchingStatus | "all"
+}
+
+export interface MatchableOrderItem {
+  id: string
+  externalOrderNumber: string | null
+  paidAmountFen: number | null
+  orderedAt: string | null
+  shopName: string | null
+  productSummary: string
+  matchedInvoiceId: string | null
+  disabledReason: string | null
+}
+
+export interface MatchableOrdersPage {
+  items: MatchableOrderItem[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface MatchableOrdersQuery {
+  page?: number
+  pageSize?: number
+  search?: string
+  sortBy?: OrderSortBy
+  sortDirection?: SortDirection
+}
+
+export interface ConfirmInvoiceMatchRequest {
+  invoiceId: string
+  orderIds: string[]
+  source: "automatic" | "custom"
+  acceptMismatches: boolean
+}
+
+export interface ConfirmInvoiceMatchResult {
+  invoiceId: string
+  confirmed: boolean
+  differences: string[]
 }
 
 export interface DeleteInvoiceResult {

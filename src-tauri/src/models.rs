@@ -5,6 +5,12 @@ pub const MIN_CONCURRENCY: u8 = 1;
 pub const MAX_CONCURRENCY: u8 = 8;
 pub const DEFAULT_INVOICE_OCR_CONCURRENCY: u8 = 3;
 pub const MAX_INVOICE_OCR_CONCURRENCY: u8 = 5;
+pub const DEFAULT_MATCH_MAX_ORDERS: u8 = 10;
+pub const DEFAULT_MATCH_MAX_CANDIDATES: u16 = 100;
+pub const MIN_MATCH_MAX_ORDERS: u8 = 2;
+pub const MAX_MATCH_MAX_ORDERS: u8 = 20;
+pub const MIN_MATCH_MAX_CANDIDATES: u16 = 10;
+pub const MAX_MATCH_MAX_CANDIDATES: u16 = 500;
 
 #[derive(Clone, Debug, Deserialize, Serialize, sea_orm::FromQueryResult)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +21,8 @@ pub struct AppSettings {
     pub tencent_secret_id_masked: Option<String>,
     pub tencent_credentials_configured: bool,
     pub invoice_ocr_concurrency: u8,
+    pub match_max_orders: u8,
+    pub match_max_candidates: u16,
     pub settings_path: String,
     pub permission_warning: Option<String>,
 }
@@ -29,6 +37,8 @@ pub struct UpdateSettingsRequest {
     pub tencent_secret_key: Option<String>,
     pub clear_tencent_credentials: bool,
     pub invoice_ocr_concurrency: u8,
+    pub match_max_orders: u8,
+    pub match_max_candidates: u16,
 }
 
 impl UpdateSettingsRequest {
@@ -56,6 +66,18 @@ impl UpdateSettingsRequest {
                 "腾讯云 OCR 并发数必须在 1 到 5 之间".into(),
             ));
         }
+        if !(MIN_MATCH_MAX_ORDERS..=MAX_MATCH_MAX_ORDERS).contains(&self.match_max_orders) {
+            return Err(crate::error::AppError::InvalidInput(
+                "自动组合最大订单数必须在 2 到 20 之间".into(),
+            ));
+        }
+        if !(MIN_MATCH_MAX_CANDIDATES..=MAX_MATCH_MAX_CANDIDATES)
+            .contains(&self.match_max_candidates)
+        {
+            return Err(crate::error::AppError::InvalidInput(
+                "自动候选组合数必须在 10 到 500 之间".into(),
+            ));
+        }
         Ok(AppSettings {
             ollama_base_url: base_url.to_owned(),
             ollama_model: model.to_owned(),
@@ -63,6 +85,8 @@ impl UpdateSettingsRequest {
             tencent_secret_id_masked: None,
             tencent_credentials_configured: false,
             invoice_ocr_concurrency: self.invoice_ocr_concurrency,
+            match_max_orders: self.match_max_orders,
+            match_max_candidates: self.match_max_candidates,
             settings_path: String::new(),
             permission_warning: None,
         })
@@ -77,6 +101,8 @@ pub struct PrivateAppSettings {
     pub tencent_secret_id: String,
     pub tencent_secret_key: String,
     pub invoice_ocr_concurrency: u8,
+    pub match_max_orders: u8,
+    pub match_max_candidates: u16,
     pub settings_path: String,
     pub permission_warning: Option<String>,
 }
@@ -91,6 +117,8 @@ impl PrivateAppSettings {
             tencent_credentials_configured: !self.tencent_secret_id.is_empty()
                 && !self.tencent_secret_key.is_empty(),
             invoice_ocr_concurrency: self.invoice_ocr_concurrency,
+            match_max_orders: self.match_max_orders,
+            match_max_candidates: self.match_max_candidates,
             settings_path: self.settings_path.clone(),
             permission_warning: self.permission_warning.clone(),
         }
@@ -340,6 +368,7 @@ pub struct OrderDetail {
     pub original_file_name: String,
     pub image_path: String,
     pub warning_message: Option<String>,
+    pub is_matched: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -626,6 +655,7 @@ pub struct InvoiceDetail {
     pub created_at: String,
     pub updated_at: String,
     pub items: Vec<InvoiceLineItem>,
+    pub is_matched: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -678,4 +708,126 @@ pub struct RetryInvoiceTaskRequest {
 pub struct ConfirmInvoiceSplitRequest {
     pub task_id: String,
     pub groups: Vec<Vec<usize>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchingQuery {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub search: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchingSummary {
+    pub total: i64,
+    pub suggested: i64,
+    pub conflict: i64,
+    pub unmatched: i64,
+    pub ineligible: i64,
+    pub confirmed: i64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchOrderSummary {
+    pub id: String,
+    pub external_order_number: Option<String>,
+    pub paid_amount_fen: i64,
+    pub ordered_at: Option<String>,
+    pub shop_name: Option<String>,
+    pub product_summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchCandidate {
+    pub order_ids: Vec<String>,
+    pub orders: Vec<MatchOrderSummary>,
+    pub total_fen: i64,
+    pub shop_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchingInvoiceItem {
+    pub id: String,
+    pub invoice_number: Option<String>,
+    pub subtype_description: String,
+    pub invoice_date: Option<String>,
+    pub seller_name: Option<String>,
+    pub total_fen: Option<i64>,
+    pub currency: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub candidates: Vec<MatchCandidate>,
+    pub confirmed_source: Option<String>,
+    pub confirmed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchingPage {
+    pub items: Vec<MatchingInvoiceItem>,
+    pub summary: MatchingSummary,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchableOrdersQuery {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub search: Option<String>,
+    pub sort_by: Option<OrderSort>,
+    pub sort_direction: Option<SortDirection>,
+}
+
+#[derive(Clone, Debug, Serialize, sea_orm::FromQueryResult)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchableOrderItem {
+    pub id: String,
+    pub external_order_number: Option<String>,
+    pub paid_amount_fen: Option<i64>,
+    pub ordered_at: Option<String>,
+    pub shop_name: Option<String>,
+    pub product_summary: String,
+    pub matched_invoice_id: Option<String>,
+    pub disabled_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchableOrdersPage {
+    pub items: Vec<MatchableOrderItem>,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmInvoiceMatchRequest {
+    pub invoice_id: String,
+    pub order_ids: Vec<String>,
+    pub source: String,
+    pub accept_mismatches: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmInvoiceMatchesRequest {
+    pub matches: Vec<ConfirmInvoiceMatchRequest>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmInvoiceMatchResult {
+    pub invoice_id: String,
+    pub confirmed: bool,
+    pub differences: Vec<String>,
 }

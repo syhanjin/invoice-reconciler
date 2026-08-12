@@ -35,6 +35,8 @@ vi.mock("@/lib/api", () => ({
         tencentSecretIdMasked: null,
         tencentCredentialsConfigured: false,
         invoiceOcrConcurrency: 3,
+        matchMaxOrders: 10,
+        matchMaxCandidates: 100,
         settingsPath: "/tmp/settings.toml",
         permissionWarning: null,
       },

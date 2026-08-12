@@ -23,6 +23,8 @@ pub enum AppError {
     BatchBusy,
     #[error("未找到记录：{0}")]
     NotFound(String),
+    #[error("记录已确认匹配：{0}，请先在匹配页撤销确认")]
+    MatchingLocked(String),
     #[error("内部错误：{0}")]
     Internal(String),
 }
@@ -40,6 +42,7 @@ impl AppError {
             Self::Database(_) => "database_error",
             Self::BatchBusy => "batch_busy",
             Self::NotFound(_) => "not_found",
+            Self::MatchingLocked(_) => "matching_locked",
             Self::Internal(_) => "internal_error",
         }
     }

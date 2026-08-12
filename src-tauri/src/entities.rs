@@ -413,3 +413,38 @@ pub mod invoice_source_link {
     pub enum Relation {}
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod invoice_match {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "invoice_matches")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub invoice_id: String,
+        pub source: String,
+        pub confirmed_at: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod invoice_match_order {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "invoice_match_orders")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub invoice_id: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub order_id: String,
+        pub position: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
