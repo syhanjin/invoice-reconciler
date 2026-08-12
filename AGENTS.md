@@ -33,6 +33,9 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - Prefer well-maintained existing dependencies over custom implementations on
   both the frontend and backend when they meet the requirement without adding
   disproportionate complexity.
+- Linux launches default `WEBKIT_DISABLE_DMABUF_RENDERER` to `1` in the Rust
+  executable entry point before Tauri starts. Preserve an explicitly supplied
+  launch-environment value.
 
 ## Trellis Workflow Overrides
 

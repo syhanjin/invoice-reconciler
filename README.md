@@ -27,6 +27,10 @@ bun install
 bun run tauri dev
 ```
 
+On Linux, the executable defaults `WEBKIT_DISABLE_DMABUF_RENDERER` to `1`
+before WebKit starts. A value explicitly provided by the launch environment is
+preserved.
+
 Add shadcn/ui components with the official CLI:
 
 ```bash
