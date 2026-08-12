@@ -44,3 +44,40 @@ Built and verified the first Tauri phase: Taobao screenshot OCR through bounded 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Default Linux WebKit DMA-BUF renderer setting
+
+**Date**: 2026-08-12
+**Task**: Default Linux WebKit DMA-BUF renderer setting
+**Branch**: `main`
+
+### Summary
+
+Defaulted WEBKIT_DISABLE_DMABUF_RENDERER to 1 at the Linux executable entry point before Tauri starts, while preserving explicit launch-environment overrides.
+
+### Main Changes
+
+- Added the Linux-only environment default before Tauri/WebKit initialization.
+- Preserved explicit launch-environment values and documented the runtime contract.
+- Updated README and `AGENTS.md` so development and future maintenance use the same behavior.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `94e783c` | (see git log) |
+
+### Testing
+
+- [OK] Rust formatting and 10 Cargo tests.
+- [OK] Clippy with warnings denied.
+- [OK] Linux release executable compilation.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
