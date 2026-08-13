@@ -536,3 +536,36 @@ Fixed the Windows release console window, added dual-platform main prebuilds wit
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: Preserve project export material fidelity
+
+**Date**: 2026-08-13
+**Task**: Preserve project export material fidelity
+**Branch**: `main`
+
+### Summary
+
+Preserved original order and eligible invoice files during project export, switched combined PDF image pages to lossless full-resolution encoding, added material-selection and byte/pixel regression coverage, and updated the export contract.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3dd4a1b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

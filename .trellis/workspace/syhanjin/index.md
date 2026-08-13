@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 15
+- **Total Sessions**: 16
 - **Last Active**: 2026-08-13
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~538 | Active |
+| `journal-1.md` | ~571 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 16 | 2026-08-13 | Preserve project export material fidelity | `3dd4a1b` | `main` |
 | 15 | 2026-08-13 | Release v0.1.2 and optimize CI caches | `23ad456`, `9680442` | `main` |
 | 14 | 2026-08-13 | Repurchase automatic matching | `40fb430` | `main` |
 | 13 | 2026-08-13 | Project management and export packages | `0b75b8d`, `30fd9c2`, `6fd7fac` | `main` |
