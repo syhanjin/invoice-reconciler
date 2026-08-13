@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/order-invoice-matching-contract.md","reason":"Defines candidate graph, conflict, confirmation, and required matching tests."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Defines SeaORM paging, binding, and ephemeral candidate persistence rules."}
+{"file":".trellis/spec/frontend/matching-workspace-contract.md","reason":"Defines conflict reason display and custom picker behavior."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Covers backend response through frontend display and confirmation revalidation."}
