@@ -17,6 +17,8 @@ api.unconfirmInvoiceMatch(invoiceId): Promise<void>
 api.retryMatchSummary(invoiceId): Promise<void>
 ```
 
+`getMatchingPage` accepts independent `status` and `summaryStatus` fields. Concrete summary filters are `not_generated`, `pending`, `processing`, `succeeded`, or `failed`.
+
 ## 3. Contracts
 
 - Matching is a first-level operational workspace. It is invoice-driven and does not add a separate unmatched-order ledger.
@@ -31,6 +33,7 @@ api.retryMatchSummary(invoiceId): Promise<void>
 - Opening the custom picker for a different invoice resets its page, search, selections, and differences.
 - Confirmed rows show their orders and offer unconfirm. They do not offer in-place replacement.
 - Confirmed rows lead with backend `displayName`. Pending/processing states remain visible beside the deterministic fallback; failed state exposes an icon retry action with the backend error in a tooltip. The UI never constructs its own fallback name.
+- The summary-status Select shows localized labels. Selecting a concrete summary status sets match status to `confirmed`, clears current suggestion selection, resets page one, and sends both filters. Summary counts come from the backend's complete confirmed projection before filtering/paging.
 - Detail sheets expose `isMatched`. Before saving changed matching fields they show an unmatch warning; matched delete confirmation explains that the relationship must be unconfirmed first and disables deletion.
 
 ## 4. Validation & Error Matrix
@@ -48,6 +51,7 @@ api.retryMatchSummary(invoiceId): Promise<void>
 | Matched delete attempted | Do not invoke deletion from the detail sheet |
 | Summary is pending or processing | Keep the confirmed match fully usable and show non-blocking status |
 | Summary failed | Keep fallback `displayName`, expose one explicit retry action, and reload on the shared invalidation event |
+| Concrete summary filter selected | Force match status to `confirmed`, clear suggestion selection, reset page one, and reload |
 
 ## 5. Good/Base/Bad Cases
 
@@ -59,7 +63,7 @@ api.retryMatchSummary(invoiceId): Promise<void>
 
 ## 6. Tests Required
 
-- Component tests for query/paging, suggested-only selection, batch payloads, conflict candidate choice, custom cross-page retention, disabled orders, mismatch acceptance, unconfirm, summary status/fallback/retry, and stale-data reload.
+- Component tests for query/paging, suggested-only selection, batch payloads, conflict candidate choice, custom cross-page retention, disabled orders, mismatch acceptance, unconfirm, summary filter/confirmed coupling, summary status/fallback/retry, and stale-data reload.
 - Detail-sheet tests for matched badges, key-field warning, non-key edit preservation, and disabled deletion.
 - Run `bun run lint`, `bun run test`, and `bun run build`; inspect the comparison surface at desktop and minimum supported window sizes.
 

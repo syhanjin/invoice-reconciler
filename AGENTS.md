@@ -78,9 +78,13 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
   Every confirmed relationship owns a durable asynchronous product-summary state.
   Generate it from all invoice line items and seller plus all matched-order product
   items and shops; summarize actual goods without requiring or inferring purpose.
-  Preserve single-concurrency processing, startup backfill/recovery, input-hash stale
-  response guards, explicit failed retry, provider/model audit, and deterministic
-  product/order fallback names. Summary failure must never block matching or export.
+  Preserve automatic/manual generation modes, dynamic 1..=8 concurrency, startup
+  backfill/recovery, input-hash stale response guards, explicit failed retry, and
+  deterministic product/order fallback names. Keep 180-day attempt history with
+  input snapshots and provider/model/outcome audit. Manual summaries survive input
+  changes and failed regeneration and are not auto-overwritten; only an explicit
+  successful regeneration may replace them. Summary failure must never block matching
+  or export.
 - Projects own ordered invoice membership only; one invoice belongs to at most one
   project. Preserve transactional reassignment, position compaction after membership
   or invoice deletion, and project deletion without deleting invoices, matches, files,

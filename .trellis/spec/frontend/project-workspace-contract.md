@@ -23,7 +23,7 @@ api.exportProject(id, outputDirectory, overwrite): Promise<ExportProjectResult>
 api.retryMatchSummary(invoiceId): Promise<void>
 ```
 
-Project summaries/details expose nullable `archivedAt`. Ledger rows expose backend-provided `matchStatus` plus nullable `projectId`/`projectName`.
+Project summaries/details expose nullable `archivedAt`, aggregate `summaryStatus`, and full `summaryCounts`. Each confirmed member exposes its current summary status/source/error/provider/model/time. Ledger rows expose backend-provided `matchStatus` plus nullable `projectId`/`projectName`.
 
 ## 3. Contracts
 
@@ -37,6 +37,7 @@ Project summaries/details expose nullable `archivedAt`. Ledger rows expose backe
 - Selected invoice rows expose assignment only when all selected rows are unassigned. Existing project targets use `acceptReassignment: false`; “新建项目” creates and assigns atomically. There is no invoice-ledger remove or reassignment confirmation flow.
 - Membership changes clear selection, reload invoice/project projections, and show one result toast. Jotai refresh atoms are invalidation tokens, not durable membership state.
 - Any pending/processing/failed member summary produces one non-blocking information alert explaining that fallback names remain usable and export remains unaffected. Failed rows expose an icon retry action with error tooltip; `match-summary-updated` reloads current detail through the shared workspace token.
+- Project summary aggregation considers every confirmed member before list paging. Overall priority is `failed`, then pending/processing as `processing`, then `not_generated`, then `succeeded`; a project with no confirmed summaries is `not_applicable`. Project list rows show completed/total counts and failed count without changing export authority.
 
 ## 4. Validation & Error Matrix
 
@@ -53,6 +54,7 @@ Project summaries/details expose nullable `archivedAt`. Ledger rows expose backe
 | Backend returns `destination_exists` | Ask before calling export again with overwrite enabled |
 | Project delete confirmed | Reload list; do not mutate invoice/order entities in React |
 | Member summary is unfinished or failed | Keep export enabled when all ordinary material checks pass; render backend fallback and allow failed retry |
+| Project contains mixed summary states | Render the backend aggregate/counts; do not derive status from visible table rows |
 
 ## 5. Good/Base/Bad Cases
 
@@ -64,7 +66,7 @@ Project summaries/details expose nullable `archivedAt`. Ledger rows expose backe
 
 ## 6. Tests Required
 
-- Project-page tests: active/archived queries, detail selection, create/rename/archive/unarchive/delete confirmation, archived read-only controls, empty/blocked export state, summary fallback/non-blocking export/failed retry, move payload, directory cancel/select, `destination_exists`, and confirmed overwrite.
+- Project-page tests: active/archived queries, detail selection, create/rename/archive/unarchive/delete confirmation, archived read-only controls, empty/blocked export state, aggregate summary counts/priority, summary fallback/non-blocking export/failed retry, move payload, directory cancel/select, `destination_exists`, and confirmed overwrite.
 - Invoice-page tests: match/membership display, all/assigned/unassigned/specific query payloads, occupied-selection disablement, new-project atomic assignment, and absence of remove/reassignment controls.
 - API/type checks must cover archive command names, camel-case payloads, nullable `archivedAt`/membership, match status, blocking reason, and `destination_exists` error-code extraction.
 - Run `bun run lint`, `bun run test`, and `bun run build`; inspect the project split view at the Tauri minimum `920x640` and default `1360x840` sizes.

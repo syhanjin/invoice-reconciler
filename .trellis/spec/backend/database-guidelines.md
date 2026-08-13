@@ -29,8 +29,9 @@ Do not add a second application-facing database library. SeaORM may use SQLx int
 | `invoice_items` | integer | `(invoice_id, position)` is unique and cascades from invoice |
 | `invoice_source_links` | integer | invoice/task/page tuple is unique and cascades from both parents |
 | `invoice_recovery_markers` | `(source_sha256, recovery_identity)` | records deleted subtype/number identities and optionally binds one recovery task |
-| `invoice_matches` | invoice UUIDv7 text | one confirmed relationship per invoice; owns durable `pending/processing/succeeded/failed` product-summary state and provider/model/input-hash audit |
+| `invoice_matches` | invoice UUIDv7 text | one confirmed relationship per invoice; owns durable `not_generated/pending/processing/succeeded/failed` product-summary state, source/trigger, and provider/model/input-hash audit |
 | `invoice_match_orders` | `(invoice_id, order_id)` | order ID is globally unique and positions are unique within one invoice |
+| `match_summary_attempts` | UUIDv7 text | cascades from invoice; records one generation/manual-edit attempt with input snapshot, trigger, provider/model, outcome, and completion data |
 | `projects` | UUIDv7 text | trimmed project name is unique; nullable `archived_at` hides its durable graph from daily workspaces |
 | `project_invoices` | `(project_id, invoice_id)` | invoice ID and project position are unique; both parents cascade membership cleanup |
 
@@ -49,7 +50,8 @@ Money is stored as integer fen. Date/time values are normalized strings in `YYYY
 - External order numbers may repeat. After inserting, editing, or deleting an order, recalculate `possible_duplicate` for every affected non-empty order-number group.
 - Treat SQLite as the source of truth. In-memory queue and Jotai state are projections, not durable state.
 - Keep matching candidates ephemeral. Persist only confirmed `invoice_matches` and members; use one transaction for batch confirmation and rely on the unique order index as the final occupancy guard.
-- Create summary state as `pending` in the same transaction as each confirmed match, but call the LLM only after commit through the single-concurrency summary queue. Reset the state when a preserved match's summary inputs change, and condition completion on both `processing` plus the claimed input hash so stale responses cannot overwrite current data.
+- Create summary state in the confirmation transaction: `pending` in automatic mode and `not_generated` in manual mode. Call the LLM only after commit through the queue, whose configured concurrency is `1..=8`. Reset model-owned summaries when preserved inputs change, but retain manual summaries. Condition completion on both `processing` plus the claimed input hash so stale responses cannot overwrite current data.
+- Insert the structured summary input snapshot before an attempt becomes externally processing, then finalize that row as `succeeded`, `failed`, `discarded`, or `interrupted`; manual edits insert `manual_edit`. Keep completed attempts immutable and delete rows older than 180 days during startup and summary writes/reads.
 - Keep project membership ordered and transactional. Assignment appends, reassignment/removal compacts source positions, and invoice deletion compacts the affected project after the membership cascade so later appends cannot collide with a position gap. Create-and-assign is one transaction; archived source and target projects reject membership mutations.
 - Treat project archive as a visibility flag, not deletion. Daily order/invoice/matching queries exclude the archived graph, but confirmed orders remain occupied and project detail/export keep reading the same membership, matches, and files.
 
@@ -101,4 +103,4 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Matching fresh-file/m0003-upgrade/interrupted-migration coverage, unique order occupancy, cascade cleanup, and atomic batch rollback.
 - Project fresh-file/m0006-upgrade/interrupted-migration coverage, unique name/invoice/position enforcement, cascade cleanup, reassignment rollback, and position compaction after membership or invoice deletion.
 - Project-archive fresh-file/m0007-upgrade/interrupted-m0008 coverage, active/archived filtering, read-only mutation guards, and end-to-end ledger/matching visibility restoration after unarchive.
-- Match-summary fresh-file/m0008-upgrade/interrupted-m0009 coverage, historical-match backfill to `pending`, startup `processing -> pending` recovery, hash-guarded completion, failed retry, and input-edit reset.
+- Match-summary fresh-file/m0008-upgrade/interrupted-m0009 plus m0009-to-m0010 rebuild coverage, historical-match backfill, startup `processing -> pending` recovery, hash-guarded completion, failed retry, manual-summary retention, mode transitions, attempt snapshots/retention, and input-edit reset.

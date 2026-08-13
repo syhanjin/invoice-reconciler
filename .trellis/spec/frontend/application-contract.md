@@ -24,6 +24,11 @@ api.getOrder(id: string): Promise<OrderDetail>
 api.updateOrder(request: UpdateOrderRequest): Promise<OrderDetail>
 api.deleteOrder(id: string): Promise<void>
 api.deleteOrders(ids: string[]): Promise<DeleteOrdersResult>
+api.listMatchSummaries(query): Promise<MatchSummariesPage>
+api.listMatchSummaryAttempts(query): Promise<MatchSummaryAttemptsPage>
+api.enqueueMatchSummary(invoiceId): Promise<void>
+api.enqueueAllMatchSummaries(): Promise<number>
+api.updateMatchSummary(invoiceId, displayName): Promise<void>
 ```
 
 Rust serializes public structs with `camelCase`; Tauri command names remain snake case. `BootstrapState` contains settings and the latest invoice batch only. Do not restore `latestBatch`, order `BatchDetail`, order batch summaries, or order batch selection state.
@@ -44,7 +49,14 @@ Rust serializes public structs with `camelCase`; Tauri command names remain snak
 
 Settings present model configuration separately from task-specific concurrency. The provider Select has `ollama` and `openai`, renders only the relevant base URL/model/key controls, and explains that the model serves both order image recognition and confirmed-combination product summaries. API key fields preserve an existing key when blank, support explicit clearing, and show only configured/masked state returned by the backend. “Test connection” validates the selected global provider through `checkLlm`.
 
-Order recognition retains its own `orderRecognitionMaxConcurrency`; it is not part of `LlmProvider`. Do not expose Aliyun endpoint, key, thinking, submission, cancellation, or recovery controls.
+Order recognition retains its own `orderRecognitionMaxConcurrency`; it is not part of `LlmProvider`. Summary generation separately exposes an automatic/manual segmented control and `summaryGenerationMaxConcurrency` from 1 through 8. Do not expose Aliyun endpoint, key, thinking, submission, cancellation, or recovery controls.
+
+#### Summary task workspace
+
+- Import Tasks includes a first-class “摘要生成” tab. Desktop uses current summaries beside the selected relationship's attempt history; narrow layouts provide current/history nested tabs without losing their independent paging.
+- Current summaries are server-paged/searchable/filterable and display authoritative global counts for `not_generated`, `pending`, `processing`, `succeeded`, and `failed`. Rows expose single generation/retry; the toolbar queues all unfinished items.
+- Attempt history renders the structured invoice seller/line items and confirmed-order shop/products, trigger, provider/model, outcome, result/error, and timestamps. It never renders raw model responses, secrets, or infers history from the current status.
+- Successful rows may be edited through a single-line 60-character dialog. Keep the dialog open on backend failure. Mark manual summaries distinctly and explain through concise dialog copy that automatic work will not overwrite them.
 
 `match-summary-updated` is also an invalidation event. Increment the shared workspace token so matching and project detail reload their authoritative `displayName` and status; do not derive summary transitions from the event payload. Unlisten it on component teardown like the order and invoice events.
 
@@ -77,12 +89,15 @@ Order recognition retains its own `orderRecognitionMaxConcurrency`; it is not pa
 | Component unmount | Call every Tauri `UnlistenFn` |
 | Bulk order delete returns mixed results | Report successes/failures, retain failed visible selections, and reload orders |
 | Match/project filter changes | Clear selection, reset page one, and request a new authoritative server projection |
+| Manual summary save rejects | Keep the editor and user's text open; display the backend error |
+| Summary status event arrives | Reload current summaries and selected attempt history; do not append a guessed attempt |
 
 ### 5. Good/Base/Bad Cases
 
 - Good: imported screenshots enter the pool and transition to processing as realtime capacity becomes available.
 - Good: a migrated failed task explains that Batch support was removed and exposes the normal retry action after realtime settings are ready.
 - Good: a completion event reloads the right log and orders table while leaving the log row immutable after later order edits/deletion.
+- Good: a user selects one current summary and inspects every retained attempt's exact structured input and outcome beside it.
 - Base: on a narrow window the user switches between “任务池” and “导入完成” tabs without losing pagination or actions.
 - Bad: rendering order Batch history/detail, offering Aliyun settings, showing raw provider keys, using invoice events for orders, or calling Tauri `invoke` directly from components violates this contract.
 
@@ -90,8 +105,8 @@ Order recognition retains its own `orderRecognitionMaxConcurrency`; it is not pa
 
 - API/store tests: command names and camel-case arguments, absence of old order batch state, and order event invalidation behavior.
 - Orders-page component tests: file import totals, duplicate reporting, task-center navigation, and server-query refresh.
-- Import-task component tests: desktop pool/log data, mobile tabs, all realtime pool statuses, absence of Batch actions, retry-all/single, delete confirmation, historical Aliyun label, and log pagination.
-- Settings component tests: global model copy, exactly two provider options, conditional fields, masked/preserved/cleared OpenAI keys, separate order concurrency, validation, and `checkLlm` payload.
+- Import-task component tests: desktop pool/log data, mobile tabs, all realtime pool statuses, absence of Batch actions, retry-all/single, delete confirmation, historical Aliyun label, log pagination, plus current summary/history rendering, batch generation, manual edit, and failed-edit retention.
+- Settings component tests: global model copy, exactly two provider options, conditional fields, masked/preserved/cleared OpenAI keys, separate order concurrency, summary mode/concurrency, validation, and `checkLlm` payload.
 - Existing order-table tests: every sort mapping/cycle, search/filter/page reset, invalid-page correction, presentation preferences, selection, and mixed bulk-delete results.
 - Ledger status tests: match/project filter query payloads, status/membership columns, row background classes, and archived-project refresh invalidation.
 - Desktop smoke tests at default and minimum window sizes for dual-pane scrolling, responsive tabs, order preview/editor, and settings.

@@ -92,7 +92,7 @@ The migration uses resumable `_m0006_old` backup tables. On rerun, copy missing 
 ### 6. Tests Required
 
 - Migration: fresh file, m0005 upgrade with normal/locked/completed data, and interrupted m0006 recovery from backup tables.
-- Settings: version 1 upgrade, version 2 Aliyun fallback/key removal, lossless version 3 to 4 promotion, atomic writes, credential masking, and permission hardening.
+- Settings: version 1 upgrade, version 2 Aliyun fallback/key removal, lossless version 3 to 4 promotion, version 4 to 5 summary defaults, atomic writes, credential masking, and permission hardening.
 - Pool database: atomic/idempotent completion, retry transitions, task deletion compensation, and immutable logs.
 - Realtime queue: peak in-flight work never exceeds configured concurrency.
 - Protocol mocks: Ollama/OpenAI paths, bearer auth, image data URL, strict schema, and normalized response.
