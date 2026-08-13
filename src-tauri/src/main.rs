@@ -5,5 +5,5 @@ fn main() {
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
     }
 
-    bill_lib::run();
+    invoice_reconciler_lib::run();
 }

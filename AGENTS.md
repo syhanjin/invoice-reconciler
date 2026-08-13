@@ -28,6 +28,13 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - The frontend uses React, TypeScript, shadcn/ui, Jotai, Tailwind CSS v4, and Bun.
 - Use Bun for dependency management and frontend scripts. Do not introduce npm,
   pnpm, or Yarn lockfiles.
+- The repository and internal engineering name is `invoice-reconciler`; the
+  user-facing product name remains `票据助手`. The Tauri bundle identifier is
+  `moe.syhanjin.invoice-reconciler`, and the SQLite database file is
+  `db.sqlite3`.
+- GitHub releases are created only from pushed `v*.*.*` tags. Preserve the
+  Linux/Windows x86_64 matrix and publish both the native installer and the
+  standalone executable for each platform.
 - Initialize and add shadcn/ui components through `bunx shadcn@latest`; do not
   hand-copy shadcn component implementations.
 - Prefer well-maintained existing dependencies over custom implementations on

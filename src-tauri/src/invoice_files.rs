@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn managed_invoice_paths_cannot_escape_app_data() {
-        let app_data = Path::new("/tmp/bill-test-app-data");
+        let app_data = Path::new("/tmp/invoice-reconciler-test-app-data");
         assert!(resolve_invoice_path(app_data, "invoices/previews/a.pdf").is_ok());
         assert!(resolve_invoice_path(app_data, "../settings.toml").is_err());
         assert!(resolve_invoice_path(app_data, "/tmp/invoice.pdf").is_err());

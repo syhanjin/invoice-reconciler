@@ -83,7 +83,7 @@ export function normalizeOrderTablePreferences(value: unknown): OrderTablePrefer
 }
 
 const storedOrderTablePreferencesAtom = atomWithStorage<unknown>(
-  "bill.orders-table.preferences.v1",
+  "invoice-reconciler.orders-table.preferences.v1",
   defaultOrderTablePreferences,
   undefined,
   { getOnInit: true },

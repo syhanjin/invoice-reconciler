@@ -1,12 +1,12 @@
 [package]
-name = "bill"
+name = "invoice-reconciler"
 version = "0.1.0"
 description = "Local order OCR and invoice matching assistant"
 authors = ["syhanjin"]
 edition = "2024"
 
 [lib]
-name = "bill_lib"
+name = "invoice_reconciler_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

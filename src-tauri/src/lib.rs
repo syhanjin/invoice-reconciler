@@ -74,7 +74,7 @@ pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "bill=info".into()),
+                .unwrap_or_else(|_| "invoice_reconciler=info".into()),
         )
         .init();
 
@@ -82,7 +82,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
-            let database_path = app_data_dir.join("bill.sqlite3");
+            let database_path = app_data_dir.join("db.sqlite3");
             let images_dir = app_data_dir.join("images");
             let ollama = OllamaClient::new().map_err(to_boxed_error)?;
             let database = tauri::async_runtime::block_on(Database::connect(&database_path))

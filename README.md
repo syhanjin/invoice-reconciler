@@ -1,8 +1,9 @@
-# Bill
+# Invoice Reconciler
 
-A local-first Tauri desktop application for importing Taobao order screenshots,
-recognizing structured order data with Ollama, and storing editable orders in
-SQLite through SeaORM.
+Invoice Reconciler is the repository and engineering name for the user-facing
+`票据助手` desktop application. It imports Taobao order screenshots, recognizes
+structured order data, manages invoices, and reconciles invoices with orders.
+Data is stored locally in SQLite through SeaORM.
 
 ## Prerequisites
 
@@ -57,5 +58,11 @@ bun run tauri build --bundles deb
 ```
 
 Application data is stored in the platform-specific Tauri application data
-directory. The SQLite database is `bill.sqlite3`; managed screenshots are named
+directory. The SQLite database is `db.sqlite3`; managed screenshots are named
 `images/<order-uuid>.<extension>`.
+
+## Releases
+
+Pushing a tag matching `v*.*.*` builds Linux and Windows x86_64 releases. The
+GitHub Release contains a Debian or NSIS installer and a standalone executable
+for each platform.
