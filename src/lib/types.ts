@@ -1,4 +1,4 @@
-export type NavigationView = "orders" | "invoices" | "matching" | "importTasks" | "settings"
+export type NavigationView = "orders" | "invoices" | "matching" | "projects" | "importTasks" | "settings"
 
 export interface AppSettings {
   orderRecognitionProvider: OrderRecognitionProvider
@@ -308,6 +308,8 @@ export interface InvoicesQuery {
   dateFrom?: string
   dateTo?: string
   duplicateOnly?: boolean
+  projectId?: string
+  unassignedOnly?: boolean
   sortBy?: InvoiceSortBy
   sortDirection?: SortDirection
 }
@@ -326,6 +328,8 @@ export interface InvoiceListItem {
   currency: string
   possibleDuplicate: boolean
   createdAt: string
+  projectId: string | null
+  projectName: string | null
 }
 
 export interface InvoicesPage {
@@ -500,3 +504,80 @@ export interface DeleteInvoiceResult {
 }
 
 export interface DeleteInvoicesResult { results: DeleteInvoiceResult[] }
+
+export interface ProjectsQuery {
+  page?: number
+  pageSize?: number
+  search?: string
+}
+
+export interface ProjectSummary {
+  id: string
+  name: string
+  invoiceCount: number
+  confirmedCount: number
+  unconfirmedCount: number
+  actualAmountFen: number
+  exportable: boolean
+  blockingReason: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProjectsPageData {
+  items: ProjectSummary[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface ProjectOrderSummary {
+  id: string
+  externalOrderNumber: string | null
+  paidAmountFen: number | null
+  productNames: string[]
+}
+
+export interface ProjectInvoiceMember {
+  id: string
+  position: number
+  typeDescription: string
+  invoiceCode: string | null
+  invoiceNumber: string | null
+  invoiceDate: string | null
+  buyerName: string | null
+  buyerTaxId: string | null
+  sellerName: string | null
+  sellerTaxId: string | null
+  amountFen: number | null
+  taxFen: number | null
+  invoiceAmountFen: number | null
+  orderAmountFen: number | null
+  actualAmountFen: number | null
+  currency: string
+  confirmed: boolean
+  fileAvailable: boolean
+  blockingReason: string | null
+  orders: ProjectOrderSummary[]
+}
+
+export interface ProjectDetail extends ProjectSummary {
+  invoices: ProjectInvoiceMember[]
+}
+
+export interface InvoiceProjectConflict {
+  invoiceId: string
+  sourceProjectId: string
+  sourceProjectName: string
+}
+
+export interface AssignInvoicesResult {
+  assigned: boolean
+  conflicts: InvoiceProjectConflict[]
+}
+
+export interface ExportProjectResult {
+  path: string
+  invoiceCount: number
+  actualAmountFen: number
+}

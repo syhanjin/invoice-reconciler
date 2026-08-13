@@ -18,12 +18,14 @@ import {
   navigationAtom,
   ordersRefreshAtom,
   orderImportRefreshAtom,
+  projectsRefreshAtom,
   settingsAtom,
 } from "@/lib/store"
 
 const SettingsPage = lazy(() => import("@/components/settings-page"))
 const ImportTasksPage = lazy(() => import("@/components/import-tasks-page"))
 const MatchingPage = lazy(() => import("@/components/matching-page").then((module) => ({ default: module.MatchingPage })))
+const ProjectsPage = lazy(() => import("@/components/projects-page").then((module) => ({ default: module.ProjectsPage })))
 
 function Initializing() {
   return (
@@ -48,6 +50,8 @@ export function App() {
   const refreshToken = useAtomValue(ordersRefreshAtom)
   const orderImportRefreshToken = useAtomValue(orderImportRefreshAtom)
   const invoiceRefreshToken = useAtomValue(invoicesRefreshAtom)
+  const projectRefreshToken = useAtomValue(projectsRefreshAtom)
+  const refreshProjects = useSetAtom(projectsRefreshAtom)
   const [activeInvoiceBatch, setActiveInvoiceBatch] = useAtom(activeInvoiceBatchAtom)
   const mergeInvoiceBatch = useSetAtom(mergeInvoiceBatchAtom)
   const mergeInvoiceBatchEvent = useSetAtom(mergeInvoiceBatchEventAtom)
@@ -111,11 +115,18 @@ export function App() {
             <InvoicesPage
               onBatchCreated={handleInvoiceBatchCreated}
               refreshToken={invoiceRefreshToken}
+              projectRefreshToken={projectRefreshToken}
+              onProjectsChanged={() => refreshProjects((value) => value + 1)}
             />
           )}
           {view === "matching" && (
             <Suspense fallback={<Initializing />}>
               <MatchingPage refreshToken={`${refreshToken}:${invoiceRefreshToken}`} />
+            </Suspense>
+          )}
+          {view === "projects" && (
+            <Suspense fallback={<Initializing />}>
+              <ProjectsPage refreshToken={projectRefreshToken} />
             </Suspense>
           )}
           {view === "importTasks" && settings && (

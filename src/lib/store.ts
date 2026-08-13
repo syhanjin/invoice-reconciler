@@ -105,6 +105,7 @@ export const ordersRefreshAtom = atom(0)
 export const orderImportRefreshAtom = atom(0)
 export const activeInvoiceBatchAtom = atom<InvoiceBatchDetail | null>(null)
 export const invoicesRefreshAtom = atom(0)
+export const projectsRefreshAtom = atom(0)
 
 export const mergeOrderImportEventAtom = atom(
   null,

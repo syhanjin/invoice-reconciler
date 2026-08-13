@@ -30,6 +30,11 @@ import type {
   MatchableOrdersQuery,
   MatchingPageData,
   MatchingQuery,
+  AssignInvoicesResult,
+  ExportProjectResult,
+  ProjectDetail,
+  ProjectsPageData,
+  ProjectsQuery,
 } from "@/lib/types"
 
 export const api = {
@@ -88,6 +93,29 @@ export const api = {
     invoke<ConfirmInvoiceMatchResult[]>("confirm_invoice_matches", { request: { matches } }),
   unconfirmInvoiceMatch: (id: string) =>
     invoke<void>("unconfirm_invoice_match", { request: { id } }),
+  listProjects: (query: ProjectsQuery) =>
+    invoke<ProjectsPageData>("list_projects", { query }),
+  getProject: (id: string) =>
+    invoke<ProjectDetail>("get_project", { request: { id } }),
+  createProject: (name: string) =>
+    invoke<ProjectDetail>("create_project", { request: { name } }),
+  renameProject: (id: string, name: string) =>
+    invoke<ProjectDetail>("rename_project", { request: { id, name } }),
+  deleteProject: (id: string) =>
+    invoke<void>("delete_project", { request: { id } }),
+  assignInvoicesToProject: (
+    invoiceIds: string[],
+    projectId: string,
+    acceptReassignment: boolean,
+  ) => invoke<AssignInvoicesResult>("assign_invoices_to_project", {
+    request: { invoiceIds, projectId, acceptReassignment },
+  }),
+  removeInvoicesFromProjects: (invoiceIds: string[]) =>
+    invoke<void>("remove_invoices_from_projects", { request: { invoiceIds } }),
+  reorderProjectInvoices: (projectId: string, invoiceIds: string[]) =>
+    invoke<ProjectDetail>("reorder_project_invoices", { request: { projectId, invoiceIds } }),
+  exportProject: (id: string, outputDirectory: string, overwrite: boolean) =>
+    invoke<ExportProjectResult>("export_project", { request: { id, outputDirectory, overwrite } }),
   listenForOrderImportUpdates: (
     handler: (payload: OrderImportUpdateEvent) => void,
   ): Promise<UnlistenFn> =>
@@ -106,4 +134,12 @@ export function errorMessage(error: unknown): string {
     if (typeof candidate.message === "string") return candidate.message
   }
   return "操作失败，请稍后重试"
+}
+
+export function errorCode(error: unknown): string | null {
+  if (error && typeof error === "object") {
+    const candidate = error as { code?: unknown }
+    if (typeof candidate.code === "string") return candidate.code
+  }
+  return null
 }
