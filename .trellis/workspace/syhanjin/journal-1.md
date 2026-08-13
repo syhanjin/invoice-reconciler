@@ -569,3 +569,36 @@ Preserved original order and eligible invoice files during project export, switc
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: Ledger status and project archiving
+
+**Date**: 2026-08-13
+**Task**: Ledger status and project archiving
+**Branch**: `main`
+
+### Summary
+
+Added global three-state order/invoice ledger status and filters, transactional invoice create-and-assign, active/archived project workflows, archived-project visibility guards, migration coverage, UI tests, and executable contract updates.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `70e5291a9072fd6b721e9f70a4b0466c13b1da1d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

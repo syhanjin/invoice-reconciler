@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 16
+- **Total Sessions**: 17
 - **Last Active**: 2026-08-13
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~571 | Active |
+| `journal-1.md` | ~604 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 17 | 2026-08-13 | Ledger status and project archiving | `70e5291a9072fd6b721e9f70a4b0466c13b1da1d` | `main` |
 | 16 | 2026-08-13 | Preserve project export material fidelity | `3dd4a1b` | `main` |
 | 15 | 2026-08-13 | Release v0.1.2 and optimize CI caches | `23ad456`, `9680442` | `main` |
 | 14 | 2026-08-13 | Repurchase automatic matching | `40fb430` | `main` |
