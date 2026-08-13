@@ -668,3 +668,38 @@ Allowed complete repeated order and invoice dates in suspected-repurchase matchi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 20: 摘要生成管理与可视化
+
+**Date**: 2026-08-14
+**Task**: 摘要生成管理与可视化
+**Branch**: `main`
+
+### Summary
+
+新增摘要任务与180天尝试记录、自动/手动模式及1到8并发设置，并在匹配和项目工作区展示及筛选摘要状态；完成迁移恢复、人工摘要保护和跨层测试。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c93d89b` | (see git log) |
+| `b1e6366` | (see git log) |
+| `ba6dbe1` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

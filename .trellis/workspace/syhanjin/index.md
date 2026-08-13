@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 19
-- **Last Active**: 2026-08-13
+- **Total Sessions**: 20
+- **Last Active**: 2026-08-14
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~670 | Active |
+| `journal-1.md` | ~705 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 20 | 2026-08-14 | 摘要生成管理与可视化 | `c93d89b`, `b1e6366`, `ba6dbe1` | `main` |
 | 19 | 2026-08-13 | 全局 LLM 与匹配商品摘要 | `e95d90c` | `main` |
 | 18 | 2026-08-13 | Allow repeated repurchase dates | `f395f99` | `main` |
 | 17 | 2026-08-13 | Ledger status and project archiving | `70e5291a9072fd6b721e9f70a4b0466c13b1da1d` | `main` |
