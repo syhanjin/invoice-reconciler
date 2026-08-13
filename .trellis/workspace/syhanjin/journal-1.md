@@ -359,3 +359,36 @@ Replaced order import batches with one durable pool and immutable completion log
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: Remove Aliyun Batch API
+
+**Date**: 2026-08-13
+**Task**: Remove Aliyun Batch API
+**Branch**: `main`
+
+### Summary
+
+Removed Aliyun Bailian File/Batch order recognition across Rust and React, migrated legacy settings and database state safely, preserved historical provider/model audits, and updated regression coverage and contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9b819e9` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
