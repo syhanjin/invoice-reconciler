@@ -57,6 +57,9 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - Order/invoice matching computes ephemeral candidates and persists only explicit
   confirmations. Preserve exact-fen/CNY rules, missing-date comparison semantics,
   global order uniqueness, atomic batch confirmation, and matched edit/delete guards.
+  Suspected repurchases group orders by amount/normalized shop and invoices by
+  amount/normalized seller/subtype, then pair only complete unique dates with equal
+  counts; otherwise retain a `疑似回购冲突`. Custom selection omits confirmed orders.
 - Projects own ordered invoice membership only; one invoice belongs to at most one
   project. Preserve transactional reassignment, position compaction after membership
   or invoice deletion, and project deletion without deleting invoices, matches, files,

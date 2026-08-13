@@ -24,7 +24,8 @@ api.unconfirmInvoiceMatch(invoiceId): Promise<void>
 - Clicking invoice/order content opens the existing detail sheets. Checkbox and candidate controls must not activate a detail sheet.
 - Only `suggested` rows are selectable for batch confirmation. Header selection applies only to suggested rows on the current page.
 - Conflict candidates are selected explicitly and confirmed one invoice at a time. Candidate-overflow conflicts expose only custom selection.
-- The custom picker uses server paging/search and preserves selected order summaries across pages and searches. Occupied or missing-money orders are disabled with a reason.
+- The custom picker uses server paging/search and preserves selected order summaries across pages and searches. Confirmed orders are omitted before server count/pagination; missing- or invalid-money orders remain visible but disabled with a reason.
+- Suspected-repurchase failures remain under the existing `conflict` status and display the backend reason beginning `疑似回购冲突`; they do not add a separate filter, summary, or badge.
 - A custom response with differences keeps the dialog open and requires a separate “accept differences” action. Any selection change clears the prior difference acceptance state.
 - Opening the custom picker for a different invoice resets its page, search, selections, and differences.
 - Confirmed rows show their orders and offer unconfirm. They do not offer in-place replacement.

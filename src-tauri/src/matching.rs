@@ -21,6 +21,7 @@ use crate::models::{
 struct InvoiceRow {
     id: String,
     invoice_number: Option<String>,
+    subtype: String,
     subtype_description: String,
     invoice_date: Option<String>,
     seller_name: Option<String>,
@@ -38,6 +39,19 @@ struct OrderRow {
     ordered_at: Option<String>,
     shop_name: Option<String>,
     product_summary: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RepurchaseInvoiceKey {
+    total_fen: i64,
+    seller_name: Option<String>,
+    subtype: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RepurchaseOrderKey {
+    paid_amount_fen: i64,
+    shop_name: Option<String>,
 }
 
 impl OrderRow {
@@ -62,7 +76,7 @@ impl Database {
     ) -> AppResult<MatchingPage> {
         let invoices = InvoiceRow::find_by_statement(Statement::from_string(
             DbBackend::Sqlite,
-            "SELECT i.id,i.invoice_number,i.subtype_description,i.invoice_date,i.seller_name,\
+            "SELECT i.id,i.invoice_number,i.subtype,i.subtype_description,i.invoice_date,i.seller_name,\
              i.total_fen,i.currency,m.source confirmed_source,m.confirmed_at \
              FROM invoices i LEFT JOIN invoice_matches m ON m.invoice_id=i.id \
              ORDER BY COALESCE(i.invoice_date,'' ) DESC,i.id DESC",
@@ -100,6 +114,9 @@ impl Database {
                 );
             }
         }
+
+        let repurchase_conflicts =
+            resolve_repurchase_candidates(&invoices, &orders, &mut candidates_by_invoice);
 
         let mut order_invoice_uses = HashMap::<String, HashSet<String>>::new();
         for (invoice_id, (candidates, _)) in &candidates_by_invoice {
@@ -153,6 +170,8 @@ impl Database {
                         Some(format!("候选组合超过 {max_candidates} 个，请自定义选择")),
                         Vec::new(),
                     )
+                } else if let Some(reason) = repurchase_conflicts.get(&value.id) {
+                    ("conflict".to_owned(), Some(reason.clone()), candidates)
                 } else if candidates.is_empty() {
                     (
                         "unmatched".to_owned(),
@@ -252,7 +271,9 @@ impl Database {
         let page = query.page.unwrap_or(1).max(1);
         let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
         let search = query.search.unwrap_or_default().trim().to_owned();
-        let mut filter = String::new();
+        let mut filter = String::from(
+            " AND NOT EXISTS (SELECT 1 FROM invoice_match_orders mo WHERE mo.order_id=o.id)",
+        );
         let mut values = Vec::<sea_orm::Value>::new();
         if !search.is_empty() {
             filter.push_str(" AND (o.external_order_number LIKE ? OR o.shop_name LIKE ? OR EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id=o.id AND oi.product_name LIKE ?))");
@@ -295,8 +316,8 @@ impl Database {
             format!(
                 "SELECT o.id,o.external_order_number,o.paid_amount_fen,o.ordered_at,o.shop_name,\
                  COALESCE((SELECT group_concat(product_name,' · ') FROM (SELECT product_name FROM order_items WHERE order_id=o.id ORDER BY position LIMIT 2)),'') product_summary,\
-                 mo.invoice_id matched_invoice_id,CASE WHEN mo.order_id IS NOT NULL THEN '已被其他发票占用' WHEN o.paid_amount_fen IS NULL THEN '订单金额缺失' WHEN o.paid_amount_fen < 0 THEN '订单金额无效' ELSE NULL END disabled_reason \
-                 FROM orders o LEFT JOIN invoice_match_orders mo ON mo.order_id=o.id WHERE 1=1{filter} \
+                 NULL matched_invoice_id,CASE WHEN o.paid_amount_fen IS NULL THEN '订单金额缺失' WHEN o.paid_amount_fen < 0 THEN '订单金额无效' ELSE NULL END disabled_reason \
+                 FROM orders o WHERE 1=1{filter} \
                  ORDER BY {sort} {direction},o.id DESC LIMIT ? OFFSET ?"
             ),
             values,
@@ -527,6 +548,193 @@ async fn confirmed_orders(
         candidate.shop_name = common_shop(&candidate.orders);
     }
     Ok(result)
+}
+
+fn resolve_repurchase_candidates(
+    invoices: &[InvoiceRow],
+    orders: &[OrderRow],
+    candidates_by_invoice: &mut HashMap<String, (Vec<MatchCandidate>, bool)>,
+) -> HashMap<String, String> {
+    let eligible_invoices = invoices
+        .iter()
+        .filter(|invoice| {
+            invoice.confirmed_source.is_none()
+                && invoice.total_fen.is_some_and(|amount| amount >= 0)
+                && invoice.currency.eq_ignore_ascii_case("CNY")
+        })
+        .collect::<Vec<_>>();
+    let eligible_orders = orders
+        .iter()
+        .filter(|order| order.paid_amount_fen >= 0)
+        .collect::<Vec<_>>();
+
+    let mut invoice_groups = HashMap::<RepurchaseInvoiceKey, Vec<&InvoiceRow>>::new();
+    for invoice in eligible_invoices {
+        invoice_groups
+            .entry(RepurchaseInvoiceKey {
+                total_fen: invoice.total_fen.unwrap_or_default(),
+                seller_name: normalized_shop(invoice.seller_name.as_deref()),
+                subtype: invoice.subtype.clone(),
+            })
+            .or_default()
+            .push(invoice);
+    }
+    let mut order_groups = HashMap::<RepurchaseOrderKey, Vec<&OrderRow>>::new();
+    let mut order_keys_by_id = HashMap::<&str, RepurchaseOrderKey>::new();
+    for order in eligible_orders {
+        let key = RepurchaseOrderKey {
+            paid_amount_fen: order.paid_amount_fen,
+            shop_name: normalized_shop(order.shop_name.as_deref()),
+        };
+        order_keys_by_id.insert(&order.id, key.clone());
+        order_groups.entry(key).or_default().push(order);
+    }
+
+    let mut invoice_order_links =
+        HashMap::<RepurchaseInvoiceKey, HashSet<RepurchaseOrderKey>>::new();
+    let mut order_invoice_links =
+        HashMap::<RepurchaseOrderKey, HashSet<RepurchaseInvoiceKey>>::new();
+    let mut disqualified_invoice_keys = HashSet::<RepurchaseInvoiceKey>::new();
+    for (invoice_key, invoice_group) in &invoice_groups {
+        for invoice in invoice_group {
+            let Some((candidates, overflow)) = candidates_by_invoice.get(&invoice.id) else {
+                continue;
+            };
+            if *overflow
+                || candidates
+                    .iter()
+                    .any(|candidate| candidate.order_ids.len() != 1)
+            {
+                disqualified_invoice_keys.insert(invoice_key.clone());
+            }
+            for candidate in candidates {
+                for order_id in &candidate.order_ids {
+                    let Some(order_key) = order_keys_by_id.get(order_id.as_str()) else {
+                        continue;
+                    };
+                    invoice_order_links
+                        .entry(invoice_key.clone())
+                        .or_default()
+                        .insert(order_key.clone());
+                    order_invoice_links
+                        .entry(order_key.clone())
+                        .or_default()
+                        .insert(invoice_key.clone());
+                }
+            }
+        }
+    }
+
+    let mut conflicts = HashMap::new();
+    for (invoice_key, invoice_group) in invoice_groups {
+        if invoice_group.len() < 2 || disqualified_invoice_keys.contains(&invoice_key) {
+            continue;
+        }
+        let Some(linked_order_keys) = invoice_order_links.get(&invoice_key) else {
+            continue;
+        };
+        if linked_order_keys.len() != 1 {
+            continue;
+        }
+        let order_key = linked_order_keys
+            .iter()
+            .next()
+            .expect("one linked order group");
+        if order_invoice_links
+            .get(order_key)
+            .is_none_or(|keys| keys.len() != 1 || !keys.contains(&invoice_key))
+        {
+            continue;
+        }
+        let Some(order_group) = order_groups.get(order_key) else {
+            continue;
+        };
+        if order_group.len() < 2 {
+            continue;
+        }
+        if invoice_group.len() != order_group.len() {
+            let reason = format!(
+                "疑似回购冲突：订单 {} 条，发票 {} 张，数量不一致",
+                order_group.len(),
+                invoice_group.len()
+            );
+            for invoice in invoice_group {
+                conflicts.insert(invoice.id.clone(), reason.clone());
+            }
+            continue;
+        }
+
+        let Some(sorted_invoices) =
+            sorted_unique_dates(&invoice_group, |invoice| invoice.invoice_date.as_deref())
+        else {
+            mark_repurchase_date_conflict(&mut conflicts, &invoice_group);
+            continue;
+        };
+        let Some(sorted_orders) =
+            sorted_unique_dates(order_group, |order| order.ordered_at.as_deref())
+        else {
+            mark_repurchase_date_conflict(&mut conflicts, &invoice_group);
+            continue;
+        };
+        if sorted_invoices
+            .iter()
+            .zip(&sorted_orders)
+            .any(|(invoice, order)| {
+                !date_allowed(order.ordered_at.as_deref(), invoice.invoice_date.as_deref())
+            })
+        {
+            let reason = "疑似回购冲突：按时间配对后存在订单晚于开票日期".to_owned();
+            for invoice in invoice_group {
+                conflicts.insert(invoice.id.clone(), reason.clone());
+            }
+            continue;
+        }
+
+        for (invoice, order) in sorted_invoices.into_iter().zip(sorted_orders) {
+            candidates_by_invoice.insert(
+                invoice.id.clone(),
+                (
+                    vec![MatchCandidate {
+                        order_ids: vec![order.id.clone()],
+                        orders: vec![order.summary()],
+                        total_fen: order.paid_amount_fen,
+                        shop_name: normalized_shop(order.shop_name.as_deref()),
+                    }],
+                    false,
+                ),
+            );
+        }
+    }
+    conflicts
+}
+
+fn sorted_unique_dates<'a, T>(
+    values: &'a [&'a T],
+    date: impl Fn(&T) -> Option<&str>,
+) -> Option<Vec<&'a T>> {
+    let mut dated = values
+        .iter()
+        .map(|value| {
+            date(value)
+                .and_then(|date| date_part(Some(date)))
+                .map(|date| (date, *value))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    dated.sort_by_key(|(date, _)| *date);
+    if dated.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return None;
+    }
+    Some(dated.into_iter().map(|(_, value)| value).collect())
+}
+
+fn mark_repurchase_date_conflict(
+    conflicts: &mut HashMap<String, String>,
+    invoices: &[&InvoiceRow],
+) {
+    let reason = "疑似回购冲突：日期缺失或重复，无法按时间可靠配对".to_owned();
+    for invoice in invoices {
+        conflicts.insert(invoice.id.clone(), reason.clone());
+    }
 }
 
 fn generate_candidates(
@@ -869,6 +1077,17 @@ pub async fn unconfirm_invoice_match(
 mod tests {
     use super::*;
     use crate::models::UpdateOrderRequest;
+    use tempfile::TempDir;
+
+    async fn test_state() -> (TempDir, AppState) {
+        let directory = tempfile::tempdir().unwrap();
+        let app_data_dir = directory.path().to_path_buf();
+        let images_dir = app_data_dir.join("images");
+        tokio::fs::create_dir_all(&images_dir).await.unwrap();
+        let database = Database::in_memory().await.unwrap();
+        let state = AppState::test(database, app_data_dir, images_dir).await;
+        (directory, state)
+    }
 
     fn order(id: &str, amount: i64, date: Option<&str>, shop: Option<&str>) -> OrderRow {
         OrderRow {
@@ -982,6 +1201,336 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chronologically_resolves_equal_repurchase_groups() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-early", 100), ("order-late", 100)],
+            &[("invoice-early", 100), ("invoice-late", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at='2026-08-02 18:00',shop_name=' 同　店 ' WHERE id='order-early';
+             UPDATE orders SET ordered_at='2026-08-08 09:00',shop_name='同 店' WHERE id='order-late';
+             INSERT INTO order_items (order_id,position,product_name) VALUES ('order-early',0,'商品甲'),('order-late',0,'完全不同的商品乙');
+             UPDATE invoices SET invoice_date='2026-08-03',seller_name=' 销　售 方 ',invoice_number='UNIQUE-A' WHERE id='invoice-early';
+             UPDATE invoices SET invoice_date='2026-08-10',seller_name='销 售 方',invoice_number='UNIQUE-B' WHERE id='invoice-late';",
+        )
+        .await
+        .unwrap();
+
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: None,
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.summary.suggested, 2);
+        assert_eq!(page.summary.conflict, 0);
+        let suggestions = page
+            .items
+            .iter()
+            .map(|item| (item.id.as_str(), item.candidates[0].order_ids[0].as_str()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(suggestions["invoice-early"], "order-early");
+        assert_eq!(suggestions["invoice-late"], "order-late");
+    }
+
+    #[tokio::test]
+    async fn chronologically_resolved_repurchase_suggestions_confirm_atomically() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-early", 100), ("order-late", 100)],
+            &[("invoice-early", 100), ("invoice-late", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at=CASE id WHEN 'order-early' THEN '2026-08-01' ELSE '2026-08-05' END;
+             UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-early' THEN '2026-08-02' ELSE '2026-08-06' END,seller_name='销售方';",
+        )
+        .await
+        .unwrap();
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: Some("suggested".into()),
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+        let requests = page
+            .items
+            .into_iter()
+            .map(|item| ConfirmInvoiceMatchRequest {
+                invoice_id: item.id,
+                order_ids: item.candidates[0].order_ids.clone(),
+                source: "automatic".into(),
+                accept_mismatches: false,
+            })
+            .collect::<Vec<_>>();
+
+        let results = db.confirm_invoice_matches(requests).await.unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.confirmed));
+        assert_eq!(
+            invoice_match::Entity::find()
+                .all(&db.connection)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            invoice_match_order::Entity::find()
+                .all(&db.connection)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_revalidation_accepts_chronological_repurchase_suggestions() {
+        let (_directory, state) = test_state().await;
+        seed_records(
+            &state.database,
+            &[("order-early", 100), ("order-late", 100)],
+            &[("invoice-early", 100), ("invoice-late", 100)],
+        )
+        .await;
+        state
+            .database
+            .execute_test_statement(
+                "UPDATE orders SET ordered_at=CASE id WHEN 'order-early' THEN '2026-08-01' ELSE '2026-08-05' END;
+                 UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-early' THEN '2026-08-02' ELSE '2026-08-06' END,seller_name='销售方';",
+            )
+            .await
+            .unwrap();
+        let settings = state.settings.private().await;
+
+        for (invoice_id, order_id) in [
+            ("invoice-early", "order-early"),
+            ("invoice-late", "order-late"),
+        ] {
+            validate_automatic_suggestion(
+                &state,
+                &ConfirmInvoiceMatchRequest {
+                    invoice_id: invoice_id.into(),
+                    order_ids: vec![order_id.into()],
+                    source: "automatic".into(),
+                    accept_mismatches: false,
+                },
+                &settings,
+                true,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn unequal_repurchase_groups_have_a_dedicated_conflict_reason() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-a", 100), ("order-b", 100)],
+            &[("invoice-a", 100), ("invoice-b", 100), ("invoice-c", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at=CASE id WHEN 'order-a' THEN '2026-08-01' ELSE '2026-08-02' END;
+             UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-a' THEN '2026-08-03' WHEN 'invoice-b' THEN '2026-08-04' ELSE '2026-08-05' END,seller_name='销售方';",
+        )
+        .await
+        .unwrap();
+
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: None,
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.summary.conflict, 3);
+        assert!(page.items.iter().all(|item| {
+            item.reason.as_deref() == Some("疑似回购冲突：订单 2 条，发票 3 张，数量不一致")
+        }));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_repurchase_dates_remain_conflicts() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-a", 100), ("order-b", 100)],
+            &[("invoice-a", 100), ("invoice-b", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at='2026-08-01';
+             UPDATE invoices SET seller_name='销售方';",
+        )
+        .await
+        .unwrap();
+
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: None,
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.summary.conflict, 2);
+        assert!(page.items.iter().all(|item| {
+            item.reason.as_deref() == Some("疑似回购冲突：日期缺失或重复，无法按时间可靠配对")
+        }));
+    }
+
+    #[tokio::test]
+    async fn different_invoice_business_fields_do_not_form_a_repurchase_group() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-a", 100), ("order-b", 100)],
+            &[("invoice-a", 100), ("invoice-b", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at=CASE id WHEN 'order-a' THEN '2026-08-01' ELSE '2026-08-02' END;
+             UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-a' THEN '2026-08-03' ELSE '2026-08-04' END;
+             UPDATE invoices SET seller_name='销售方甲' WHERE id='invoice-a';
+             UPDATE invoices SET seller_name='销售方乙' WHERE id='invoice-b';",
+        )
+        .await
+        .unwrap();
+
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: None,
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.summary.conflict, 2);
+        assert!(page.items.iter().all(|item| {
+            item.reason.as_deref() == Some("存在多个订单组合，需要手动选择")
+        }));
+    }
+
+    #[tokio::test]
+    async fn different_order_shops_do_not_form_a_repurchase_group() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-a", 100), ("order-b", 100)],
+            &[("invoice-a", 100), ("invoice-b", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at=CASE id WHEN 'order-a' THEN '2026-08-01' ELSE '2026-08-02' END;
+             UPDATE orders SET shop_name='店铺甲' WHERE id='order-a';
+             UPDATE orders SET shop_name='店铺乙' WHERE id='order-b';
+             UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-a' THEN '2026-08-03' ELSE '2026-08-04' END,seller_name='销售方';",
+        )
+        .await
+        .unwrap();
+
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: None,
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.summary.conflict, 2);
+        assert!(page.items.iter().all(|item| {
+            item.reason.as_deref() == Some("存在多个订单组合，需要手动选择")
+        }));
+    }
+
+    #[tokio::test]
+    async fn different_invoice_subtypes_do_not_form_a_repurchase_group() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-a", 100), ("order-b", 100)],
+            &[("invoice-a", 100), ("invoice-b", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at=CASE id WHEN 'order-a' THEN '2026-08-01' ELSE '2026-08-02' END;
+             UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-a' THEN '2026-08-03' ELSE '2026-08-04' END,seller_name='销售方';
+             UPDATE invoices SET subtype='VatInvoice' WHERE id='invoice-a';
+             UPDATE invoices SET subtype='VatSpecialInvoice' WHERE id='invoice-b';",
+        )
+        .await
+        .unwrap();
+
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: None,
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.summary.conflict, 2);
+        assert!(page.items.iter().all(|item| {
+            item.reason.as_deref() == Some("存在多个订单组合，需要手动选择")
+        }));
+    }
+
+    #[tokio::test]
     async fn custom_difference_requires_explicit_acceptance() {
         let db = Database::in_memory().await.unwrap();
         seed_records(&db, &[("order-a", 90)], &[("invoice-a", 100)]).await;
@@ -1033,6 +1582,41 @@ mod tests {
             .collect::<HashMap<_, _>>();
         assert_eq!(reasons["negative"].as_deref(), Some("订单金额无效"));
         assert_eq!(reasons["missing"].as_deref(), Some("订单金额缺失"));
+    }
+
+    #[tokio::test]
+    async fn custom_order_list_excludes_confirmed_orders_before_paging() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("occupied", 100), ("available", 100)],
+            &[("invoice-a", 100)],
+        )
+        .await;
+        db.confirm_invoice_match(ConfirmInvoiceMatchRequest {
+            invoice_id: "invoice-a".into(),
+            order_ids: vec!["occupied".into()],
+            source: "custom".into(),
+            accept_mismatches: false,
+        })
+        .await
+        .unwrap();
+
+        let page = db
+            .list_matchable_orders(MatchableOrdersQuery {
+                page: Some(1),
+                page_size: Some(1),
+                search: None,
+                sort_by: None,
+                sort_direction: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, "available");
+        assert!(page.items[0].matched_invoice_id.is_none());
     }
 
     #[tokio::test]

@@ -30,6 +30,7 @@ invoices 1 -- 0..1 invoice_matches 1 -- 1..* invoice_match_orders * -- 1 orders
 - Candidate money is exact integer-fen equality. A single order needs no shop name. A multi-order combination requires every normalized shop name to exist and match after trimming, full-width-space conversion, and whitespace collapse.
 - Reject an order for date only when both dates exist and its order date is later than the invoice date. A missing date on either side skips the comparison.
 - A conflict exists when one invoice has multiple candidates or an order appears in candidates for multiple invoices. Candidate overflow exposes no truncated automatic combination and must use custom matching.
+- Before classifying ordinary cross-invoice conflicts, suspected repurchases may disambiguate isolated single-order candidates. Orders group by exact amount plus normalized shop, while invoices group by exact amount plus normalized seller and subtype; unique identifiers, dates, and product summaries do not participate. Groups need at least two records on each side. Equal counts with complete, unique natural dates pair ascending order dates to ascending invoice dates, and every pair must still pass the ordinary date rule. Unequal counts, missing/duplicate dates, or a late chronological pair remain `conflict` with a reason beginning `疑似回购冲突`.
 - Automatic candidates are limited by version-1 `settings.toml` `[matching]` values: `max_orders_per_candidate` defaults to `10` and validates to `2..=20`; `max_candidates_per_invoice` defaults to `100` and validates to `10..=500`. A deterministic search-node budget also prevents no-solution exponential traversal; exhausting either limit routes the invoice to custom matching. Missing sections in an older version-1 file receive defaults.
 - Single automatic confirmation revalidates that the selected combination still exists; conflict combinations may be selected manually. Batch confirmation additionally requires every item to remain globally conflict-free and commits all items in one transaction.
 - Custom matching may override money, date, and shop differences. The first request returns `confirmed: false` plus concrete `differences`; only a repeated request with `acceptMismatches: true` may persist it.
@@ -45,6 +46,7 @@ invoices 1 -- 0..1 invoice_matches 1 -- 1..* invoice_match_orders * -- 1 orders
 | Either date is missing | Skip date comparison |
 | Multi-order shop missing/different | Exclude automatic candidate; report a custom difference |
 | Candidate changed since page load | Reject automatic confirmation and require refresh |
+| Suspected repurchase counts differ or dates cannot order reliably | Preserve the candidates as `conflict` and return a dedicated `疑似回购冲突` reason |
 | Order already belongs to another invoice | Return `matching_locked`; unique index remains the final guard |
 | Custom differences not accepted | Return `confirmed: false`; write no rows |
 | One batch item fails | Roll back every batch item |
@@ -60,7 +62,7 @@ invoices 1 -- 0..1 invoice_matches 1 -- 1..* invoice_match_orders * -- 1 orders
 ## 6. Tests Required
 
 - Pure algorithm tests for one-to-one, same-shop many-to-one, normalization, missing-date behavior, late-order rejection, limit overflow, and deterministic output.
-- Repository tests for cross-invoice conflicts, custom two-step confirmation, unique occupancy, unconfirm/reuse, batch rollback, edit-driven release, and delete locking.
+- Repository tests for cross-invoice conflicts, chronological repurchase pairing and ambiguity, custom two-step confirmation, unique occupancy, unconfirm/reuse, batch rollback, edit-driven release, and delete locking.
 - Migration tests for fresh files, m0003 upgrade with seeded orders/invoices, interrupted m0004 recovery, cascade behavior, and the unique order constraint.
 - Settings tests for defaults, ranges, old version-1 files, atomic replacement, permissions, and credential-free public responses.
 

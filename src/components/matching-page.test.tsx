@@ -31,7 +31,7 @@ const candidate = (id: string, amount = 100) => ({
 const page: MatchingPageData = {
   items: [
     { id: "invoice-a", invoiceNumber: "INV-A", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 100, currency: "CNY", status: "suggested", reason: null, candidates: [candidate("order-a")], confirmedSource: null, confirmedAt: null },
-    { id: "invoice-b", invoiceNumber: "INV-B", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 100, currency: "CNY", status: "conflict", reason: "存在多个订单组合，需要手动选择", candidates: [candidate("order-b"), candidate("order-c")], confirmedSource: null, confirmedAt: null },
+    { id: "invoice-b", invoiceNumber: "INV-B", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 100, currency: "CNY", status: "conflict", reason: "疑似回购冲突：订单 2 条，发票 3 张，数量不一致", candidates: [candidate("order-b"), candidate("order-c")], confirmedSource: null, confirmedAt: null },
     { id: "invoice-c", invoiceNumber: "INV-C", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 120, currency: "CNY", status: "unmatched", reason: "没有满足自动规则的订单组合", candidates: [], confirmedSource: null, confirmedAt: null },
   ],
   summary: { total: 3, suggested: 1, conflict: 1, unmatched: 1, ineligible: 0, confirmed: 0 },
@@ -61,6 +61,12 @@ describe("MatchingPage", () => {
     await screen.findByText("INV-A")
 
     expect(screen.getByText("全部状态")).toBeInTheDocument()
+  })
+
+  it("shows the dedicated suspected-repurchase conflict reason", async () => {
+    render(<MatchingPage refreshToken="0:0" />)
+
+    expect(await screen.findByText("疑似回购冲突：订单 2 条，发票 3 张，数量不一致")).toBeInTheDocument()
   })
 
   it("bulk confirms checked conflict-free suggestions", async () => {
