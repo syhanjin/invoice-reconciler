@@ -25,6 +25,8 @@ const settings: AppSettings = {
   openaiApiKeyMasked: "sk-****1234",
   openaiApiKeyConfigured: true,
   orderRecognitionMaxConcurrency: 3,
+  summaryGenerationMode: "automatic",
+  summaryGenerationMaxConcurrency: 1,
   tencentSecretIdMasked: "AKID****7890",
   tencentCredentialsConfigured: true,
   invoiceOcrConcurrency: 3,
@@ -114,6 +116,22 @@ describe("SettingsPage", () => {
     await waitFor(() => expect(mocks.checkLlm).toHaveBeenCalledWith(expect.objectContaining({
       llmProvider: "ollama",
       orderRecognitionMaxConcurrency: 3,
+    })))
+  })
+
+  it("saves manual summary generation with its own concurrency", async () => {
+    const user = userEvent.setup()
+    render(<SettingsPage settings={settings} onSettingsChange={vi.fn()} />)
+
+    await user.click(screen.getByRole("button", { name: "手动" }))
+    const concurrency = screen.getByRole("spinbutton", { name: "摘要生成最大同时请求数" })
+    await user.clear(concurrency)
+    await user.type(concurrency, "4")
+    await user.click(screen.getByRole("button", { name: "保存全部设置" }))
+
+    await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledWith(expect.objectContaining({
+      summaryGenerationMode: "manual",
+      summaryGenerationMaxConcurrency: 4,
     })))
   })
 })

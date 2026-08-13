@@ -6,6 +6,7 @@ import {
   FileKey2,
   GitCompareArrows,
   MessageSquareText,
+  Sparkles,
   LoaderCircle,
   PlugZap,
   Save,
@@ -40,6 +41,8 @@ const settingsSchema = z.object({
   openaiApiKey: z.string().trim().max(500),
   clearOpenaiApiKey: z.boolean(),
   orderRecognitionMaxConcurrency: z.number().int().min(1).max(8),
+  summaryGenerationMode: z.enum(["automatic", "manual"]),
+  summaryGenerationMaxConcurrency: z.number().int().min(1).max(8),
   tencentSecretId: z.string().trim().max(200),
   tencentSecretKey: z.string().trim().max(200),
   clearTencentCredentials: z.boolean(),
@@ -214,6 +217,26 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
         <Card className="rounded-md shadow-none">
           <CardHeader>
             <div className="flex items-center gap-3">
+              <div className="flex size-9 items-center justify-center rounded-md bg-zinc-100"><Sparkles className="size-4" /></div>
+              <div><CardTitle className="text-base">摘要生成</CardTitle><CardDescription>使用当前模型为已确认订单组合生成商品摘要</CardDescription></div>
+            </div>
+          </CardHeader>
+          <CardContent className="grid gap-5 sm:grid-cols-[minmax(0,1fr)_180px]">
+            <Field label="生成方式">
+              <div className="inline-flex w-fit rounded-md border p-1">
+                <Button type="button" size="sm" aria-pressed={form.watch("summaryGenerationMode") === "automatic"} variant={form.watch("summaryGenerationMode") === "automatic" ? "secondary" : "ghost"} onClick={() => form.setValue("summaryGenerationMode", "automatic", { shouldDirty: true })}>自动</Button>
+                <Button type="button" size="sm" aria-pressed={form.watch("summaryGenerationMode") === "manual"} variant={form.watch("summaryGenerationMode") === "manual" ? "secondary" : "ghost"} onClick={() => form.setValue("summaryGenerationMode", "manual", { shouldDirty: true })}>手动</Button>
+              </div>
+            </Field>
+            <Field label="最大同时请求数" error={form.formState.errors.summaryGenerationMaxConcurrency?.message}>
+              <Input type="number" min={1} max={8} className="w-28" aria-label="摘要生成最大同时请求数" {...form.register("summaryGenerationMaxConcurrency", { valueAsNumber: true })} />
+            </Field>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-md shadow-none">
+          <CardHeader>
+            <div className="flex items-center gap-3">
               <div className="flex size-9 items-center justify-center rounded-md bg-zinc-100"><GitCompareArrows className="size-4" /></div>
               <div><CardTitle className="text-base">自动匹配</CardTitle><CardDescription>限制多订单候选组合的搜索规模</CardDescription></div>
             </div>
@@ -287,6 +310,8 @@ function requestFrom(values: SettingsForm): SaveSettingsRequest {
     openaiApiKey: values.openaiApiKey || null,
     clearOpenaiApiKey: values.clearOpenaiApiKey,
     orderRecognitionMaxConcurrency: values.orderRecognitionMaxConcurrency,
+    summaryGenerationMode: values.summaryGenerationMode,
+    summaryGenerationMaxConcurrency: values.summaryGenerationMaxConcurrency,
     tencentSecretId: values.tencentSecretId || null,
     tencentSecretKey: values.tencentSecretKey || null,
     clearTencentCredentials: values.clearTencentCredentials,
@@ -306,6 +331,8 @@ function formValues(settings: AppSettings): SettingsForm {
     openaiApiKey: "",
     clearOpenaiApiKey: false,
     orderRecognitionMaxConcurrency: settings.orderRecognitionMaxConcurrency,
+    summaryGenerationMode: settings.summaryGenerationMode,
+    summaryGenerationMaxConcurrency: settings.summaryGenerationMaxConcurrency,
     tencentSecretId: "",
     tencentSecretKey: "",
     clearTencentCredentials: false,

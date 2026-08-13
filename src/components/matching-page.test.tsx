@@ -32,6 +32,7 @@ const candidate = (id: string, amount = 100) => ({
 const noSummary = {
   displayName: null,
   summaryStatus: null,
+  summarySource: null,
   summaryError: null,
   summaryProvider: null,
   summaryModel: null,
@@ -45,6 +46,7 @@ const page: MatchingPageData = {
     { ...noSummary, id: "invoice-c", invoiceNumber: "INV-C", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 120, currency: "CNY", status: "unmatched", reason: "没有满足自动规则的订单组合", candidates: [], confirmedSource: null, confirmedAt: null },
   ],
   summary: { total: 3, suggested: 1, conflict: 1, unmatched: 1, ineligible: 0, confirmed: 0 },
+  summaryCounts: { total: 0, notGenerated: 0, pending: 0, processing: 0, succeeded: 0, failed: 0 },
   total: 3,
   page: 1,
   pageSize: 50,
@@ -71,6 +73,29 @@ describe("MatchingPage", () => {
     await screen.findByText("INV-A")
 
     expect(screen.getByText("全部状态")).toBeInTheDocument()
+  })
+
+  it("limits concrete summary filters to confirmed matches", async () => {
+    const user = userEvent.setup()
+    render(<MatchingPage refreshToken="0:0" />)
+    await screen.findByText("INV-A")
+
+    await user.click(screen.getAllByRole("combobox")[1])
+    await user.click(screen.getByRole("option", { name: "摘要失败" }))
+
+    await waitFor(() => expect(mocks.getMatchingPage).toHaveBeenLastCalledWith(expect.objectContaining({
+      status: "confirmed",
+      summaryStatus: "failed",
+    })))
+
+    await waitFor(() => expect(screen.getAllByRole("combobox")[1]).toHaveAttribute("aria-expanded", "false"))
+    const statusSelect = screen.getAllByRole("combobox")[0]
+    await user.click(statusSelect)
+    await user.click(await screen.findByRole("option", { name: "冲突" }))
+    await waitFor(() => expect(mocks.getMatchingPage).toHaveBeenLastCalledWith(expect.objectContaining({
+      status: "conflict",
+      summaryStatus: "all",
+    })))
   })
 
   it("shows the dedicated suspected-repurchase conflict reason", async () => {
@@ -153,6 +178,7 @@ describe("MatchingPage", () => {
         confirmedAt: "2026-08-13T00:00:00Z",
       }],
       summary: { total: 1, suggested: 0, conflict: 0, unmatched: 0, ineligible: 0, confirmed: 1 },
+      summaryCounts: { total: 1, notGenerated: 0, pending: 0, processing: 0, succeeded: 0, failed: 1 },
       total: 1,
     })
     mocks.retryMatchSummary.mockResolvedValue(undefined)

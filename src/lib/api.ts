@@ -36,6 +36,10 @@ import type {
   ProjectDetail,
   ProjectsPageData,
   ProjectsQuery,
+  MatchSummariesPage,
+  MatchSummariesQuery,
+  MatchSummaryAttemptsPage,
+  MatchSummaryAttemptsQuery,
 } from "@/lib/types"
 
 export const api = {
@@ -96,6 +100,16 @@ export const api = {
     invoke<void>("unconfirm_invoice_match", { request: { id } }),
   retryMatchSummary: (id: string) =>
     invoke<void>("retry_match_summary", { request: { id } }),
+  listMatchSummaries: (query: MatchSummariesQuery) =>
+    invoke<MatchSummariesPage>("list_match_summaries", { query }),
+  listMatchSummaryAttempts: (query: MatchSummaryAttemptsQuery) =>
+    invoke<MatchSummaryAttemptsPage>("list_match_summary_attempts", { query }),
+  enqueueMatchSummary: (id: string) =>
+    invoke<void>("enqueue_match_summary", { request: { id } }),
+  enqueueAllMatchSummaries: () =>
+    invoke<number>("enqueue_all_match_summaries"),
+  updateMatchSummary: (invoiceId: string, displayName: string) =>
+    invoke<void>("update_match_summary", { request: { invoiceId, displayName } }),
   listProjects: (query: ProjectsQuery) =>
     invoke<ProjectsPageData>("list_projects", { query }),
   getProject: (id: string) =>

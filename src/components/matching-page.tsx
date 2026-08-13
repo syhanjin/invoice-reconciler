@@ -56,11 +56,13 @@ import type {
   MatchingInvoiceItem,
   MatchingPageData,
   MatchingStatus,
+  MatchSummaryStatus,
 } from "@/lib/types"
 
 const emptyPage: MatchingPageData = {
   items: [],
   summary: { total: 0, suggested: 0, conflict: 0, unmatched: 0, ineligible: 0, confirmed: 0 },
+  summaryCounts: { total: 0, notGenerated: 0, pending: 0, processing: 0, succeeded: 0, failed: 0 },
   total: 0,
   page: 1,
   pageSize: 50,
@@ -74,11 +76,20 @@ const statusOptions: { value: MatchingStatus | "all"; label: string }[] = [
   { value: "ineligible", label: "不参与匹配" },
   { value: "confirmed", label: "已确认" },
 ]
+const summaryStatusOptions: { value: MatchSummaryStatus | "all"; label: string }[] = [
+  { value: "all", label: "全部摘要" },
+  { value: "not_generated", label: "摘要未生成" },
+  { value: "pending", label: "摘要待生成" },
+  { value: "processing", label: "摘要生成中" },
+  { value: "succeeded", label: "摘要已完成" },
+  { value: "failed", label: "摘要失败" },
+]
 
 export function MatchingPage({ refreshToken }: { refreshToken: string }) {
   const [data, setData] = useState<MatchingPageData>(emptyPage)
   const [page, setPage] = useState(1)
   const [status, setStatus] = useState<MatchingStatus | "all">("all")
+  const [summaryStatus, setSummaryStatus] = useState<MatchSummaryStatus | "all">("all")
   const [draftSearch, setDraftSearch] = useState("")
   const [search, setSearch] = useState("")
   const [loading, setLoading] = useState(true)
@@ -91,7 +102,7 @@ export function MatchingPage({ refreshToken }: { refreshToken: string }) {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const next = await api.getMatchingPage({ page, pageSize: 50, search, status })
+      const next = await api.getMatchingPage({ page, pageSize: 50, search, status, summaryStatus })
       if (next.items.length === 0 && next.total > 0 && page > 1) {
         setPage(Math.max(1, Math.ceil(next.total / 50)))
         return
@@ -103,7 +114,7 @@ export function MatchingPage({ refreshToken }: { refreshToken: string }) {
     } finally {
       setLoading(false)
     }
-  }, [page, search, status])
+  }, [page, search, status, summaryStatus])
 
   useEffect(() => { void load() }, [load, refreshToken])
 
@@ -197,9 +208,13 @@ export function MatchingPage({ refreshToken }: { refreshToken: string }) {
           <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
           <Input className="h-9 pl-8" value={draftSearch} onChange={(event) => setDraftSearch(event.target.value)} placeholder="搜索发票号码、销售方或票种" />
         </form>
-        <Select value={status} onValueChange={(value) => { setPage(1); setStatus(value as MatchingStatus | "all"); setSelectedSuggestions([]) }}>
+        <Select value={status} onValueChange={(value) => { const next = value as MatchingStatus | "all"; setPage(1); setStatus(next); if (next !== "confirmed") setSummaryStatus("all"); setSelectedSuggestions([]) }}>
           <SelectTrigger className="w-40"><SelectValue>{statusOptions.find((option) => option.value === status)?.label}</SelectValue></SelectTrigger>
           <SelectContent>{statusOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+        </Select>
+        <Select value={summaryStatus} onValueChange={(value) => { const next = value as MatchSummaryStatus | "all"; setPage(1); setSummaryStatus(next); if (next !== "all") setStatus("confirmed"); setSelectedSuggestions([]) }}>
+          <SelectTrigger className="w-40"><SelectValue>{summaryStatusOptions.find((option) => option.value === summaryStatus)?.label}</SelectValue></SelectTrigger>
+          <SelectContent>{summaryStatusOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
         </Select>
         {selectedSuggestions.length > 0 && <Button size="sm" disabled={submitting} onClick={() => void confirmSelected()}>{submitting ? <LoaderCircle className="animate-spin" /> : <Check />}确认选中的 {selectedSuggestions.length} 项</Button>}
         <span className="ml-auto text-xs text-muted-foreground">第 {data.page} / {totalPages} 页</span>
@@ -266,7 +281,7 @@ function MatchingRow({ item, selected, disabled, onSelected, onOpenInvoice, onOp
       </div>
       <div className="min-h-32 p-4">
         {candidate ? <>
-          {item.status === "confirmed" && <div className="mb-3 flex min-h-7 items-center gap-2"><Sparkles className="size-4 text-emerald-700" /><span className="min-w-0 flex-1 truncate text-sm font-medium">{item.displayName ?? "订单组合"}</span>{item.summaryStatus === "pending" && <Badge variant="secondary">待生成</Badge>}{item.summaryStatus === "processing" && <Badge variant="secondary"><LoaderCircle className="animate-spin" />生成中</Badge>}{item.summaryStatus === "failed" && <Tooltip><TooltipTrigger render={<Button type="button" size="icon-xs" variant="outline" aria-label={`重试商品摘要 ${item.invoiceNumber ?? item.id}`} disabled={disabled} onClick={onRetrySummary} />}><RefreshCw /></TooltipTrigger><TooltipContent>{item.summaryError ?? "商品摘要生成失败，点击重试"}</TooltipContent></Tooltip>}</div>}
+          {item.status === "confirmed" && <div className="mb-3 flex min-h-7 items-center gap-2"><Sparkles className="size-4 text-emerald-700" /><span className="min-w-0 flex-1 truncate text-sm font-medium">{item.displayName ?? "订单组合"}</span>{item.summaryStatus === "not_generated" && <Badge variant="outline">未生成</Badge>}{item.summaryStatus === "pending" && <Badge variant="secondary">待生成</Badge>}{item.summaryStatus === "processing" && <Badge variant="secondary"><LoaderCircle className="animate-spin" />生成中</Badge>}{item.summaryStatus === "succeeded" && <Badge variant="outline">{item.summarySource === "manual" ? "人工" : "已完成"}</Badge>}{item.summaryStatus === "failed" && <Tooltip><TooltipTrigger render={<Button type="button" size="icon-xs" variant="outline" aria-label={`重试商品摘要 ${item.invoiceNumber ?? item.id}`} disabled={disabled} onClick={onRetrySummary} />}><RefreshCw /></TooltipTrigger><TooltipContent>{item.summaryError ?? "商品摘要生成失败，点击重试"}</TooltipContent></Tooltip>}</div>}
           {item.candidates.length > 1 && <div className="mb-3 flex flex-wrap gap-2">{item.candidates.map((value, index) => <Button key={value.orderIds.join(":")} size="xs" variant={index === candidateIndex ? "default" : "outline"} onClick={() => setCandidateIndex(index)}>组合 {index + 1}</Button>)}</div>}
           <div className="divide-y border">{candidate.orders.map((order) => <button type="button" key={order.id} className="grid w-full grid-cols-[minmax(150px,1fr)_130px_110px] gap-3 px-3 py-2 text-left text-xs hover:bg-zinc-50" onClick={() => onOpenOrder(order.id)}><span className="truncate"><strong className="font-medium">{order.externalOrderNumber ?? order.id}</strong><span className="ml-2 text-muted-foreground">{order.productSummary}</span></span><span className="truncate">{order.shopName ?? "-"}</span><span className="text-right tabular-nums">{money(order.paidAmountFen)}</span></button>)}</div>
           <div className="mt-3 flex items-center justify-between"><span className="text-xs text-muted-foreground">{candidate.orders.length} 张订单，合计 {money(candidate.totalFen)}</span><div className="flex gap-2">{item.status !== "confirmed" && item.status !== "ineligible" && <Button size="sm" variant="outline" onClick={onCustom}><Settings2 />自定义</Button>}{item.status !== "confirmed" && <Button size="sm" disabled={disabled} onClick={() => onConfirm(candidate)}><Check />确认组合</Button>}{item.status === "confirmed" && <Button size="sm" variant="outline" disabled={disabled} onClick={onUnconfirm}><Unlink />撤销确认</Button>}</div></div>

@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 
 import { InvoiceTasksTab } from "@/components/invoice-tasks-tab"
+import { SummaryTasksTab } from "@/components/summary-tasks-tab"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -67,7 +68,7 @@ export default function ImportTasksPage({
       <header className="flex min-h-20 shrink-0 items-center border-b bg-white px-6">
         <div>
           <h1 className="text-lg font-semibold">导入任务</h1>
-          <p className="mt-1 text-xs text-muted-foreground">管理订单识别池与发票导入记录</p>
+          <p className="mt-1 text-xs text-muted-foreground">管理订单识别、发票导入与商品摘要任务</p>
         </div>
       </header>
       <Tabs defaultValue="orders" className="min-h-0 flex-1 gap-0">
@@ -75,6 +76,7 @@ export default function ImportTasksPage({
           <TabsList variant="line" className="h-11">
             <TabsTrigger value="orders" className="min-w-20">订单</TabsTrigger>
             <TabsTrigger value="invoices" className="min-w-20">发票</TabsTrigger>
+            <TabsTrigger value="summaries" className="min-w-24">摘要生成</TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value="orders" className="min-h-0 bg-zinc-100">
@@ -87,6 +89,9 @@ export default function ImportTasksPage({
             onSelectedBatchChange={onSelectedInvoiceBatchChange}
             onBatchChange={onInvoiceBatchChange}
           />
+        </TabsContent>
+        <TabsContent value="summaries" className="min-h-0 bg-zinc-100">
+          <SummaryTasksTab />
         </TabsContent>
       </Tabs>
     </div>

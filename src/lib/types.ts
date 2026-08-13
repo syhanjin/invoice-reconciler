@@ -9,6 +9,8 @@ export interface AppSettings {
   openaiApiKeyMasked: string | null
   openaiApiKeyConfigured: boolean
   orderRecognitionMaxConcurrency: number
+  summaryGenerationMode: SummaryGenerationMode
+  summaryGenerationMaxConcurrency: number
   tencentSecretIdMasked: string | null
   tencentCredentialsConfigured: boolean
   invoiceOcrConcurrency: number
@@ -27,6 +29,8 @@ export interface SaveSettingsRequest {
   openaiApiKey: string | null
   clearOpenaiApiKey: boolean
   orderRecognitionMaxConcurrency: number
+  summaryGenerationMode: SummaryGenerationMode
+  summaryGenerationMaxConcurrency: number
   tencentSecretId: string | null
   tencentSecretKey: string | null
   clearTencentCredentials: boolean
@@ -36,6 +40,7 @@ export interface SaveSettingsRequest {
 }
 
 export type LlmProvider = "ollama" | "openai"
+export type SummaryGenerationMode = "automatic" | "manual"
 
 export type OrderImportTaskStatus =
   | "pending"
@@ -451,13 +456,23 @@ export interface MatchingInvoiceItem {
   confirmedAt: string | null
   displayName: string | null
   summaryStatus: MatchSummaryStatus | null
+  summarySource: "generated" | "manual" | null
   summaryError: string | null
   summaryProvider: string | null
   summaryModel: string | null
   summaryGeneratedAt: string | null
 }
 
-export type MatchSummaryStatus = "pending" | "processing" | "succeeded" | "failed"
+export type MatchSummaryStatus = "not_generated" | "pending" | "processing" | "succeeded" | "failed"
+
+export interface MatchSummaryCounts {
+  total: number
+  notGenerated: number
+  pending: number
+  processing: number
+  succeeded: number
+  failed: number
+}
 
 export interface MatchingSummary {
   total: number
@@ -471,6 +486,7 @@ export interface MatchingSummary {
 export interface MatchingPageData {
   items: MatchingInvoiceItem[]
   summary: MatchingSummary
+  summaryCounts: MatchSummaryCounts
   total: number
   page: number
   pageSize: number
@@ -481,6 +497,7 @@ export interface MatchingQuery {
   pageSize?: number
   search?: string
   status?: MatchingStatus | "all"
+  summaryStatus?: MatchSummaryStatus | "all"
 }
 
 export interface MatchableOrderItem {
@@ -544,6 +561,8 @@ export interface ProjectSummary {
   invoiceCount: number
   confirmedCount: number
   unconfirmedCount: number
+  summaryStatus: "not_applicable" | "not_generated" | "processing" | "failed" | "succeeded"
+  summaryCounts: MatchSummaryCounts
   actualAmountFen: number
   exportable: boolean
   blockingReason: string | null
@@ -570,6 +589,7 @@ export interface ProjectInvoiceMember {
   id: string
   displayName: string
   summaryStatus: MatchSummaryStatus | null
+  summarySource: "generated" | "manual" | null
   summaryError: string | null
   summaryProvider: string | null
   summaryModel: string | null
@@ -597,6 +617,90 @@ export interface ProjectInvoiceMember {
 
 export interface ProjectDetail extends ProjectSummary {
   invoices: ProjectInvoiceMember[]
+}
+
+export interface MatchSummaryListItem {
+  invoiceId: string
+  invoiceNumber: string | null
+  sellerName: string | null
+  projectName: string | null
+  displayName: string
+  summaryStatus: MatchSummaryStatus
+  summarySource: "generated" | "manual" | null
+  summaryError: string | null
+  summaryProvider: string | null
+  summaryModel: string | null
+  summaryGeneratedAt: string | null
+  confirmedAt: string
+}
+
+export interface MatchSummariesQuery {
+  page?: number
+  pageSize?: number
+  search?: string
+  status?: MatchSummaryStatus | "all"
+}
+
+export interface MatchSummariesPage {
+  items: MatchSummaryListItem[]
+  counts: MatchSummaryCounts
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface MatchSummaryInputInvoiceItem {
+  name: string
+  specification: string | null
+  unit: string | null
+  quantity: string | null
+  unitPriceFen: number | null
+  amountFen: number | null
+  taxRate: string | null
+  taxFen: number | null
+}
+
+export interface MatchSummaryInputOrder {
+  shopName: string | null
+  productNames: string[]
+}
+
+export interface MatchSummaryInput {
+  sellerName: string | null
+  invoiceItems: MatchSummaryInputInvoiceItem[]
+  orders: MatchSummaryInputOrder[]
+}
+
+export type MatchSummaryAttemptStatus = "processing" | "succeeded" | "failed" | "interrupted" | "discarded" | "manual_edit"
+
+export interface MatchSummaryAttemptItem {
+  id: string
+  invoiceId: string
+  invoiceNumber: string | null
+  input: MatchSummaryInput
+  trigger: string
+  provider: string | null
+  model: string | null
+  status: MatchSummaryAttemptStatus
+  resultSummary: string | null
+  errorMessage: string | null
+  startedAt: string
+  completedAt: string | null
+}
+
+export interface MatchSummaryAttemptsQuery {
+  invoiceId?: string
+  page?: number
+  pageSize?: number
+  search?: string
+  status?: MatchSummaryAttemptStatus | "all"
+}
+
+export interface MatchSummaryAttemptsPage {
+  items: MatchSummaryAttemptItem[]
+  total: number
+  page: number
+  pageSize: number
 }
 
 export interface InvoiceProjectConflict {
