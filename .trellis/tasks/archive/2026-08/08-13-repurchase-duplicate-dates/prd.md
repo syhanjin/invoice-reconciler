@@ -15,11 +15,11 @@
 
 ## Acceptance Criteria
 
-- [ ] 开票日期重复、购买日期重复或两侧均重复时，数量相等且日期完整的回购组可生成确定、互斥的建议。
-- [ ] 同一数据重复计算产生相同的 ID 配对结果。
-- [ ] 重复日期建议可通过自动确认重校验和原子批量确认。
-- [ ] 缺失日期、数量不一致及购买日期晚于配对发票日期仍产生疑似回购冲突。
-- [ ] 相关 Rust 测试、格式检查和 Clippy 通过。
+- [x] 开票日期重复、购买日期重复或两侧均重复时，数量相等且日期完整的回购组可生成确定、互斥的建议。
+- [x] 同一数据重复计算产生相同的 ID 配对结果。
+- [x] 重复日期建议可通过自动确认重校验和原子批量确认。
+- [x] 缺失日期、数量不一致及购买日期晚于配对发票日期仍产生疑似回购冲突。
+- [x] 相关 Rust 测试、格式检查和 Clippy 通过。
 
 ## Technical Approach
 
@@ -35,5 +35,5 @@
 
 ## Technical Notes
 
-- `src-tauri/src/matching.rs` 当前包含 `ledger-status-project-archive` 任务的未提交改动；实现需在现有内容上追加，提交时只暂存本任务补丁。
+- `ledger-status-project-archive` 已归档并提交；本任务从干净的 `matching.rs` 基线继续。
 - 相关规范：`.trellis/spec/backend/order-invoice-matching-contract.md` 和 `AGENTS.md`。
