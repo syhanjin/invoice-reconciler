@@ -511,6 +511,7 @@ pub mod project {
         pub name: String,
         pub created_at: String,
         pub updated_at: String,
+        pub archived_at: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

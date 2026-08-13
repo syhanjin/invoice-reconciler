@@ -112,6 +112,9 @@ export interface OrderListItem {
   createdAt: string
   productSummary: string
   productCount: number
+  matchStatus: LedgerMatchStatus
+  projectId: string | null
+  projectName: string | null
 }
 
 export interface OrdersPage {
@@ -140,6 +143,9 @@ export interface OrdersQuery {
   pageSize?: number
   search?: string
   duplicateOnly?: boolean
+  matchStatus?: LedgerMatchStatus
+  projectStatus?: ProjectMembershipStatus
+  projectId?: string
   sortBy?: OrderSortBy
   sortDirection?: SortDirection
 }
@@ -154,6 +160,11 @@ export type OrderTableColumnId =
   | "orderedAt"
   | "createdAt"
   | "platform"
+  | "matchStatus"
+  | "projectName"
+
+export type LedgerMatchStatus = "unmatched" | "matched" | "confirmed"
+export type ProjectMembershipStatus = "assigned" | "unassigned"
 
 export interface OrderTablePreferences {
   pageSize: number
@@ -308,8 +319,9 @@ export interface InvoicesQuery {
   dateFrom?: string
   dateTo?: string
   duplicateOnly?: boolean
+  matchStatus?: LedgerMatchStatus
+  projectStatus?: ProjectMembershipStatus
   projectId?: string
-  unassignedOnly?: boolean
   sortBy?: InvoiceSortBy
   sortDirection?: SortDirection
 }
@@ -330,6 +342,7 @@ export interface InvoiceListItem {
   createdAt: string
   projectId: string | null
   projectName: string | null
+  matchStatus: LedgerMatchStatus
 }
 
 export interface InvoicesPage {
@@ -509,6 +522,7 @@ export interface ProjectsQuery {
   page?: number
   pageSize?: number
   search?: string
+  archived?: boolean
 }
 
 export interface ProjectSummary {
@@ -522,6 +536,7 @@ export interface ProjectSummary {
   blockingReason: string | null
   createdAt: string
   updatedAt: string
+  archivedAt: string | null
 }
 
 export interface ProjectsPageData {

@@ -99,10 +99,16 @@ export const api = {
     invoke<ProjectDetail>("get_project", { request: { id } }),
   createProject: (name: string) =>
     invoke<ProjectDetail>("create_project", { request: { name } }),
+  createProjectAndAssignInvoices: (name: string, invoiceIds: string[]) =>
+    invoke<ProjectDetail>("create_project_and_assign_invoices", { request: { name, invoiceIds } }),
   renameProject: (id: string, name: string) =>
     invoke<ProjectDetail>("rename_project", { request: { id, name } }),
   deleteProject: (id: string) =>
     invoke<void>("delete_project", { request: { id } }),
+  archiveProject: (id: string) =>
+    invoke<void>("archive_project", { request: { id } }),
+  unarchiveProject: (id: string) =>
+    invoke<void>("unarchive_project", { request: { id } }),
   assignInvoicesToProject: (
     invoiceIds: string[],
     projectId: string,
@@ -110,8 +116,6 @@ export const api = {
   ) => invoke<AssignInvoicesResult>("assign_invoices_to_project", {
     request: { invoiceIds, projectId, acceptReassignment },
   }),
-  removeInvoicesFromProjects: (invoiceIds: string[]) =>
-    invoke<void>("remove_invoices_from_projects", { request: { invoiceIds } }),
   reorderProjectInvoices: (projectId: string, invoiceIds: string[]) =>
     invoke<ProjectDetail>("reorder_project_invoices", { request: { projectId, invoiceIds } }),
   exportProject: (id: string, outputDirectory: string, overwrite: boolean) =>

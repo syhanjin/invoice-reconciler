@@ -65,13 +65,18 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - Order/invoice matching computes ephemeral candidates and persists only explicit
   confirmations. Preserve exact-fen/CNY rules, missing-date comparison semantics,
   global order uniqueness, atomic batch confirmation, and matched edit/delete guards.
+  Ledger match state is a shared global projection: `confirmed` is durable,
+  `matched` is one conflict-free automatic candidate, and all other unconfirmed
+  records are `unmatched`; never derive it from one paged result.
   Suspected repurchases group orders by amount/normalized shop and invoices by
   amount/normalized seller/subtype, then pair only complete unique dates with equal
   counts; otherwise retain a `疑似回购冲突`. Custom selection omits confirmed orders.
 - Projects own ordered invoice membership only; one invoice belongs to at most one
   project. Preserve transactional reassignment, position compaction after membership
   or invoice deletion, and project deletion without deleting invoices, matches, files,
-  or orders.
+  or orders. Archiving preserves the complete durable project graph and export, rejects
+  name/order/membership mutations, and hides associated invoices and confirmed orders
+  from order, invoice, and matching workspaces until unarchive.
 - Project export is regenerated from current durable state and is allowed only when
   every member has a valid confirmed match, CNY/non-negative amounts, and readable
   independent invoice/order files. Keep money in integer fen, compute actual amount as

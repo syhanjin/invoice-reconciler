@@ -16,10 +16,10 @@ use crate::error::{AppError, AppResult, CommandResult};
 use crate::files::resolve_managed_path;
 use crate::invoice_files::resolve_invoice_path;
 use crate::models::{
-    AssignInvoicesResult, AssignInvoicesToProjectRequest, IdRequest, InvoiceIdsRequest,
-    InvoiceProjectConflict, ProjectDetail, ProjectInvoiceMember, ProjectNameRequest,
-    ProjectOrderSummary, ProjectSummary, ProjectsPage, ProjectsQuery, RenameProjectRequest,
-    ReorderProjectInvoicesRequest,
+    AssignInvoicesResult, AssignInvoicesToProjectRequest, CreateProjectAndAssignInvoicesRequest,
+    IdRequest, InvoiceIdsRequest, InvoiceProjectConflict, ProjectDetail, ProjectInvoiceMember,
+    ProjectNameRequest, ProjectOrderSummary, ProjectSummary, ProjectsPage, ProjectsQuery,
+    RenameProjectRequest, ReorderProjectInvoicesRequest,
 };
 
 #[derive(Clone, Debug, FromQueryResult)]
@@ -77,6 +77,7 @@ pub(crate) struct ProjectExportSnapshot {
     pub name: String,
     pub created_at: String,
     pub updated_at: String,
+    pub archived_at: Option<String>,
     pub invoices: Vec<ProjectExportInvoice>,
 }
 
@@ -92,6 +93,7 @@ impl ProjectExportSnapshot {
             self.name,
             self.created_at,
             self.updated_at,
+            self.archived_at,
             invoices,
         )
     }
@@ -109,7 +111,11 @@ impl Database {
             .search
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let mut finder = project::Entity::find();
+        let mut finder = project::Entity::find().filter(if query.archived.unwrap_or(false) {
+            project::Column::ArchivedAt.is_not_null()
+        } else {
+            project::Column::ArchivedAt.is_null()
+        });
         if let Some(search) = &search {
             finder = finder.filter(project::Column::Name.contains(search));
         }
@@ -278,6 +284,7 @@ impl Database {
             name: project_value.name,
             created_at: project_value.created_at,
             updated_at: project_value.updated_at,
+            archived_at: project_value.archived_at,
             invoices,
         })
     }
@@ -299,6 +306,7 @@ impl Database {
             name: Set(name),
             created_at: Set(timestamp.clone()),
             updated_at: Set(timestamp),
+            archived_at: Set(None),
         }
         .insert(&self.connection)
         .await
@@ -326,6 +334,9 @@ impl Database {
             .one(&self.connection)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("项目 {id}")))?;
+        if value.archived_at.is_some() {
+            return Err(AppError::InvalidInput("归档项目不能重命名".into()));
+        }
         let mut active: project::ActiveModel = value.into();
         active.name = Set(name);
         active.updated_at = Set(now());
@@ -346,22 +357,81 @@ impl Database {
         Ok(())
     }
 
+    pub async fn set_project_archived(&self, id: &str, archived: bool) -> AppResult<()> {
+        let value = project::Entity::find_by_id(id)
+            .one(&self.connection)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("项目 {id}")))?;
+        if value.archived_at.is_some() == archived {
+            return Ok(());
+        }
+        let mut active: project::ActiveModel = value.into();
+        active.archived_at = Set(archived.then(now));
+        active.updated_at = Set(now());
+        active.update(&self.connection).await?;
+        Ok(())
+    }
+
+    pub async fn create_project_and_assign_invoices(
+        &self,
+        request: CreateProjectAndAssignInvoicesRequest,
+        app_data: &Path,
+    ) -> AppResult<ProjectDetail> {
+        let name = validate_project_name(&request.name)?;
+        let invoice_ids = validate_invoice_ids(request.invoice_ids)?;
+        let transaction = self.connection.begin().await?;
+        if project::Entity::find()
+            .filter(project::Column::Name.eq(&name))
+            .one(&transaction)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::InvalidInput("项目名称已存在".into()));
+        }
+        ensure_invoices_exist(&transaction, &invoice_ids).await?;
+        if project_invoice::Entity::find()
+            .filter(project_invoice::Column::InvoiceId.is_in(invoice_ids.clone()))
+            .count(&transaction)
+            .await?
+            > 0
+        {
+            return Err(AppError::InvalidInput(
+                "所选发票已有项目归属，请刷新后重试".into(),
+            ));
+        }
+        let id = Uuid::now_v7().to_string();
+        let timestamp = now();
+        project::ActiveModel {
+            id: Set(id.clone()),
+            name: Set(name),
+            created_at: Set(timestamp.clone()),
+            updated_at: Set(timestamp),
+            archived_at: Set(None),
+        }
+        .insert(&transaction)
+        .await
+        .map_err(map_project_write_error)?;
+        for (position, invoice_id) in invoice_ids.into_iter().enumerate() {
+            project_invoice::ActiveModel {
+                project_id: Set(id.clone()),
+                invoice_id: Set(invoice_id),
+                position: Set(i32::try_from(position).unwrap_or(i32::MAX)),
+            }
+            .insert(&transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        self.project_detail(&id, app_data).await
+    }
+
     pub async fn assign_invoices_to_project(
         &self,
         request: AssignInvoicesToProjectRequest,
     ) -> AppResult<AssignInvoicesResult> {
         let invoice_ids = validate_invoice_ids(request.invoice_ids)?;
         let transaction = self.connection.begin().await?;
-        ensure_project_exists(&transaction, &request.project_id).await?;
-        let found = invoice::Entity::find()
-            .filter(invoice::Column::Id.is_in(invoice_ids.clone()))
-            .count(&transaction)
-            .await?;
-        if found != invoice_ids.len() as u64 {
-            return Err(AppError::InvalidInput(
-                "部分发票已不存在，请刷新后重试".into(),
-            ));
-        }
+        ensure_project_active(&transaction, &request.project_id).await?;
+        ensure_invoices_exist(&transaction, &invoice_ids).await?;
         let conflicts =
             current_project_conflicts(&transaction, &invoice_ids, &request.project_id).await?;
         if !conflicts.is_empty() && !request.accept_reassignment {
@@ -376,6 +446,7 @@ impl Database {
             .iter()
             .map(|conflict| conflict.source_project_id.clone())
             .collect::<HashSet<_>>();
+        ensure_projects_active(&transaction, &source_projects).await?;
         let existing_target = project_invoice::Entity::find()
             .filter(project_invoice::Column::ProjectId.eq(&request.project_id))
             .filter(project_invoice::Column::InvoiceId.is_in(invoice_ids.clone()))
@@ -430,6 +501,16 @@ impl Database {
             .iter()
             .map(|membership| membership.project_id.clone())
             .collect::<HashSet<_>>();
+        if !project_ids.is_empty() {
+            let archived = project::Entity::find()
+                .filter(project::Column::Id.is_in(project_ids.iter().cloned()))
+                .filter(project::Column::ArchivedAt.is_not_null())
+                .count(&transaction)
+                .await?;
+            if archived > 0 {
+                return Err(AppError::InvalidInput("归档项目不能修改成员".into()));
+            }
+        }
         project_invoice::Entity::delete_many()
             .filter(project_invoice::Column::InvoiceId.is_in(invoice_ids))
             .exec(&transaction)
@@ -449,7 +530,7 @@ impl Database {
     ) -> AppResult<ProjectDetail> {
         let invoice_ids = validate_invoice_ids_allow_empty(request.invoice_ids)?;
         let transaction = self.connection.begin().await?;
-        ensure_project_exists(&transaction, &request.project_id).await?;
+        ensure_project_active(&transaction, &request.project_id).await?;
         let existing = project_invoice::Entity::find()
             .filter(project_invoice::Column::ProjectId.eq(&request.project_id))
             .order_by_asc(project_invoice::Column::Position)
@@ -551,6 +632,7 @@ fn detail_from_members(
     name: String,
     created_at: String,
     updated_at: String,
+    archived_at: Option<String>,
     invoices: Vec<ProjectInvoiceMember>,
 ) -> ProjectDetail {
     let invoice_count = invoices.len() as i64;
@@ -584,6 +666,7 @@ fn detail_from_members(
         blocking_reason,
         created_at,
         updated_at,
+        archived_at,
         invoices,
     }
 }
@@ -600,6 +683,7 @@ fn summary_from_detail(detail: ProjectDetail) -> ProjectSummary {
         blocking_reason: detail.blocking_reason,
         created_at: detail.created_at,
         updated_at: detail.updated_at,
+        archived_at: detail.archived_at,
     }
 }
 
@@ -712,13 +796,47 @@ fn map_project_write_error(error: sea_orm::DbErr) -> AppError {
     }
 }
 
-async fn ensure_project_exists(transaction: &DatabaseTransaction, id: &str) -> AppResult<()> {
-    if project::Entity::find_by_id(id)
+async fn ensure_project_active(transaction: &DatabaseTransaction, id: &str) -> AppResult<()> {
+    let value = project::Entity::find_by_id(id)
         .one(transaction)
         .await?
-        .is_none()
-    {
-        return Err(AppError::NotFound(format!("项目 {id}")));
+        .ok_or_else(|| AppError::NotFound(format!("项目 {id}")))?;
+    if value.archived_at.is_some() {
+        return Err(AppError::InvalidInput("归档项目不能修改成员".into()));
+    }
+    Ok(())
+}
+
+async fn ensure_projects_active(
+    transaction: &DatabaseTransaction,
+    project_ids: &HashSet<String>,
+) -> AppResult<()> {
+    if project_ids.is_empty() {
+        return Ok(());
+    }
+    let archived = project::Entity::find()
+        .filter(project::Column::Id.is_in(project_ids.iter().cloned()))
+        .filter(project::Column::ArchivedAt.is_not_null())
+        .count(transaction)
+        .await?;
+    if archived > 0 {
+        return Err(AppError::InvalidInput("归档项目不能修改成员".into()));
+    }
+    Ok(())
+}
+
+async fn ensure_invoices_exist(
+    transaction: &DatabaseTransaction,
+    invoice_ids: &[String],
+) -> AppResult<()> {
+    let found = invoice::Entity::find()
+        .filter(invoice::Column::Id.is_in(invoice_ids.to_vec()))
+        .count(transaction)
+        .await?;
+    if found != invoice_ids.len() as u64 {
+        return Err(AppError::InvalidInput(
+            "部分发票已不存在，请刷新后重试".into(),
+        ));
     }
     Ok(())
 }
@@ -846,6 +964,18 @@ pub async fn create_project(
 }
 
 #[tauri::command]
+pub async fn create_project_and_assign_invoices(
+    state: State<'_, AppState>,
+    request: CreateProjectAndAssignInvoicesRequest,
+) -> CommandResult<ProjectDetail> {
+    state
+        .database
+        .create_project_and_assign_invoices(request, &state.app_data_dir)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn rename_project(
     state: State<'_, AppState>,
     request: RenameProjectRequest,
@@ -862,6 +992,27 @@ pub async fn delete_project(state: State<'_, AppState>, request: IdRequest) -> C
     state
         .database
         .delete_project(&request.id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn archive_project(state: State<'_, AppState>, request: IdRequest) -> CommandResult<()> {
+    state
+        .database
+        .set_project_archived(&request.id, true)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn unarchive_project(
+    state: State<'_, AppState>,
+    request: IdRequest,
+) -> CommandResult<()> {
+    state
+        .database
+        .set_project_archived(&request.id, false)
         .await
         .map_err(Into::into)
 }
@@ -1186,6 +1337,7 @@ mod tests {
                 "空项目".into(),
                 "now".into(),
                 "now".into(),
+                None,
                 vec![]
             )
             .blocking_reason,
@@ -1207,6 +1359,164 @@ mod tests {
                 .create_project("唯一项目".into(), app_data.path())
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_views_preserve_members_and_block_mutation() {
+        let database = Database::in_memory().await.unwrap();
+        seed(&database).await;
+        let app_data = tempfile::tempdir().unwrap();
+        let project = database
+            .create_project("待归档".into(), app_data.path())
+            .await
+            .unwrap();
+        database
+            .assign_invoices_to_project(AssignInvoicesToProjectRequest {
+                invoice_ids: vec!["invoice-a".into()],
+                project_id: project.id.clone(),
+                accept_reassignment: false,
+            })
+            .await
+            .unwrap();
+
+        database
+            .set_project_archived(&project.id, true)
+            .await
+            .unwrap();
+        let active = database
+            .projects_page(
+                ProjectsQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    archived: Some(false),
+                },
+                app_data.path(),
+            )
+            .await
+            .unwrap();
+        let archived = database
+            .projects_page(
+                ProjectsQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    archived: Some(true),
+                },
+                app_data.path(),
+            )
+            .await
+            .unwrap();
+        assert!(active.items.is_empty());
+        assert_eq!(archived.items[0].id, project.id);
+        assert_eq!(
+            database
+                .project_detail(&project.id, app_data.path())
+                .await
+                .unwrap()
+                .invoice_count,
+            1
+        );
+        assert!(
+            database
+                .rename_project(&project.id, "新名称".into(), app_data.path())
+                .await
+                .is_err()
+        );
+        assert!(
+            database
+                .reorder_project_invoices(
+                    ReorderProjectInvoicesRequest {
+                        project_id: project.id.clone(),
+                        invoice_ids: vec!["invoice-a".into()]
+                    },
+                    app_data.path()
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            database
+                .remove_invoices_from_projects(vec!["invoice-a".into()])
+                .await
+                .is_err()
+        );
+        let active_target = database
+            .create_project("进行中目标".into(), app_data.path())
+            .await
+            .unwrap();
+        assert!(
+            database
+                .assign_invoices_to_project(AssignInvoicesToProjectRequest {
+                    invoice_ids: vec!["invoice-a".into()],
+                    project_id: active_target.id,
+                    accept_reassignment: true,
+                })
+                .await
+                .is_err()
+        );
+
+        database
+            .set_project_archived(&project.id, false)
+            .await
+            .unwrap();
+        assert!(
+            database
+                .projects_page(
+                    ProjectsQuery {
+                        page: None,
+                        page_size: None,
+                        search: None,
+                        archived: Some(false)
+                    },
+                    app_data.path()
+                )
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| item.id == project.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn create_and_assign_rolls_back_when_any_invoice_is_occupied() {
+        let database = Database::in_memory().await.unwrap();
+        seed(&database).await;
+        let app_data = tempfile::tempdir().unwrap();
+        let existing = database
+            .create_project("现有项目".into(), app_data.path())
+            .await
+            .unwrap();
+        database
+            .assign_invoices_to_project(AssignInvoicesToProjectRequest {
+                invoice_ids: vec!["invoice-a".into()],
+                project_id: existing.id,
+                accept_reassignment: false,
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            database
+                .create_project_and_assign_invoices(
+                    CreateProjectAndAssignInvoicesRequest {
+                        name: "不应保留".into(),
+                        invoice_ids: vec!["invoice-a".into(), "invoice-b".into()]
+                    },
+                    app_data.path()
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            project::Entity::find()
+                .filter(project::Column::Name.eq("不应保留"))
+                .one(&database.connection)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

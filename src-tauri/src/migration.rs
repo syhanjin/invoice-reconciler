@@ -14,7 +14,60 @@ impl MigratorTrait for Migrator {
             Box::new(M0005UnifiedOrderImportPool),
             Box::new(M0006RemoveAliyunBatch),
             Box::new(M0007Projects),
+            Box::new(M0008ProjectArchival),
         ]
+    }
+}
+
+pub struct M0008ProjectArchival;
+
+#[async_trait::async_trait]
+impl MigrationName for M0008ProjectArchival {
+    fn name(&self) -> &str {
+        "m0008_project_archival"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for M0008ProjectArchival {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_column("projects", "archived_at").await? {
+            manager
+                .get_connection()
+                .execute(Statement::from_string(
+                    manager.get_database_backend(),
+                    "ALTER TABLE projects ADD COLUMN archived_at TEXT",
+                ))
+                .await?;
+        }
+        manager
+            .get_connection()
+            .execute(Statement::from_string(
+                manager.get_database_backend(),
+                "CREATE INDEX IF NOT EXISTS idx_projects_archived_updated ON projects(archived_at, updated_at DESC, id DESC)",
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute(Statement::from_string(
+                manager.get_database_backend(),
+                "DROP INDEX IF EXISTS idx_projects_archived_updated",
+            ))
+            .await?;
+        if manager.has_column("projects", "archived_at").await? {
+            manager
+                .get_connection()
+                .execute(Statement::from_string(
+                    manager.get_database_backend(),
+                    "ALTER TABLE projects DROP COLUMN archived_at",
+                ))
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -521,10 +574,10 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching', 'm0005_unified_order_import_pool', 'm0006_remove_aliyun_batch', 'm0007_projects')",
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching', 'm0005_unified_order_import_pool', 'm0006_remove_aliyun_batch', 'm0007_projects', 'm0008_project_archival')",
             )
             .await,
-            7
+            8
         );
         assert_eq!(
             scalar(
@@ -1155,6 +1208,62 @@ mod tests {
             scalar(
                 &database.connection,
                 "SELECT COUNT(*) count FROM seaql_migrations WHERE version='m0007_projects'"
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrades_projects_with_archival_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("project-archive.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(7)).await.unwrap();
+        connection
+            .execute_unprepared(
+                "INSERT INTO projects (id,name,created_at,updated_at) VALUES ('p1','项目','now','now')",
+            )
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM pragma_table_info('projects') WHERE name='archived_at'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM projects WHERE id='p1' AND archived_at IS NULL"
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn resumes_interrupted_project_archival_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume-project-archive.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(7)).await.unwrap();
+        connection
+            .execute_unprepared("ALTER TABLE projects ADD COLUMN archived_at TEXT")
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version='m0008_project_archival'"
             )
             .await,
             1

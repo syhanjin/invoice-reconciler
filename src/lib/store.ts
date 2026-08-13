@@ -26,6 +26,8 @@ const optionalColumnIds = new Set<OrderTableColumnId>([
   "orderedAt",
   "createdAt",
   "platform",
+  "matchStatus",
+  "projectName",
 ])
 const columnWidthBounds: Partial<Record<OrderTableColumnId, [number, number]>> = {
   externalOrderNumber: [170, 320],
@@ -35,6 +37,8 @@ const columnWidthBounds: Partial<Record<OrderTableColumnId, [number, number]>> =
   orderedAt: [150, 230],
   createdAt: [150, 230],
   platform: [80, 130],
+  matchStatus: [90, 130],
+  projectName: [120, 240],
 }
 
 export const defaultOrderTablePreferences: OrderTablePreferences = {
@@ -106,6 +110,7 @@ export const orderImportRefreshAtom = atom(0)
 export const activeInvoiceBatchAtom = atom<InvoiceBatchDetail | null>(null)
 export const invoicesRefreshAtom = atom(0)
 export const projectsRefreshAtom = atom(0)
+export const workspaceRefreshAtom = atom(0)
 
 export const mergeOrderImportEventAtom = atom(
   null,

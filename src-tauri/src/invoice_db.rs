@@ -576,9 +576,26 @@ impl Database {
         })
     }
 
+    #[cfg(test)]
     pub async fn list_invoices(&self, query: InvoicesQuery) -> AppResult<InvoicesPage> {
+        self.list_invoices_with_matching(
+            query,
+            usize::from(crate::models::DEFAULT_MATCH_MAX_ORDERS),
+            usize::from(crate::models::DEFAULT_MATCH_MAX_CANDIDATES),
+        )
+        .await
+    }
+
+    pub async fn list_invoices_with_matching(
+        &self,
+        query: InvoicesQuery,
+        max_orders: usize,
+        max_candidates: usize,
+    ) -> AppResult<InvoicesPage> {
         let page = query.page.unwrap_or(1).max(1);
         let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
+        let match_status = crate::db::normalized_ledger_filter(query.match_status.as_deref())?;
+        let project_status = crate::db::normalized_project_filter(query.project_status.as_deref())?;
         let mut filter = String::new();
         let mut values = Vec::<sea_orm::Value>::new();
         if let Some(search) = query
@@ -607,26 +624,15 @@ impl Database {
         if query.duplicate_only.unwrap_or(false) {
             filter.push_str(" AND i.possible_duplicate = 1");
         }
+        filter.push_str(" AND p.archived_at IS NULL");
         if let Some(project_id) = query.project_id.filter(|value| !value.trim().is_empty()) {
             filter.push_str(" AND pi.project_id = ?");
             values.push(project_id.into());
-        }
-        if query.unassigned_only.unwrap_or(false) {
+        } else if project_status == Some("assigned") {
+            filter.push_str(" AND pi.invoice_id IS NOT NULL");
+        } else if project_status == Some("unassigned") {
             filter.push_str(" AND pi.invoice_id IS NULL");
         }
-        #[derive(FromQueryResult)]
-        struct CountRow {
-            count: i64,
-        }
-        let total = CountRow::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Sqlite,
-            format!("SELECT COUNT(*) count FROM invoices i LEFT JOIN project_invoices pi ON pi.invoice_id=i.id WHERE 1=1{filter}"),
-            values.clone(),
-        ))
-        .one(&self.connection)
-        .await?
-        .map(|r| r.count)
-        .unwrap_or(0);
         let column = match query.sort_by.unwrap_or(InvoiceSort::CreatedAt) {
             InvoiceSort::InvoiceDate => "i.invoice_date",
             InvoiceSort::TotalAmount => "i.total_fen",
@@ -636,11 +642,27 @@ impl Database {
             SortDirection::Asc => "ASC",
             SortDirection::Desc => "DESC",
         };
-        values.extend([
-            i64::from(page_size).into(),
-            (i64::from(page - 1) * i64::from(page_size)).into(),
-        ]);
-        let items=InvoiceListItem::find_by_statement(Statement::from_sql_and_values(DbBackend::Sqlite,format!("SELECT i.id,i.type type_id,i.subtype,i.subtype_description,i.invoice_code,i.invoice_number,i.invoice_date,i.buyer_name,i.seller_name,i.total_fen,i.currency,i.possible_duplicate,i.created_at,pi.project_id,p.name project_name FROM invoices i LEFT JOIN project_invoices pi ON pi.invoice_id=i.id LEFT JOIN projects p ON p.id=pi.project_id WHERE 1=1{filter} ORDER BY {column} {direction},i.id DESC LIMIT ? OFFSET ?"),values)).all(&self.connection).await?;
+        let mut items=InvoiceListItem::find_by_statement(Statement::from_sql_and_values(DbBackend::Sqlite,format!("SELECT i.id,i.type type_id,i.subtype,i.subtype_description,i.invoice_code,i.invoice_number,i.invoice_date,i.buyer_name,i.seller_name,i.total_fen,i.currency,i.possible_duplicate,i.created_at,pi.project_id,p.name project_name,'' match_status FROM invoices i LEFT JOIN project_invoices pi ON pi.invoice_id=i.id LEFT JOIN projects p ON p.id=pi.project_id WHERE 1=1{filter} ORDER BY {column} {direction},i.id DESC"),values)).all(&self.connection).await?;
+        let projection = self
+            .ledger_match_projection(max_orders, max_candidates)
+            .await?;
+        for item in &mut items {
+            item.match_status = projection
+                .invoice_statuses
+                .get(&item.id)
+                .cloned()
+                .unwrap_or_else(|| "unmatched".to_owned());
+        }
+        if let Some(match_status) = match_status {
+            items.retain(|item| item.match_status == match_status);
+        }
+        let total = i64::try_from(items.len()).unwrap_or(i64::MAX);
+        let start = usize::try_from((page - 1) * page_size).unwrap_or(usize::MAX);
+        let items = items
+            .into_iter()
+            .skip(start)
+            .take(page_size as usize)
+            .collect();
         Ok(InvoicesPage {
             items,
             total,
@@ -1216,8 +1238,9 @@ mod tests {
                 date_from: None,
                 date_to: None,
                 duplicate_only: None,
+                match_status: None,
+                project_status: None,
                 project_id: None,
-                unassigned_only: None,
                 sort_by: Some(InvoiceSort::CreatedAt),
                 sort_direction: Some(SortDirection::Desc),
             })
@@ -1467,8 +1490,9 @@ mod tests {
                 date_from: None,
                 date_to: None,
                 duplicate_only: Some(true),
+                match_status: None,
+                project_status: None,
                 project_id: None,
-                unassigned_only: None,
                 sort_by: None,
                 sort_direction: None,
             })

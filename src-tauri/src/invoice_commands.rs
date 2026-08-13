@@ -506,9 +506,14 @@ pub async fn list_invoices(
     state: State<'_, AppState>,
     query: InvoicesQuery,
 ) -> CommandResult<InvoicesPage> {
+    let settings = state.settings.private().await;
     state
         .database
-        .list_invoices(query)
+        .list_invoices_with_matching(
+            query,
+            usize::from(settings.match_max_orders),
+            usize::from(settings.match_max_candidates),
+        )
         .await
         .map_err(Into::into)
 }

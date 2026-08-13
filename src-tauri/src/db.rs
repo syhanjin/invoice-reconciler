@@ -30,6 +30,28 @@ pub struct Database {
     pub(crate) connection: DatabaseConnection,
 }
 
+pub(crate) fn normalized_ledger_filter(value: Option<&str>) -> AppResult<Option<&str>> {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "all")
+    {
+        None => Ok(None),
+        Some(value @ ("unmatched" | "matched" | "confirmed")) => Ok(Some(value)),
+        Some(_) => Err(AppError::InvalidInput("匹配状态筛选无效".into())),
+    }
+}
+
+pub(crate) fn normalized_project_filter(value: Option<&str>) -> AppResult<Option<&str>> {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "all")
+    {
+        None => Ok(None),
+        Some(value @ ("assigned" | "unassigned")) => Ok(Some(value)),
+        Some(_) => Err(AppError::InvalidInput("项目状态筛选无效".into())),
+    }
+}
+
 impl Database {
     pub async fn connect(path: &Path) -> AppResult<Self> {
         if let Some(parent) = path.parent() {
@@ -277,11 +299,32 @@ impl Database {
         })
     }
 
+    #[cfg(test)]
     pub async fn list_orders(&self, query: OrdersQuery) -> AppResult<OrdersPage> {
+        self.list_orders_with_matching(
+            query,
+            usize::from(crate::models::DEFAULT_MATCH_MAX_ORDERS),
+            usize::from(crate::models::DEFAULT_MATCH_MAX_CANDIDATES),
+        )
+        .await
+    }
+
+    pub async fn list_orders_with_matching(
+        &self,
+        query: OrdersQuery,
+        max_orders: usize,
+        max_candidates: usize,
+    ) -> AppResult<OrdersPage> {
         let page = query.page.unwrap_or(1).max(1);
         let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
         let search = query.search.unwrap_or_default().trim().to_owned();
         let duplicate_only = query.duplicate_only.unwrap_or(false);
+        let match_status = normalized_ledger_filter(query.match_status.as_deref())?;
+        let project_status = normalized_project_filter(query.project_status.as_deref())?;
+        let project_id = query
+            .project_id
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
         let mut filter_sql = String::new();
         let mut filter_values: Vec<sea_orm::Value> = Vec::new();
         if !search.is_empty() {
@@ -299,20 +342,35 @@ impl Database {
         if duplicate_only {
             filter_sql.push_str(" AND o.possible_duplicate = 1");
         }
-        let count_statement = Statement::from_sql_and_values(
-            DbBackend::Sqlite,
-            format!("SELECT COUNT(*) AS count FROM orders o WHERE 1 = 1{filter_sql}"),
-            filter_values.clone(),
+        filter_sql.push_str(
+            " AND NOT EXISTS (SELECT 1 FROM invoice_match_orders amo \
+             JOIN project_invoices api ON api.invoice_id=amo.invoice_id \
+             JOIN projects ap ON ap.id=api.project_id \
+             WHERE amo.order_id=o.id AND ap.archived_at IS NOT NULL)",
         );
-        #[derive(FromQueryResult)]
-        struct CountRow {
-            count: i64,
+        if let Some(project_id) = &project_id {
+            filter_sql.push_str(
+                " AND EXISTS (SELECT 1 FROM invoice_match_orders pmo \
+                 JOIN project_invoices ppi ON ppi.invoice_id=pmo.invoice_id \
+                 JOIN projects pp ON pp.id=ppi.project_id \
+                 WHERE pmo.order_id=o.id AND ppi.project_id=? AND pp.archived_at IS NULL)",
+            );
+            filter_values.push(project_id.clone().into());
+        } else if project_status == Some("assigned") {
+            filter_sql.push_str(
+                " AND EXISTS (SELECT 1 FROM invoice_match_orders pmo \
+                 JOIN project_invoices ppi ON ppi.invoice_id=pmo.invoice_id \
+                 JOIN projects pp ON pp.id=ppi.project_id \
+                 WHERE pmo.order_id=o.id AND pp.archived_at IS NULL)",
+            );
+        } else if project_status == Some("unassigned") {
+            filter_sql.push_str(
+                " AND NOT EXISTS (SELECT 1 FROM invoice_match_orders pmo \
+                 JOIN project_invoices ppi ON ppi.invoice_id=pmo.invoice_id \
+                 JOIN projects pp ON pp.id=ppi.project_id \
+                 WHERE pmo.order_id=o.id AND pp.archived_at IS NULL)",
+            );
         }
-        let total = CountRow::find_by_statement(count_statement)
-            .one(&self.connection)
-            .await?
-            .map(|row| row.count)
-            .unwrap_or(0);
 
         let sort_column = match query.sort_by.unwrap_or(OrderSort::CreatedAt) {
             OrderSort::CreatedAt => "o.created_at",
@@ -324,11 +382,6 @@ impl Database {
             SortDirection::Asc => "ASC",
             SortDirection::Desc => "DESC",
         };
-        let mut values = filter_values;
-        values.extend([
-            i64::from(page_size).into(),
-            i64::from((page - 1) * page_size).into(),
-        ]);
         let statement = Statement::from_sql_and_values(
             DbBackend::Sqlite,
             format!(
@@ -336,14 +389,43 @@ impl Database {
                  o.shop_name, o.possible_duplicate, o.created_at, \
                  COALESCE((SELECT group_concat(product_name, ' · ') FROM \
                     (SELECT product_name FROM order_items WHERE order_id = o.id ORDER BY position LIMIT 2)), '') AS product_summary, \
-                 (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) AS product_count \
-                 FROM orders o WHERE 1 = 1{filter_sql} ORDER BY {sort_column} {direction}, o.id DESC LIMIT ? OFFSET ?"
+                 (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) AS product_count, \
+                 '' AS match_status, \
+                 (SELECT ppi.project_id FROM invoice_match_orders pmo \
+                   JOIN project_invoices ppi ON ppi.invoice_id=pmo.invoice_id \
+                   JOIN projects pp ON pp.id=ppi.project_id \
+                   WHERE pmo.order_id=o.id AND pp.archived_at IS NULL LIMIT 1) AS project_id, \
+                 (SELECT pp.name FROM invoice_match_orders pmo \
+                   JOIN project_invoices ppi ON ppi.invoice_id=pmo.invoice_id \
+                   JOIN projects pp ON pp.id=ppi.project_id \
+                   WHERE pmo.order_id=o.id AND pp.archived_at IS NULL LIMIT 1) AS project_name \
+                 FROM orders o WHERE 1 = 1{filter_sql} ORDER BY {sort_column} {direction}, o.id DESC"
             ),
-            values,
+            filter_values,
         );
-        let items = OrderListItem::find_by_statement(statement)
+        let mut items = OrderListItem::find_by_statement(statement)
             .all(&self.connection)
             .await?;
+        let projection = self
+            .ledger_match_projection(max_orders, max_candidates)
+            .await?;
+        for item in &mut items {
+            item.match_status = projection
+                .order_statuses
+                .get(&item.id)
+                .cloned()
+                .unwrap_or_else(|| "unmatched".to_owned());
+        }
+        if let Some(match_status) = match_status {
+            items.retain(|item| item.match_status == match_status);
+        }
+        let total = i64::try_from(items.len()).unwrap_or(i64::MAX);
+        let start = usize::try_from((page - 1) * page_size).unwrap_or(usize::MAX);
+        let items = items
+            .into_iter()
+            .skip(start)
+            .take(page_size as usize)
+            .collect();
         Ok(OrdersPage {
             items,
             total,
@@ -782,6 +864,9 @@ mod tests {
             page_size: Some(100),
             search: None,
             duplicate_only: None,
+            match_status: None,
+            project_status: None,
+            project_id: None,
             sort_by: Some(sort_by),
             sort_direction: Some(sort_direction),
         }
@@ -967,6 +1052,9 @@ mod tests {
                 page_size: Some(1),
                 search: Some("显示器".into()),
                 duplicate_only: Some(true),
+                match_status: None,
+                project_status: None,
+                project_id: None,
                 sort_by: Some(OrderSort::CreatedAt),
                 sort_direction: Some(SortDirection::Desc),
             })
@@ -981,6 +1069,9 @@ mod tests {
                 page_size: Some(1),
                 search: None,
                 duplicate_only: None,
+                match_status: None,
+                project_status: None,
+                project_id: None,
                 sort_by: Some(OrderSort::CreatedAt),
                 sort_direction: Some(SortDirection::Desc),
             })

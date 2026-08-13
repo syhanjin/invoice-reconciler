@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   createProject: vi.fn(),
   renameProject: vi.fn(),
   deleteProject: vi.fn(),
+  archiveProject: vi.fn(),
+  unarchiveProject: vi.fn(),
   reorderProjectInvoices: vi.fn(),
   exportProject: vi.fn(),
 }))
@@ -21,6 +23,8 @@ vi.mock("@/lib/api", () => ({
     createProject: mocks.createProject,
     renameProject: mocks.renameProject,
     deleteProject: mocks.deleteProject,
+    archiveProject: mocks.archiveProject,
+    unarchiveProject: mocks.unarchiveProject,
     reorderProjectInvoices: mocks.reorderProjectInvoices,
     exportProject: mocks.exportProject,
   },
@@ -30,7 +34,7 @@ vi.mock("@/lib/api", () => ({
 
 import { ProjectsPage } from "./projects-page"
 
-const summary = { id: "project-a", name: "差旅项目", invoiceCount: 2, confirmedCount: 2, unconfirmedCount: 0, actualAmountFen: 1800, exportable: true, blockingReason: null, createdAt: "2026-08-13T00:00:00Z", updatedAt: "2026-08-13T00:00:00Z" }
+const summary = { id: "project-a", name: "差旅项目", invoiceCount: 2, confirmedCount: 2, unconfirmedCount: 0, actualAmountFen: 1800, exportable: true, blockingReason: null, createdAt: "2026-08-13T00:00:00Z", updatedAt: "2026-08-13T00:00:00Z", archivedAt: null }
 const invoice = (id: string, number: string, position: number) => ({ id, position, typeDescription: "增值税发票", invoiceCode: null, invoiceNumber: number, invoiceDate: "2026-08-13", buyerName: null, buyerTaxId: null, sellerName: "销售方", sellerTaxId: null, amountFen: 900, taxFen: 100, invoiceAmountFen: 1000, orderAmountFen: 900, actualAmountFen: 900, currency: "CNY", confirmed: true, fileAvailable: true, blockingReason: null, orders: [{ id: `order-${id}`, externalOrderNumber: `ORDER-${id}`, paidAmountFen: 900, productNames: ["差旅用品"] }] })
 const detail = { ...summary, invoices: [invoice("invoice-a", "INV-A", 0), invoice("invoice-b", "INV-B", 1)] }
 
@@ -44,6 +48,8 @@ describe("ProjectsPage", () => {
     mocks.createProject.mockResolvedValue({ ...detail, id: "project-new", name: "新项目" })
     mocks.renameProject.mockResolvedValue({ ...detail, name: "差旅项目 2026" })
     mocks.deleteProject.mockResolvedValue(undefined)
+    mocks.archiveProject.mockResolvedValue(undefined)
+    mocks.unarchiveProject.mockResolvedValue(undefined)
     mocks.open.mockResolvedValue("/tmp/export")
     mocks.exportProject.mockResolvedValue({ path: "/tmp/export/package.zip", invoiceCount: 2, actualAmountFen: 1800 })
   })
@@ -104,5 +110,21 @@ describe("ProjectsPage", () => {
     render(<ProjectsPage refreshToken={0} />)
     expect(await screen.findByText("项目暂无发票")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: "导出材料包" })).toBeDisabled()
+  })
+
+  it("archives a project and can restore it from the archived view", async () => {
+    const user = userEvent.setup()
+    render(<ProjectsPage refreshToken={0} />)
+    await user.click(await screen.findByRole("button", { name: "归档项目" }))
+    await user.click(screen.getByRole("button", { name: "确认归档" }))
+    await waitFor(() => expect(mocks.archiveProject).toHaveBeenCalledWith("project-a"))
+
+    const archived = { ...summary, archivedAt: "2026-08-13T12:00:00Z" }
+    mocks.listProjects.mockResolvedValue({ items: [archived], total: 1, page: 1, pageSize: 20 })
+    mocks.getProject.mockResolvedValue({ ...detail, archivedAt: archived.archivedAt })
+    await user.click(screen.getByRole("button", { name: "已归档" }))
+    await user.click(await screen.findByRole("button", { name: "解除归档" }))
+    await waitFor(() => expect(mocks.unarchiveProject).toHaveBeenCalledWith("project-a"))
+    expect(screen.queryByRole("button", { name: "重命名项目" })).not.toBeInTheDocument()
   })
 })

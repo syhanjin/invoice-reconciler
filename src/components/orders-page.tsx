@@ -28,8 +28,11 @@ import {
 import { api, errorMessage } from "@/lib/api"
 import { orderTablePreferencesAtom } from "@/lib/store"
 import type {
+  LedgerMatchStatus,
   OrdersPage as OrdersPageData,
   OrderSortBy,
+  ProjectMembershipStatus,
+  ProjectSummary,
   SortDirection,
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -37,18 +40,23 @@ import { cn } from "@/lib/utils"
 interface OrdersPageProps {
   onImagesImported: () => void
   refreshToken: number
+  workspaceRefreshToken?: number
 }
 
 const emptyPage: OrdersPageData = { items: [], total: 0, page: 1, pageSize: 20 }
 const OrderSheet = lazy(() => import("@/components/order-sheet"))
 
-export function OrdersPage({ onImagesImported, refreshToken }: OrdersPageProps) {
+export function OrdersPage({ onImagesImported, refreshToken, workspaceRefreshToken = 0 }: OrdersPageProps) {
   const [orders, setOrders] = useState<OrdersPageData>(emptyPage)
   const [preferences, setPreferences] = useAtom(orderTablePreferencesAtom)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState("")
   const [committedSearch, setCommittedSearch] = useState("")
   const [duplicateOnly, setDuplicateOnly] = useState(false)
+  const [matchStatus, setMatchStatus] = useState("all")
+  const [projectStatus, setProjectStatus] = useState("all")
+  const [projectId, setProjectId] = useState("all")
+  const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [importing, setImporting] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -73,6 +81,9 @@ export function OrdersPage({ onImagesImported, refreshToken }: OrdersPageProps) 
         pageSize: preferences.pageSize,
         search: committedSearch || undefined,
         duplicateOnly,
+        matchStatus: matchStatus === "all" ? undefined : matchStatus as LedgerMatchStatus,
+        projectStatus: projectStatus === "all" ? undefined : projectStatus as ProjectMembershipStatus,
+        projectId: projectId === "all" ? undefined : projectId,
         sortBy: preferences.sortBy,
         sortDirection: preferences.sortDirection,
       })
@@ -92,9 +103,14 @@ export function OrdersPage({ onImagesImported, refreshToken }: OrdersPageProps) 
     } finally {
       if (request === refreshRef.current) setLoading(false)
     }
-  }, [clearSelection, committedSearch, duplicateOnly, page, preferences.pageSize, preferences.sortBy, preferences.sortDirection])
+  }, [clearSelection, committedSearch, duplicateOnly, matchStatus, page, preferences.pageSize, preferences.sortBy, preferences.sortDirection, projectId, projectStatus])
 
-  useEffect(() => void loadOrders(), [loadOrders, localRefreshToken, refreshToken])
+  useEffect(() => void loadOrders(), [loadOrders, localRefreshToken, refreshToken, workspaceRefreshToken])
+  useEffect(() => {
+    api.listProjects({ page: 1, pageSize: 100, archived: false })
+      .then((result) => setProjects(result.items))
+      .catch((error) => toast.error(errorMessage(error)))
+  }, [workspaceRefreshToken])
 
   useEffect(() => {
     if (!selectedOrderIds.length && !bulkDeleting) setBulkDeleteOpen(false)
@@ -246,6 +262,18 @@ export function OrdersPage({ onImagesImported, refreshToken }: OrdersPageProps) 
             </Button>
           )}
         </form>
+        <Select value={matchStatus} onValueChange={(value) => { clearSelection(); setMatchStatus(value ?? "all"); setPage(1) }}>
+          <SelectTrigger aria-label="匹配状态筛选" className="w-28"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="all">全部匹配</SelectItem><SelectItem value="unmatched">未匹配</SelectItem><SelectItem value="matched">已匹配</SelectItem><SelectItem value="confirmed">已确认</SelectItem></SelectContent>
+        </Select>
+        <Select value={projectStatus} onValueChange={(value) => { const next = value ?? "all"; clearSelection(); setProjectStatus(next); if (next !== "assigned") setProjectId("all"); setPage(1) }}>
+          <SelectTrigger aria-label="项目状态筛选" className="w-28"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="all">全部归属</SelectItem><SelectItem value="unassigned">未分配</SelectItem><SelectItem value="assigned">已分配</SelectItem></SelectContent>
+        </Select>
+        <Select value={projectId} onValueChange={(value) => { const next = value ?? "all"; clearSelection(); setProjectId(next); setProjectStatus(next === "all" ? "all" : "assigned"); setPage(1) }}>
+          <SelectTrigger aria-label="具体项目筛选" className="w-36"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="all">全部项目</SelectItem>{projects.map((project) => <SelectItem key={project.id} value={project.id}>{project.name}</SelectItem>)}</SelectContent>
+        </Select>
         <div
           className={cn(
             "flex h-9 items-center gap-2 rounded-md border px-3",

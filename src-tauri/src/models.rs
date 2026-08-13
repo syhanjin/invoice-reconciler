@@ -418,6 +418,9 @@ pub struct OrdersQuery {
     pub page_size: Option<u32>,
     pub search: Option<String>,
     pub duplicate_only: Option<bool>,
+    pub match_status: Option<String>,
+    pub project_status: Option<String>,
+    pub project_id: Option<String>,
     pub sort_by: Option<OrderSort>,
     pub sort_direction: Option<SortDirection>,
 }
@@ -451,6 +454,9 @@ pub struct OrderListItem {
     pub created_at: String,
     pub product_summary: String,
     pub product_count: i64,
+    pub match_status: String,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -709,8 +715,9 @@ pub struct InvoicesQuery {
     pub date_from: Option<String>,
     pub date_to: Option<String>,
     pub duplicate_only: Option<bool>,
+    pub match_status: Option<String>,
+    pub project_status: Option<String>,
     pub project_id: Option<String>,
-    pub unassigned_only: Option<bool>,
     pub sort_by: Option<InvoiceSort>,
     pub sort_direction: Option<SortDirection>,
 }
@@ -733,6 +740,7 @@ pub struct InvoiceListItem {
     pub created_at: String,
     pub project_id: Option<String>,
     pub project_name: Option<String>,
+    pub match_status: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -974,6 +982,7 @@ pub struct ProjectsQuery {
     pub page: Option<u32>,
     pub page_size: Option<u32>,
     pub search: Option<String>,
+    pub archived: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -989,6 +998,7 @@ pub struct ProjectSummary {
     pub blocking_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub archived_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1047,6 +1057,7 @@ pub struct ProjectDetail {
     pub blocking_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub archived_at: Option<String>,
     pub invoices: Vec<ProjectInvoiceMember>,
 }
 
@@ -1054,6 +1065,13 @@ pub struct ProjectDetail {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectNameRequest {
     pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectAndAssignInvoicesRequest {
+    pub name: String,
+    pub invoice_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

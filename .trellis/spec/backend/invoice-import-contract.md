@@ -22,7 +22,12 @@ cancel_invoice_task(request: { id: string }) -> boolean
 retry_invoice_task(request: { id: string, forcedType: number | null }) -> InvoiceBatchDetail
 confirm_invoice_split(request: { taskId: string, groups: number[][] }) -> InvoiceBatchDetail
 
-list_invoices(query: { ..., projectId?: string, unassignedOnly?: boolean }) -> InvoicesPage
+list_invoices(query: {
+  ...,
+  matchStatus?: "unmatched" | "matched" | "confirmed",
+  projectStatus?: "assigned" | "unassigned",
+  projectId?: string
+}) -> InvoicesPage
 get_invoice(request: { id: string }) -> InvoiceDetail
 update_invoice(request: UpdateInvoiceRequest) -> InvoiceDetail
 delete_invoice(request: { id: string }) -> void
@@ -56,7 +61,7 @@ invoice_batches 1 -- * invoice_tasks 1 -- * invoices 1 -- * invoice_items
 - If one mixed response contains both successful and failed invoice items, persist the successful records and keep every failed item code in `warning_message`; never silently treat the source as fully recognized.
 - Reliable identity collision is a hard duplicate: no invoice row is committed, the task keeps RequestId/raw response/existing ID, previews are removed, and the duplicate source copy is deleted when possible. Weak number collisions remain in the ledger with `possibleDuplicate` on the full affected group.
 - Invoice edit recomputes reliable identity and both old/new weak duplicate groups transactionally. Delete uses file trash/restore compensation and removes the source only when deleting the final invoice for the task.
-- Invoice ledger rows include nullable project identity/name and support server-side project/unassigned filters. Deleting a project member relies on the membership cascade, then compacts and touches that project inside the invoice deletion transaction.
+- Invoice ledger rows include `matchStatus`, nullable project identity/name, and server-side match/project-membership/specific-project filters. Rows owned by archived projects are absent from all invoice-ledger queries. Deleting a project member relies on the membership cascade, then compacts and touches that project inside the invoice deletion transaction.
 - Invoice delete stores a recovery marker keyed by source SHA-256 plus normalized subtype/invoice number in the same transaction. Any unclaimed marker lets that source pass preflight and atomically binds to one recovery task. Recovery OCR persists only marked missing identities, skips ledger rows that still exist, ignores unrelated OCR results, and consumes only matched markers. Unmatched markers are released for another attempt. Once every marker is consumed, active managed sources claim the hash again. Tasks whose managed source has been cleared are audit history and never claim the hash.
 - `invoice-task-updated` is separate from the order event and carries the full task and batch detail.
 
@@ -78,6 +83,7 @@ invoice_batches 1 -- * invoice_tasks 1 -- * invoices 1 -- * invoice_items
 | Review group is empty, duplicated, incomplete, or out of range | `invalid_input`; no persistence and no OCR call |
 | Bulk delete has 0 or more than 100 IDs | `invalid_input` |
 | One bulk delete item fails | Return its failure and continue remaining unique IDs |
+| Invoice belongs to an archived project | Exclude it before status filtering/pagination; preserve the invoice and membership |
 
 ### 5. Good/Base/Bad Cases
 
@@ -98,6 +104,7 @@ invoice_batches 1 -- * invoice_tasks 1 -- * invoices 1 -- * invoice_items
 - Fresh on-disk migration, `m0001` upgrade with seeded orders, partial `m0002` recovery, migration-ledger entries, foreign-key cascades, and reliable-identity uniqueness.
 - Preview extraction/crop and delete compensation failure tests when those paths change.
 - Frontend preflight-before-create, review grouping, subtype filter, edit/delete, multi-select bulk-delete, task-event, and PDF preview tests.
+- Ledger repository tests for the three match states, assigned/unassigned/specific-project filters, archived-member exclusion, and in-memory status pagination after the shared global match projection.
 - Run `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-features`, `bun run lint`, `bun run test`, and `bun run build`.
 
 ### 7. Wrong vs Correct
@@ -117,5 +124,9 @@ This fails on fresh and pre-invoice databases because `invoice_tasks` does not e
 Migrator::up(&connection, None).await?;
 connection.execute("UPDATE invoice_tasks ...").await?;
 ```
+
+Wrong: derive `matched` from a page-local join or paginate before applying the global candidate projection.
+
+Correct: build the shared matching projection, apply status filters, then paginate the stable ledger ordering.
 
 Run schema installation before startup recovery, make SQLite DDL repeatable, and test the production connection path against both fresh and seeded prior-version files.

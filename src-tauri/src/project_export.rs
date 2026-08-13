@@ -763,6 +763,7 @@ mod tests {
             name: "测试项目".into(),
             created_at: "now".into(),
             updated_at: "now".into(),
+            archived_at: None,
             invoices: vec![ProjectExportInvoice {
                 member: ProjectInvoiceMember {
                     id: "invoice-a".into(),
@@ -917,6 +918,7 @@ mod tests {
             name: "失败项目".into(),
             created_at: "now".into(),
             updated_at: "now".into(),
+            archived_at: None,
             invoices: vec![ProjectExportInvoice {
                 member: ProjectInvoiceMember {
                     id: "invoice".into(),

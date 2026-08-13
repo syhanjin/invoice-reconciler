@@ -246,7 +246,16 @@ pub async fn list_orders(
     state: State<'_, AppState>,
     query: OrdersQuery,
 ) -> CommandResult<OrdersPage> {
-    state.database.list_orders(query).await.map_err(Into::into)
+    let settings = state.settings.private().await;
+    state
+        .database
+        .list_orders_with_matching(
+            query,
+            usize::from(settings.match_max_orders),
+            usize::from(settings.match_max_candidates),
+        )
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]

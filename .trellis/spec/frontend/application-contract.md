@@ -48,7 +48,8 @@ Ollama and OpenAI-compatible providers share the realtime concurrency setting. D
 
 #### Orders table and mutations
 
-- The orders query is server-paged and contains page, page size, search, duplicate-only filter, sort field, and sort direction.
+- The orders query is server-paged and contains page, page size, search, duplicate-only filter, match status, project membership/specific-project filters, sort field, and sort direction.
+- Each row renders backend-provided three-state match status and nullable project membership with low-contrast row backgrounds. The client never derives `matched` from the current server page. Orders confirmed to invoices in archived projects are absent until unarchive.
 - TanStack Table renders the current server page and must not apply client-side sorting or pagination.
 - Search, duplicate-only, sort, and page-size changes reset to page `1`. If a response makes the current page invalid, request the last valid page.
 - Persist only versioned table presentation preferences: page size, sort, column visibility/sizing, and density. Do not persist search, duplicate-only, page, or open order.
@@ -73,6 +74,7 @@ Ollama and OpenAI-compatible providers share the realtime concurrency setting. D
 | Event arrives | Reload authoritative pool/log/order projections; do not derive counts from event payload |
 | Component unmount | Call every Tauri `UnlistenFn` |
 | Bulk order delete returns mixed results | Report successes/failures, retain failed visible selections, and reload orders |
+| Match/project filter changes | Clear selection, reset page one, and request a new authoritative server projection |
 
 ### 5. Good/Base/Bad Cases
 
@@ -89,6 +91,7 @@ Ollama and OpenAI-compatible providers share the realtime concurrency setting. D
 - Import-task component tests: desktop pool/log data, mobile tabs, all realtime pool statuses, absence of Batch actions, retry-all/single, delete confirmation, historical Aliyun label, and log pagination.
 - Settings component tests: exactly two provider options, conditional fields, masked/preserved/cleared OpenAI keys, validation, and provider-aware service check.
 - Existing order-table tests: every sort mapping/cycle, search/filter/page reset, invalid-page correction, presentation preferences, selection, and mixed bulk-delete results.
+- Ledger status tests: match/project filter query payloads, status/membership columns, row background classes, and archived-project refresh invalidation.
 - Desktop smoke tests at default and minimum window sizes for dual-pane scrolling, responsive tabs, order preview/editor, and settings.
 - Always run `bun run lint`, `bun run test`, and `bun run build` before commit.
 

@@ -7,6 +7,7 @@ import type { DeleteOrdersResult, OrdersPage as OrdersPageData, OrdersQuery } fr
 const apiMocks = vi.hoisted(() => ({
   listOrders: vi.fn<(query: OrdersQuery) => Promise<OrdersPageData>>(),
   importOrderImages: vi.fn(),
+  listProjects: vi.fn(),
   deleteOrders: vi.fn<(ids: string[]) => Promise<DeleteOrdersResult>>(),
 }))
 
@@ -32,6 +33,7 @@ describe("OrdersPage query controls", () => {
     vi.clearAllMocks()
     localStorage.clear()
     apiMocks.deleteOrders.mockResolvedValue({ results: [] })
+    apiMocks.listProjects.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 100 })
     apiMocks.listOrders.mockImplementation(async (query) => ({
       items: [
         {
@@ -45,6 +47,9 @@ describe("OrdersPage query controls", () => {
           createdAt: "2026-08-12T08:00:00Z",
           productSummary: "测试商品",
           productCount: 1,
+          matchStatus: "matched",
+          projectId: null,
+          projectName: null,
         },
         {
           id: "order-2",
@@ -57,6 +62,9 @@ describe("OrdersPage query controls", () => {
           createdAt: "2026-08-12T09:00:00Z",
           productSummary: "另一件商品",
           productCount: 1,
+          matchStatus: "confirmed",
+          projectId: "project-a",
+          projectName: "差旅项目",
         },
       ],
       total: 41,
@@ -74,6 +82,9 @@ describe("OrdersPage query controls", () => {
       pageSize: 20,
       search: undefined,
       duplicateOnly: false,
+      matchStatus: undefined,
+      projectStatus: undefined,
+      projectId: undefined,
       sortBy: "created_at",
       sortDirection: "desc",
     }))
@@ -86,6 +97,9 @@ describe("OrdersPage query controls", () => {
       pageSize: 20,
       search: undefined,
       duplicateOnly: false,
+      matchStatus: undefined,
+      projectStatus: undefined,
+      projectId: undefined,
       sortBy: "shop_name",
       sortDirection: "asc",
     }))
@@ -107,6 +121,9 @@ describe("OrdersPage query controls", () => {
       pageSize: 50,
       search: "测试",
       duplicateOnly: true,
+      matchStatus: undefined,
+      projectStatus: undefined,
+      projectId: undefined,
       sortBy: "created_at",
       sortDirection: "desc",
     }))

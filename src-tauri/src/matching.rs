@@ -41,6 +41,11 @@ struct OrderRow {
     product_summary: String,
 }
 
+pub(crate) struct LedgerMatchProjection {
+    pub invoice_statuses: HashMap<String, String>,
+    pub order_statuses: HashMap<String, String>,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RepurchaseInvoiceKey {
     total_fen: i64,
@@ -68,17 +73,19 @@ impl OrderRow {
 }
 
 impl Database {
-    pub async fn matching_page(
+    async fn matching_items(
         &self,
-        query: MatchingQuery,
         max_orders: usize,
         max_candidates: usize,
-    ) -> AppResult<MatchingPage> {
+    ) -> AppResult<Vec<MatchingInvoiceItem>> {
         let invoices = InvoiceRow::find_by_statement(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT i.id,i.invoice_number,i.subtype,i.subtype_description,i.invoice_date,i.seller_name,\
              i.total_fen,i.currency,m.source confirmed_source,m.confirmed_at \
              FROM invoices i LEFT JOIN invoice_matches m ON m.invoice_id=i.id \
+             LEFT JOIN project_invoices pi ON pi.invoice_id=i.id \
+             LEFT JOIN projects p ON p.id=pi.project_id \
+             WHERE p.archived_at IS NULL \
              ORDER BY COALESCE(i.invoice_date,'' ) DESC,i.id DESC",
         ))
         .all(&self.connection)
@@ -131,7 +138,6 @@ impl Database {
         }
 
         let mut items = Vec::with_capacity(invoices.len());
-        let mut summary = MatchingSummary::default();
         for value in invoices {
             let (status, reason, candidates) = if value.confirmed_source.is_some() {
                 (
@@ -201,15 +207,6 @@ impl Database {
                     }
                 }
             };
-            summary.total += 1;
-            match status.as_str() {
-                "suggested" => summary.suggested += 1,
-                "conflict" => summary.conflict += 1,
-                "unmatched" => summary.unmatched += 1,
-                "ineligible" => summary.ineligible += 1,
-                "confirmed" => summary.confirmed += 1,
-                _ => {}
-            }
             items.push(MatchingInvoiceItem {
                 id: value.id,
                 invoice_number: value.invoice_number,
@@ -224,6 +221,62 @@ impl Database {
                 confirmed_source: value.confirmed_source,
                 confirmed_at: value.confirmed_at,
             });
+        }
+        Ok(items)
+    }
+
+    pub(crate) async fn ledger_match_projection(
+        &self,
+        max_orders: usize,
+        max_candidates: usize,
+    ) -> AppResult<LedgerMatchProjection> {
+        let items = self.matching_items(max_orders, max_candidates).await?;
+        let mut invoice_statuses = HashMap::with_capacity(items.len());
+        let mut order_statuses = HashMap::new();
+        for item in items {
+            let ledger_status = match item.status.as_str() {
+                "confirmed" => "confirmed",
+                "suggested" => "matched",
+                _ => "unmatched",
+            };
+            invoice_statuses.insert(item.id, ledger_status.to_owned());
+            if matches!(ledger_status, "confirmed" | "matched") {
+                for candidate in item.candidates {
+                    for order_id in candidate.order_ids {
+                        let status = order_statuses
+                            .entry(order_id)
+                            .or_insert_with(|| ledger_status.to_owned());
+                        if ledger_status == "confirmed" {
+                            *status = "confirmed".to_owned();
+                        }
+                    }
+                }
+            }
+        }
+        Ok(LedgerMatchProjection {
+            invoice_statuses,
+            order_statuses,
+        })
+    }
+
+    pub async fn matching_page(
+        &self,
+        query: MatchingQuery,
+        max_orders: usize,
+        max_candidates: usize,
+    ) -> AppResult<MatchingPage> {
+        let mut items = self.matching_items(max_orders, max_candidates).await?;
+        let mut summary = MatchingSummary::default();
+        for item in &items {
+            summary.total += 1;
+            match item.status.as_str() {
+                "suggested" => summary.suggested += 1,
+                "conflict" => summary.conflict += 1,
+                "unmatched" => summary.unmatched += 1,
+                "ineligible" => summary.ineligible += 1,
+                "confirmed" => summary.confirmed += 1,
+                _ => {}
+            }
         }
 
         let search = query.search.unwrap_or_default().trim().to_lowercase();
@@ -1076,7 +1129,10 @@ pub async fn unconfirm_invoice_match(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::UpdateOrderRequest;
+    use crate::models::{
+        AssignInvoicesToProjectRequest, InvoiceSort, InvoicesQuery, OrderSort, OrdersQuery,
+        SortDirection, UpdateOrderRequest,
+    };
     use tempfile::TempDir;
 
     async fn test_state() -> (TempDir, AppState) {
@@ -1198,6 +1254,147 @@ mod tests {
 
         assert_eq!(page.summary.conflict, 2);
         assert!(page.items.iter().all(|item| item.status == "conflict"));
+        let projection = db.ledger_match_projection(10, 100).await.unwrap();
+        assert!(
+            projection
+                .invoice_statuses
+                .values()
+                .all(|status| status == "unmatched")
+        );
+        assert!(projection.order_statuses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ledger_projection_distinguishes_suggestions_and_confirmations() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(&db, &[("order-a", 100)], &[("invoice-a", 100)]).await;
+
+        let suggested = db.ledger_match_projection(10, 100).await.unwrap();
+        assert_eq!(suggested.invoice_statuses["invoice-a"], "matched");
+        assert_eq!(suggested.order_statuses["order-a"], "matched");
+
+        db.confirm_invoice_match(ConfirmInvoiceMatchRequest {
+            invoice_id: "invoice-a".into(),
+            order_ids: vec!["order-a".into()],
+            source: "automatic".into(),
+            accept_mismatches: false,
+        })
+        .await
+        .unwrap();
+        let confirmed = db.ledger_match_projection(10, 100).await.unwrap();
+        assert_eq!(confirmed.invoice_statuses["invoice-a"], "confirmed");
+        assert_eq!(confirmed.order_statuses["order-a"], "confirmed");
+    }
+
+    #[tokio::test]
+    async fn archived_project_members_leave_and_reenter_daily_workspaces() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(&db, &[("order-a", 100)], &[("invoice-a", 100)]).await;
+        db.confirm_invoice_match(ConfirmInvoiceMatchRequest {
+            invoice_id: "invoice-a".into(),
+            order_ids: vec!["order-a".into()],
+            source: "automatic".into(),
+            accept_mismatches: false,
+        })
+        .await
+        .unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let project = db
+            .create_project("归档项目".into(), app_data.path())
+            .await
+            .unwrap();
+        db.assign_invoices_to_project(AssignInvoicesToProjectRequest {
+            invoice_ids: vec!["invoice-a".into()],
+            project_id: project.id.clone(),
+            accept_reassignment: false,
+        })
+        .await
+        .unwrap();
+
+        let order_query = || OrdersQuery {
+            page: None,
+            page_size: None,
+            search: None,
+            duplicate_only: None,
+            match_status: None,
+            project_status: None,
+            project_id: None,
+            sort_by: Some(OrderSort::CreatedAt),
+            sort_direction: Some(SortDirection::Desc),
+        };
+        let invoice_query = || InvoicesQuery {
+            page: None,
+            page_size: None,
+            search: None,
+            subtype: None,
+            date_from: None,
+            date_to: None,
+            duplicate_only: None,
+            match_status: None,
+            project_status: None,
+            project_id: None,
+            sort_by: Some(InvoiceSort::CreatedAt),
+            sort_direction: Some(SortDirection::Desc),
+        };
+        let orders = db
+            .list_orders_with_matching(order_query(), 10, 100)
+            .await
+            .unwrap();
+        let invoices = db
+            .list_invoices_with_matching(invoice_query(), 10, 100)
+            .await
+            .unwrap();
+        assert_eq!(orders.items[0].match_status, "confirmed");
+        assert_eq!(orders.items[0].project_name.as_deref(), Some("归档项目"));
+        assert_eq!(invoices.items[0].match_status, "confirmed");
+
+        db.set_project_archived(&project.id, true).await.unwrap();
+        assert_eq!(
+            db.list_orders_with_matching(order_query(), 10, 100)
+                .await
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(
+            db.list_invoices_with_matching(invoice_query(), 10, 100)
+                .await
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(
+            db.matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: None,
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap()
+            .total,
+            0
+        );
+
+        db.set_project_archived(&project.id, false).await.unwrap();
+        assert_eq!(
+            db.list_orders_with_matching(order_query(), 10, 100)
+                .await
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            db.list_invoices_with_matching(invoice_query(), 10, 100)
+                .await
+                .unwrap()
+                .total,
+            1
+        );
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ import {
   ordersRefreshAtom,
   orderImportRefreshAtom,
   projectsRefreshAtom,
+  workspaceRefreshAtom,
   settingsAtom,
 } from "@/lib/store"
 
@@ -52,6 +53,7 @@ export function App() {
   const invoiceRefreshToken = useAtomValue(invoicesRefreshAtom)
   const projectRefreshToken = useAtomValue(projectsRefreshAtom)
   const refreshProjects = useSetAtom(projectsRefreshAtom)
+  const workspaceRefreshToken = useAtomValue(workspaceRefreshAtom)
   const [activeInvoiceBatch, setActiveInvoiceBatch] = useAtom(activeInvoiceBatchAtom)
   const mergeInvoiceBatch = useSetAtom(mergeInvoiceBatchAtom)
   const mergeInvoiceBatchEvent = useSetAtom(mergeInvoiceBatchEventAtom)
@@ -109,6 +111,7 @@ export function App() {
             <OrdersPage
               onImagesImported={handleOrderImagesImported}
               refreshToken={refreshToken}
+              workspaceRefreshToken={workspaceRefreshToken}
             />
           )}
           {view === "invoices" && (
@@ -116,12 +119,13 @@ export function App() {
               onBatchCreated={handleInvoiceBatchCreated}
               refreshToken={invoiceRefreshToken}
               projectRefreshToken={projectRefreshToken}
+              workspaceRefreshToken={workspaceRefreshToken}
               onProjectsChanged={() => refreshProjects((value) => value + 1)}
             />
           )}
           {view === "matching" && (
             <Suspense fallback={<Initializing />}>
-              <MatchingPage refreshToken={`${refreshToken}:${invoiceRefreshToken}`} />
+              <MatchingPage refreshToken={`${refreshToken}:${invoiceRefreshToken}:${workspaceRefreshToken}`} />
             </Suspense>
           )}
           {view === "projects" && (

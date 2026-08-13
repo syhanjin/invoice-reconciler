@@ -25,6 +25,7 @@ import {
 import { useEffect, useMemo, useState } from "react"
 
 import { Badge } from "@/components/ui/badge"
+import { LedgerStatusBadge, ledgerRowClass } from "@/components/ledger-status"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -87,6 +88,8 @@ const columnLabels: Partial<Record<OrderTableColumnId, string>> = {
   orderedAt: "下单时间",
   createdAt: "创建时间",
   platform: "来源",
+  matchStatus: "匹配状态",
+  projectName: "所属项目",
 }
 
 function freshDefaultPreferences(): OrderTablePreferences {
@@ -200,6 +203,24 @@ export function OrdersTable({
           )}
         </div>
       ),
+    },
+    {
+      accessorKey: "matchStatus",
+      header: "匹配状态",
+      size: 105,
+      minSize: 90,
+      maxSize: 130,
+      cell: ({ row }) => <LedgerStatusBadge status={row.original.matchStatus} />,
+    },
+    {
+      accessorKey: "projectName",
+      header: "所属项目",
+      size: 160,
+      minSize: 120,
+      maxSize: 240,
+      cell: ({ row }) => row.original.projectName
+        ? <Badge variant="secondary" className="max-w-full truncate">{row.original.projectName}</Badge>
+        : <span className="text-xs text-muted-foreground">未分配</span>,
     },
     {
       accessorKey: "productSummary",
@@ -469,6 +490,7 @@ export function OrdersTable({
                 data-state={row.getIsSelected() ? "selected" : undefined}
                 className={cn(
                   "cursor-pointer",
+                  ledgerRowClass(row.original.matchStatus, row.getIsSelected()),
                   preferences.density === "compact" ? "h-11" : "h-16",
                 )}
                 onClick={() => onSelect(row.original.id)}
