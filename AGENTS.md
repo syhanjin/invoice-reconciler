@@ -69,8 +69,9 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
   `matched` is one conflict-free automatic candidate, and all other unconfirmed
   records are `unmatched`; never derive it from one paged result.
   Suspected repurchases group orders by amount/normalized shop and invoices by
-  amount/normalized seller/subtype, then pair only complete unique dates with equal
-  counts; otherwise retain a `疑似回购冲突`. Custom selection omits confirmed orders.
+  amount/normalized seller/subtype, then pair equal-count groups by complete dates.
+  Repeated dates are allowed and use record IDs only as stable same-day tie-breakers;
+  missing dates retain a `疑似回购冲突`. Custom selection omits confirmed orders.
 - Projects own ordered invoice membership only; one invoice belongs to at most one
   project. Preserve transactional reassignment, position compaction after membership
   or invoice deletion, and project deletion without deleting invoices, matches, files,

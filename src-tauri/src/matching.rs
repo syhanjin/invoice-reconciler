@@ -717,16 +717,20 @@ fn resolve_repurchase_candidates(
             continue;
         }
 
-        let Some(sorted_invoices) =
-            sorted_unique_dates(&invoice_group, |invoice| invoice.invoice_date.as_deref())
-        else {
-            mark_repurchase_date_conflict(&mut conflicts, &invoice_group);
+        let Some(sorted_invoices) = sorted_complete_dates(
+            &invoice_group,
+            |invoice| invoice.invoice_date.as_deref(),
+            |invoice| invoice.id.as_str(),
+        ) else {
+            mark_repurchase_missing_date_conflict(&mut conflicts, &invoice_group);
             continue;
         };
-        let Some(sorted_orders) =
-            sorted_unique_dates(order_group, |order| order.ordered_at.as_deref())
-        else {
-            mark_repurchase_date_conflict(&mut conflicts, &invoice_group);
+        let Some(sorted_orders) = sorted_complete_dates(
+            order_group,
+            |order| order.ordered_at.as_deref(),
+            |order| order.id.as_str(),
+        ) else {
+            mark_repurchase_missing_date_conflict(&mut conflicts, &invoice_group);
             continue;
         };
         if sorted_invoices
@@ -761,30 +765,32 @@ fn resolve_repurchase_candidates(
     conflicts
 }
 
-fn sorted_unique_dates<'a, T>(
+fn sorted_complete_dates<'a, T>(
     values: &'a [&'a T],
     date: impl Fn(&T) -> Option<&str>,
+    id: impl Fn(&T) -> &str,
 ) -> Option<Vec<&'a T>> {
     let mut dated = values
         .iter()
         .map(|value| {
             date(value)
                 .and_then(|date| date_part(Some(date)))
-                .map(|date| (date, *value))
+                .map(|date| (date, id(value), *value))
         })
         .collect::<Option<Vec<_>>>()?;
-    dated.sort_by_key(|(date, _)| *date);
-    if dated.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-        return None;
-    }
-    Some(dated.into_iter().map(|(_, value)| value).collect())
+    dated.sort_by(|(left_date, left_id, _), (right_date, right_id, _)| {
+        left_date
+            .cmp(right_date)
+            .then_with(|| left_id.cmp(right_id))
+    });
+    Some(dated.into_iter().map(|(_, _, value)| value).collect())
 }
 
-fn mark_repurchase_date_conflict(
+fn mark_repurchase_missing_date_conflict(
     conflicts: &mut HashMap<String, String>,
     invoices: &[&InvoiceRow],
 ) {
-    let reason = "疑似回购冲突：日期缺失或重复，无法按时间可靠配对".to_owned();
+    let reason = "疑似回购冲突：日期缺失，无法按时间可靠配对".to_owned();
     for invoice in invoices {
         conflicts.insert(invoice.id.clone(), reason.clone());
     }
@@ -1442,7 +1448,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chronologically_resolved_repurchase_suggestions_confirm_atomically() {
+    async fn repeated_order_dates_resolve_deterministically() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-z", 100), ("order-a", 100)],
+            &[("invoice-early", 100), ("invoice-late", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at='2026-08-01',shop_name='同店';
+             UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-early' THEN '2026-08-02' ELSE '2026-08-03' END,seller_name='销售方';",
+        )
+        .await
+        .unwrap();
+
+        let mut runs = Vec::new();
+        for _ in 0..2 {
+            let page = db
+                .matching_page(
+                    MatchingQuery {
+                        page: None,
+                        page_size: None,
+                        search: None,
+                        status: None,
+                    },
+                    10,
+                    100,
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.summary.suggested, 2);
+            assert_eq!(page.summary.conflict, 0);
+            runs.push(
+                page.items
+                    .into_iter()
+                    .map(|item| (item.id, item.candidates[0].order_ids[0].clone()))
+                    .collect::<HashMap<_, _>>(),
+            );
+        }
+
+        assert_eq!(runs[0], runs[1]);
+        assert_eq!(runs[0]["invoice-early"], "order-a");
+        assert_eq!(runs[0]["invoice-late"], "order-z");
+    }
+
+    #[tokio::test]
+    async fn repeated_invoice_dates_resolve_by_stable_id() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-early", 100), ("order-late", 100)],
+            &[("invoice-z", 100), ("invoice-a", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at=CASE id WHEN 'order-early' THEN '2026-08-01' ELSE '2026-08-02' END,shop_name='同店';
+             UPDATE invoices SET invoice_date='2026-08-03',seller_name='销售方';",
+        )
+        .await
+        .unwrap();
+
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: None,
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.summary.suggested, 2);
+        assert_eq!(page.summary.conflict, 0);
+        let suggestions = page
+            .items
+            .iter()
+            .map(|item| (item.id.as_str(), item.candidates[0].order_ids[0].as_str()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(suggestions["invoice-a"], "order-early");
+        assert_eq!(suggestions["invoice-z"], "order-late");
+    }
+
+    #[tokio::test]
+    async fn repeated_date_repurchase_suggestions_confirm_atomically() {
         let db = Database::in_memory().await.unwrap();
         seed_records(
             &db,
@@ -1451,8 +1544,8 @@ mod tests {
         )
         .await;
         db.execute_test_statement(
-            "UPDATE orders SET ordered_at=CASE id WHEN 'order-early' THEN '2026-08-01' ELSE '2026-08-05' END;
-             UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-early' THEN '2026-08-02' ELSE '2026-08-06' END,seller_name='销售方';",
+            "UPDATE orders SET ordered_at='2026-08-01';
+             UPDATE invoices SET invoice_date='2026-08-02',seller_name='销售方';",
         )
         .await
         .unwrap();
@@ -1503,7 +1596,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_revalidation_accepts_chronological_repurchase_suggestions() {
+    async fn automatic_revalidation_accepts_repeated_date_repurchase_suggestions() {
         let (_directory, state) = test_state().await;
         seed_records(
             &state.database,
@@ -1514,8 +1607,8 @@ mod tests {
         state
             .database
             .execute_test_statement(
-                "UPDATE orders SET ordered_at=CASE id WHEN 'order-early' THEN '2026-08-01' ELSE '2026-08-05' END;
-                 UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-early' THEN '2026-08-02' ELSE '2026-08-06' END,seller_name='销售方';",
+                "UPDATE orders SET ordered_at='2026-08-01';
+                 UPDATE invoices SET invoice_date='2026-08-02',seller_name='销售方';",
             )
             .await
             .unwrap();
@@ -1578,7 +1671,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_repurchase_dates_remain_conflicts() {
+    async fn missing_repurchase_dates_remain_conflicts() {
         let db = Database::in_memory().await.unwrap();
         seed_records(
             &db,
@@ -1587,7 +1680,7 @@ mod tests {
         )
         .await;
         db.execute_test_statement(
-            "UPDATE orders SET ordered_at='2026-08-01';
+            "UPDATE orders SET ordered_at=CASE id WHEN 'order-a' THEN NULL ELSE '2026-08-01' END;
              UPDATE invoices SET seller_name='销售方';",
         )
         .await
@@ -1609,7 +1702,79 @@ mod tests {
 
         assert_eq!(page.summary.conflict, 2);
         assert!(page.items.iter().all(|item| {
-            item.reason.as_deref() == Some("疑似回购冲突：日期缺失或重复，无法按时间可靠配对")
+            item.reason.as_deref() == Some("疑似回购冲突：日期缺失，无法按时间可靠配对")
+        }));
+    }
+
+    #[tokio::test]
+    async fn missing_repurchase_invoice_date_remains_a_conflict() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-a", 100), ("order-b", 100)],
+            &[("invoice-a", 100), ("invoice-b", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at='2026-08-01';
+             UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-a' THEN NULL ELSE '2026-08-02' END,seller_name='销售方';",
+        )
+        .await
+        .unwrap();
+
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: None,
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.summary.conflict, 2);
+        assert!(page.items.iter().all(|item| {
+            item.reason.as_deref() == Some("疑似回购冲突：日期缺失，无法按时间可靠配对")
+        }));
+    }
+
+    #[tokio::test]
+    async fn late_chronological_repurchase_pair_remains_a_conflict() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-early", 100), ("order-late", 100)],
+            &[("invoice-early", 100), ("invoice-late", 100)],
+        )
+        .await;
+        db.execute_test_statement(
+            "UPDATE orders SET ordered_at=CASE id WHEN 'order-early' THEN '2026-08-01' ELSE '2026-08-10' END;
+             UPDATE invoices SET invoice_date=CASE id WHEN 'invoice-early' THEN '2026-08-02' ELSE '2026-08-03' END,seller_name='销售方';",
+        )
+        .await
+        .unwrap();
+
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: None,
+                    page_size: None,
+                    search: None,
+                    status: None,
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.summary.conflict, 2);
+        assert!(page.items.iter().all(|item| {
+            item.reason.as_deref() == Some("疑似回购冲突：按时间配对后存在订单晚于开票日期")
         }));
     }
 
