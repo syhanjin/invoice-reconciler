@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/order-import-contract.md","reason":"Verify global LLM settings, provider protocols, credential handling, and versioned migration behavior."}
+{"file":".trellis/spec/backend/order-invoice-matching-contract.md","reason":"Verify durable summary state, asynchronous lifecycle, stale-input protection, and fallback naming."}
+{"file":".trellis/spec/backend/project-export-contract.md","reason":"Verify displayName propagation and non-blocking summary fallback in XLSX and ZIP output."}
+{"file":".trellis/spec/frontend/application-contract.md","reason":"Verify typed global model settings and match-summary invalidation listener behavior."}
+{"file":".trellis/spec/frontend/matching-workspace-contract.md","reason":"Verify confirmed-row summary states, fallback display, and failed retry interaction."}
+{"file":".trellis/spec/frontend/project-workspace-contract.md","reason":"Verify project summary status, retry, and export availability behavior."}
