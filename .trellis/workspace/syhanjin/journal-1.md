@@ -602,3 +602,36 @@ Added global three-state order/invoice ledger status and filters, transactional 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: Allow repeated repurchase dates
+
+**Date**: 2026-08-13
+**Task**: Allow repeated repurchase dates
+**Branch**: `main`
+
+### Summary
+
+Allowed complete repeated order and invoice dates in suspected-repurchase matching with deterministic same-day ID tie-breaking, retained missing-date and late-pair conflicts, and added regression coverage for suggestions and confirmations.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f395f99` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
