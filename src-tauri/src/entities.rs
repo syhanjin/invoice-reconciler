@@ -475,6 +475,13 @@ pub mod invoice_match {
         pub invoice_id: String,
         pub source: String,
         pub confirmed_at: String,
+        pub display_name: Option<String>,
+        pub summary_status: String,
+        pub summary_error: Option<String>,
+        pub summary_provider: Option<String>,
+        pub summary_model: Option<String>,
+        pub summary_input_hash: Option<String>,
+        pub summary_generated_at: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

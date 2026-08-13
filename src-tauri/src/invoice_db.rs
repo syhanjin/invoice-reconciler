@@ -762,6 +762,8 @@ impl Database {
         let matching_fields_changed = model.invoice_date != next_invoice_date
             || model.total_fen != request.total_fen
             || model.currency != next_currency;
+        let next_seller_name = clean(request.seller_name);
+        let summary_input_changed = model.seller_name != next_seller_name;
         if matching_fields_changed {
             invoice_match::Entity::delete_by_id(&request.id)
                 .exec(&transaction)
@@ -773,7 +775,7 @@ impl Database {
         active.invoice_date = Set(next_invoice_date);
         active.buyer_name = Set(clean(request.buyer_name));
         active.buyer_tax_id = Set(clean(request.buyer_tax_id));
-        active.seller_name = Set(clean(request.seller_name));
+        active.seller_name = Set(next_seller_name);
         active.seller_tax_id = Set(clean(request.seller_tax_id));
         active.amount_fen = Set(request.amount_fen);
         active.tax_fen = Set(request.tax_fen);
@@ -785,6 +787,9 @@ impl Database {
         }
         active.updated_at = Set(now());
         active.update(&transaction).await?;
+        if summary_input_changed && !matching_fields_changed {
+            crate::match_summary::reset_match_summary(&transaction, &request.id).await?;
+        }
         refresh_weak_duplicate_group(&transaction, &old_subtype, old_number.as_deref()).await?;
         refresh_weak_duplicate_group(&transaction, &new_subtype, number.as_deref()).await?;
         transaction.commit().await?;

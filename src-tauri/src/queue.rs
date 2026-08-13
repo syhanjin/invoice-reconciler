@@ -8,14 +8,14 @@ use tokio::sync::Notify;
 
 use crate::db::Database;
 use crate::files::resolve_managed_path;
-use crate::models::{OrderImportUpdateEvent, OrderRecognitionSettings};
-use crate::ocr::OllamaClient;
+use crate::models::{LlmSettings, OrderImportUpdateEvent};
+use crate::ocr::LlmClient;
 use crate::settings::SettingsStore;
 
 #[derive(Clone)]
 pub struct QueueManager {
     database: Database,
-    recognizer: OllamaClient,
+    recognizer: LlmClient,
     settings: SettingsStore,
     app_data_dir: PathBuf,
     notify: Arc<Notify>,
@@ -25,7 +25,7 @@ pub struct QueueManager {
 impl QueueManager {
     pub fn new(
         database: Database,
-        recognizer: OllamaClient,
+        recognizer: LlmClient,
         settings: SettingsStore,
         app_data_dir: PathBuf,
     ) -> Self {
@@ -60,8 +60,9 @@ impl QueueManager {
     async fn drain(&self, app: &AppHandle) {
         let mut in_flight = FuturesUnordered::new();
         loop {
-            let settings = self.settings.private().await.order_recognition();
-            let concurrency = usize::from(settings.max_concurrency.max(1));
+            let private = self.settings.private().await;
+            let concurrency = usize::from(private.order_recognition_max_concurrency.max(1));
+            let settings = private.llm();
             while in_flight.len() < concurrency {
                 match self.database.claim_next_realtime_task().await {
                     Ok(Some(task)) => {
@@ -81,7 +82,7 @@ impl QueueManager {
         }
     }
 
-    async fn process(&self, app: &AppHandle, task_id: String, settings: OrderRecognitionSettings) {
+    async fn process(&self, app: &AppHandle, task_id: String, settings: LlmSettings) {
         emit_update(app, "task_processing", Some(&task_id), None);
         let result = async {
             let task = self.database.pool_task(&task_id).await?;

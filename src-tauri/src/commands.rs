@@ -9,9 +9,9 @@ use crate::error::{AppError, AppResult, CommandResult};
 use crate::files::{copy_managed_image, normalized_extension, resolve_managed_path, sha256_file};
 use crate::models::{
     AppSettings, BootstrapState, DeleteOrderResult, DeleteOrdersRequest, DeleteOrdersResult,
-    IdRequest, ImportOrderImagesRequest, ImportOrderImagesResult, OrderDetail, OrderImportLogsPage,
-    OrderImportLogsQuery, OrderImportPool, OrderRecognitionProvider, OrdersPage, OrdersQuery,
-    RecognizerStatus, UpdateOrderRequest, UpdateSettingsRequest,
+    IdRequest, ImportOrderImagesRequest, ImportOrderImagesResult, LlmProvider, LlmStatus,
+    OrderDetail, OrderImportLogsPage, OrderImportLogsQuery, OrderImportPool, OrdersPage,
+    OrdersQuery, UpdateOrderRequest, UpdateSettingsRequest,
 };
 use crate::queue::emit_update;
 
@@ -55,26 +55,26 @@ pub async fn save_settings(
 }
 
 #[tauri::command]
-pub async fn check_order_recognizer(
+pub async fn check_llm(
     state: State<'_, AppState>,
     request: UpdateSettingsRequest,
-) -> CommandResult<RecognizerStatus> {
+) -> CommandResult<LlmStatus> {
     async {
         let public = request.clone().validate()?;
         let current = state.settings.private().await;
-        let settings = crate::models::OrderRecognitionSettings {
-            provider: public.order_recognition_provider,
-            base_url: match public.order_recognition_provider {
-                OrderRecognitionProvider::Ollama => public.ollama_base_url,
-                OrderRecognitionProvider::Openai => public.openai_base_url,
+        let settings = crate::models::LlmSettings {
+            provider: public.llm_provider,
+            base_url: match public.llm_provider {
+                LlmProvider::Ollama => public.ollama_base_url,
+                LlmProvider::Openai => public.openai_base_url,
             },
-            model: match public.order_recognition_provider {
-                OrderRecognitionProvider::Ollama => public.ollama_model,
-                OrderRecognitionProvider::Openai => public.openai_model,
+            model: match public.llm_provider {
+                LlmProvider::Ollama => public.ollama_model,
+                LlmProvider::Openai => public.openai_model,
             },
-            api_key: match public.order_recognition_provider {
-                OrderRecognitionProvider::Ollama => String::new(),
-                OrderRecognitionProvider::Openai => request
+            api_key: match public.llm_provider {
+                LlmProvider::Ollama => String::new(),
+                LlmProvider::Openai => request
                     .openai_api_key
                     .as_deref()
                     .map(str::trim)
@@ -82,9 +82,8 @@ pub async fn check_order_recognizer(
                     .map(str::to_owned)
                     .unwrap_or(current.openai_api_key),
             },
-            max_concurrency: public.max_concurrency,
         };
-        state.ollama.check(&settings).await
+        state.llm.check(&settings).await
     }
     .await
     .map_err(Into::into)
@@ -282,6 +281,7 @@ pub async fn update_order(
         .update_order(request)
         .await
         .map_err(crate::error::CommandError::from)?;
+    state.match_summary_queue.wake();
     resolve_detail_image(&state, &mut detail).map_err(crate::error::CommandError::from)?;
     Ok(detail)
 }

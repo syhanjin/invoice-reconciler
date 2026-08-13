@@ -7,19 +7,26 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{
-    OcrOrder, OrderRecognitionProvider, OrderRecognitionSettings, RecognizerStatus,
-};
+use crate::models::{LlmProvider, LlmSettings, LlmStatus, MatchSummaryInput, OcrOrder};
 use crate::normalize::normalize_ocr;
 
 const TAOBAO_PROMPT: &str = r#"这是一张淘宝订单截图，一张截图只允许表示一个订单，一个订单可以包含多个商品。
 请仔细识别订单号、所有商品名称、实付金额、下单/创建时间和店铺名称。
 不存在的单值字段返回 null；没有商品时返回空数组。只输出符合所给 JSON Schema 的对象。"#;
 
+const MATCH_SUMMARY_PROMPT: &str = r#"请根据提供的发票条目和已确认订单商品，生成该组合的简短商品概括。
+要求：
+1. 只概括实际商品，合并同类或近似商品，并覆盖主要商品类别。
+2. 不要求体现用途；不要主动推断购买目的、报销场景、项目目的、使用者或商品未明确表达的用途。
+3. 销售方和店铺名称仅用于消除商品名称歧义，结果中不要包含商家名称。
+4. 不要包含金额、订单号、发票号、数量清单或生成过程说明。
+5. 使用中文单行纯文本，通常 10-30 个字符；商品简单时可以更短。
+只输出符合 JSON Schema 的对象。输入数据："#;
+
 #[derive(Clone)]
-pub struct OllamaClient {
+pub struct LlmClient {
     check_client: reqwest::Client,
-    ocr_client: reqwest::Client,
+    request_client: reqwest::Client,
 }
 
 #[derive(Deserialize)]
@@ -48,24 +55,24 @@ struct ChatMessage {
     content: String,
 }
 
-impl OllamaClient {
+impl LlmClient {
     pub fn new() -> AppResult<Self> {
         let check_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(8))
             .build()
             .map_err(|error| AppError::Internal(error.to_string()))?;
-        let ocr_client = reqwest::Client::builder()
+        let request_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
             .build()
             .map_err(|error| AppError::Internal(error.to_string()))?;
         Ok(Self {
             check_client,
-            ocr_client,
+            request_client,
         })
     }
 
-    pub async fn check(&self, settings: &OrderRecognitionSettings) -> AppResult<RecognizerStatus> {
-        if !matches!(settings.provider, OrderRecognitionProvider::Ollama) {
+    pub async fn check(&self, settings: &LlmSettings) -> AppResult<LlmStatus> {
+        if !matches!(settings.provider, LlmProvider::Ollama) {
             return self.check_openai(settings).await;
         }
         let base_url = settings.base_url.trim_end_matches('/');
@@ -94,13 +101,13 @@ impl OllamaClient {
         let model_available = tags.models.iter().any(|entry| {
             entry.name == settings.model || entry.model.as_deref() == Some(settings.model.as_str())
         });
-        Ok(RecognizerStatus {
+        Ok(LlmStatus {
             provider: settings.provider,
             reachable: true,
             model_available,
             version: version.version,
             message: if model_available {
-                "Ollama 与视觉模型可用".into()
+                "Ollama 与模型可用".into()
             } else {
                 format!(
                     "未找到模型 {}，请运行：ollama pull {}",
@@ -112,12 +119,12 @@ impl OllamaClient {
 
     pub async fn recognize(
         &self,
-        settings: &OrderRecognitionSettings,
+        settings: &LlmSettings,
         image_path: &Path,
     ) -> AppResult<crate::models::NormalizedOrder> {
         let bytes = tokio::fs::read(image_path).await?;
         let image = base64::engine::general_purpose::STANDARD.encode(bytes);
-        if matches!(settings.provider, OrderRecognitionProvider::Openai) {
+        if matches!(settings.provider, LlmProvider::Openai) {
             return self.recognize_openai(settings, image_path).await;
         }
         let request = json!({
@@ -135,7 +142,7 @@ impl OllamaClient {
             }
         });
         let response = self
-            .ocr_client
+            .request_client
             .post(format!(
                 "{}/api/chat",
                 settings.base_url.trim_end_matches('/')
@@ -164,10 +171,106 @@ impl OllamaClient {
         normalize_ocr(order, raw_json)
     }
 
-    async fn check_openai(
+    pub async fn summarize_match(
         &self,
-        settings: &OrderRecognitionSettings,
-    ) -> AppResult<RecognizerStatus> {
+        settings: &LlmSettings,
+        input: &MatchSummaryInput,
+    ) -> AppResult<String> {
+        let input = serde_json::to_string(input)
+            .map_err(|error| AppError::Internal(format!("无法序列化摘要输入：{error}")))?;
+        let prompt = format!("{MATCH_SUMMARY_PROMPT}\n{input}");
+        let content = if matches!(settings.provider, LlmProvider::Openai) {
+            self.summarize_match_openai(settings, &prompt).await?
+        } else {
+            self.summarize_match_ollama(settings, &prompt).await?
+        };
+        normalize_match_summary(&content)
+    }
+
+    async fn summarize_match_ollama(
+        &self,
+        settings: &LlmSettings,
+        prompt: &str,
+    ) -> AppResult<String> {
+        let response = self
+            .request_client
+            .post(format!(
+                "{}/api/chat",
+                settings.base_url.trim_end_matches('/')
+            ))
+            .json(&json!({
+                "model": settings.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": false,
+                "format": match_summary_schema(),
+                "options": {"num_ctx": 16384, "temperature": 0}
+            }))
+            .send()
+            .await
+            .map_err(|error| AppError::OllamaUnavailable(error.to_string()))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(AppError::ModelMissing(settings.model.clone()));
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|error| AppError::OllamaUnavailable(error.to_string()))?
+            .json::<ChatResponse>()
+            .await
+            .map_err(|error| AppError::LlmService(format!("无法解析 Ollama 摘要响应：{error}")))?;
+        Ok(response.message.content)
+    }
+
+    async fn summarize_match_openai(
+        &self,
+        settings: &LlmSettings,
+        prompt: &str,
+    ) -> AppResult<String> {
+        let mut call = self
+            .request_client
+            .post(format!(
+                "{}/chat/completions",
+                settings.base_url.trim_end_matches('/')
+            ))
+            .json(&json!({
+                "model": settings.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "match_product_summary",
+                        "strict": true,
+                        "schema": match_summary_schema()
+                    }
+                }
+            }));
+        if !settings.api_key.is_empty() {
+            call = call.bearer_auth(&settings.api_key);
+        }
+        let response = call
+            .send()
+            .await
+            .map_err(|error| AppError::LlmService(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            return Err(AppError::LlmService(format!(
+                "HTTP {status}：{}",
+                detail.chars().take(300).collect::<String>()
+            )));
+        }
+        response
+            .json::<OpenAiChatResponse>()
+            .await
+            .map_err(|error| AppError::LlmService(format!("无法解析摘要响应：{error}")))?
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| choice.message.content)
+            .ok_or_else(|| AppError::LlmService("摘要响应没有返回内容".into()))
+    }
+
+    async fn check_openai(&self, settings: &LlmSettings) -> AppResult<LlmStatus> {
         let mut request = self.check_client.get(format!(
             "{}/models",
             settings.base_url.trim_end_matches('/')
@@ -178,9 +281,9 @@ impl OllamaClient {
         let response = request
             .send()
             .await
-            .map_err(|error| AppError::RecognitionService(error.to_string()))?;
+            .map_err(|error| AppError::LlmService(error.to_string()))?;
         if !response.status().is_success() {
-            return Err(AppError::RecognitionService(format!(
+            return Err(AppError::LlmService(format!(
                 "服务返回 HTTP {}",
                 response.status()
             )));
@@ -188,17 +291,17 @@ impl OllamaClient {
         let payload: serde_json::Value = response
             .json()
             .await
-            .map_err(|error| AppError::RecognitionService(format!("无法解析模型列表：{error}")))?;
+            .map_err(|error| AppError::LlmService(format!("无法解析模型列表：{error}")))?;
         let model_available = payload["data"]
             .as_array()
             .is_none_or(|models| models.iter().any(|entry| entry["id"] == settings.model));
-        Ok(RecognizerStatus {
+        Ok(LlmStatus {
             provider: settings.provider,
             reachable: true,
             model_available,
             version: None,
             message: if model_available {
-                "识别服务与模型可用".into()
+                "模型服务可用".into()
             } else {
                 format!("服务可连接，但模型列表中未找到 {}", settings.model)
             },
@@ -207,7 +310,7 @@ impl OllamaClient {
 
     async fn recognize_openai(
         &self,
-        settings: &OrderRecognitionSettings,
+        settings: &LlmSettings,
         image_path: &Path,
     ) -> AppResult<crate::models::NormalizedOrder> {
         let bytes = tokio::fs::read(image_path).await?;
@@ -217,7 +320,7 @@ impl OllamaClient {
         let image = base64::engine::general_purpose::STANDARD.encode(bytes);
         let request = openai_request(&settings.model, &format!("data:{mime};base64,{image}"));
         let mut call = self
-            .ocr_client
+            .request_client
             .post(format!(
                 "{}/chat/completions",
                 settings.base_url.trim_end_matches('/')
@@ -229,11 +332,11 @@ impl OllamaClient {
         let response = call
             .send()
             .await
-            .map_err(|error| AppError::RecognitionService(error.to_string()))?;
+            .map_err(|error| AppError::LlmService(error.to_string()))?;
         let status = response.status();
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
-            return Err(AppError::RecognitionService(format!(
+            return Err(AppError::LlmService(format!(
                 "HTTP {status}：{}",
                 detail.chars().take(300).collect::<String>()
             )));
@@ -250,6 +353,42 @@ impl OllamaClient {
             .ok_or_else(|| AppError::InvalidOcr("识别响应没有返回内容".into()))?;
         normalize_content(&content)
     }
+}
+
+#[derive(Deserialize)]
+struct MatchSummaryResponse {
+    display_name: String,
+}
+
+fn normalize_match_summary(content: &str) -> AppResult<String> {
+    let raw = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let response: MatchSummaryResponse = serde_json::from_str(raw)
+        .map_err(|error| AppError::LlmService(format!("商品摘要 JSON Schema 校验失败：{error}")))?;
+    let display_name = response.display_name.trim();
+    if display_name.is_empty() {
+        return Err(AppError::LlmService("商品摘要不能为空".into()));
+    }
+    if display_name.contains(['\r', '\n']) {
+        return Err(AppError::LlmService("商品摘要必须为单行文本".into()));
+    }
+    if display_name.chars().count() > 60 {
+        return Err(AppError::LlmService("商品摘要不能超过 60 个字符".into()));
+    }
+    Ok(display_name.to_owned())
+}
+
+fn match_summary_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {"display_name": {"type": "string"}},
+        "required": ["display_name"],
+        "additionalProperties": false
+    })
 }
 
 #[derive(Deserialize)]
@@ -332,6 +471,125 @@ mod tests {
         assert_eq!(schema["additionalProperties"], false);
     }
 
+    #[test]
+    fn validates_match_summary_as_short_single_line_text() {
+        assert_eq!(
+            normalize_match_summary(r#"{"display_name":" 打印机墨盒与办公用纸 "}"#).unwrap(),
+            "打印机墨盒与办公用纸"
+        );
+        assert!(normalize_match_summary(r#"{"display_name":""}"#).is_err());
+        assert!(normalize_match_summary(r#"{"display_name":"第一行\n第二行"}"#).is_err());
+        let too_long = "商品".repeat(31);
+        assert!(normalize_match_summary(&format!(r#"{{"display_name":"{too_long}"}}"#)).is_err());
+    }
+
+    #[tokio::test]
+    async fn ollama_summary_uses_complete_inputs_without_inferring_purpose() {
+        let captured = Arc::new(Mutex::new(None::<Value>));
+        let route_capture = captured.clone();
+        let router = Router::new().route(
+            "/api/chat",
+            post(move |Json(body): Json<Value>| {
+                let route_capture = route_capture.clone();
+                async move {
+                    *route_capture.lock().await = Some(body);
+                    Json(json!({"message": {"content": "{\"display_name\":\"墨盒与打印纸\"}"}}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, router).into_future());
+        let settings = LlmSettings {
+            provider: LlmProvider::Ollama,
+            base_url: format!("http://{address}"),
+            model: "shared-model".into(),
+            api_key: String::new(),
+        };
+        let input = MatchSummaryInput {
+            invoice_id: "invoice-a".into(),
+            seller_name: Some("耗材销售方".into()),
+            invoice_items: vec![crate::models::MatchSummaryInvoiceItem {
+                name: "硒鼓".into(),
+                specification: Some("黑色".into()),
+                unit: Some("个".into()),
+                quantity: Some("2".into()),
+                unit_price_fen: Some(3000),
+                amount_fen: Some(6000),
+                tax_rate: Some("13%".into()),
+                tax_fen: Some(780),
+            }],
+            orders: vec![crate::models::MatchSummaryOrder {
+                shop_name: Some("打印耗材店".into()),
+                product_names: vec!["原装墨盒".into(), "A4 打印纸".into()],
+            }],
+        };
+
+        assert_eq!(
+            LlmClient::new()
+                .unwrap()
+                .summarize_match(&settings, &input)
+                .await
+                .unwrap(),
+            "墨盒与打印纸"
+        );
+        let body = captured.lock().await.clone().unwrap();
+        let prompt = body["messages"][0]["content"].as_str().unwrap();
+        assert!(prompt.contains("不要主动推断购买目的"));
+        assert!(prompt.contains("耗材销售方"));
+        assert!(prompt.contains("硒鼓"));
+        assert!(prompt.contains("原装墨盒"));
+        assert!(prompt.contains("打印耗材店"));
+        assert!(!prompt.contains("invoice-a"));
+        assert_eq!(body["format"]["required"][0], "display_name");
+    }
+
+    #[tokio::test]
+    async fn openai_summary_uses_json_schema_and_bearer_auth() {
+        let captured = Arc::new(Mutex::new(None::<(HeaderMap, Value)>));
+        let route_capture = captured.clone();
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let route_capture = route_capture.clone();
+                async move {
+                    *route_capture.lock().await = Some((headers, body));
+                    Json(json!({"choices": [{"message": {"content": "{\"display_name\":\"数据线与充电器\"}"}}]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, router).into_future());
+        let settings = LlmSettings {
+            provider: LlmProvider::Openai,
+            base_url: format!("http://{address}/v1"),
+            model: "shared-model".into(),
+            api_key: "secret-key".into(),
+        };
+        let input = MatchSummaryInput {
+            invoice_id: "invoice-b".into(),
+            seller_name: None,
+            invoice_items: Vec::new(),
+            orders: vec![crate::models::MatchSummaryOrder {
+                shop_name: None,
+                product_names: vec!["数据线".into(), "充电器".into()],
+            }],
+        };
+        assert_eq!(
+            LlmClient::new()
+                .unwrap()
+                .summarize_match(&settings, &input)
+                .await
+                .unwrap(),
+            "数据线与充电器"
+        );
+        let (headers, body) = captured.lock().await.clone().unwrap();
+        assert_eq!(headers["authorization"], "Bearer secret-key");
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+    }
+
     #[tokio::test]
     async fn sends_structured_vision_request_and_normalizes_response() {
         let captured = Arc::new(Mutex::new(None::<Value>));
@@ -356,14 +614,13 @@ mod tests {
 
         let image = NamedTempFile::new().unwrap();
         std::fs::write(image.path(), b"image bytes").unwrap();
-        let settings = OrderRecognitionSettings {
-            provider: OrderRecognitionProvider::Ollama,
+        let settings = LlmSettings {
+            provider: LlmProvider::Ollama,
             base_url: format!("http://{address}"),
             model: "vision:test".into(),
             api_key: String::new(),
-            max_concurrency: 3,
         };
-        let result = OllamaClient::new()
+        let result = LlmClient::new()
             .unwrap()
             .recognize(&settings, image.path())
             .await
@@ -412,14 +669,13 @@ mod tests {
 
         let image = NamedTempFile::new().unwrap();
         std::fs::write(image.path(), b"image bytes").unwrap();
-        let settings = OrderRecognitionSettings {
-            provider: OrderRecognitionProvider::Openai,
+        let settings = LlmSettings {
+            provider: LlmProvider::Openai,
             base_url: format!("http://{address}/v1"),
             model: "compatible-vision".into(),
             api_key: "secret-key".into(),
-            max_concurrency: 2,
         };
-        let result = OllamaClient::new()
+        let result = LlmClient::new()
             .unwrap()
             .recognize(&settings, image.path())
             .await

@@ -16,13 +16,13 @@ pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum OrderRecognitionProvider {
+pub enum LlmProvider {
     #[default]
     Ollama,
     Openai,
 }
 
-impl OrderRecognitionProvider {
+impl LlmProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ollama => "ollama",
@@ -34,14 +34,14 @@ impl OrderRecognitionProvider {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
-    pub order_recognition_provider: OrderRecognitionProvider,
+    pub llm_provider: LlmProvider,
     pub ollama_base_url: String,
     pub ollama_model: String,
     pub openai_base_url: String,
     pub openai_model: String,
     pub openai_api_key_masked: Option<String>,
     pub openai_api_key_configured: bool,
-    pub max_concurrency: u8,
+    pub order_recognition_max_concurrency: u8,
     pub tencent_secret_id_masked: Option<String>,
     pub tencent_credentials_configured: bool,
     pub invoice_ocr_concurrency: u8,
@@ -54,14 +54,14 @@ pub struct AppSettings {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSettingsRequest {
-    pub order_recognition_provider: OrderRecognitionProvider,
+    pub llm_provider: LlmProvider,
     pub ollama_base_url: String,
     pub ollama_model: String,
     pub openai_base_url: String,
     pub openai_model: String,
     pub openai_api_key: Option<String>,
     pub clear_openai_api_key: bool,
-    pub max_concurrency: u8,
+    pub order_recognition_max_concurrency: u8,
     pub tencent_secret_id: Option<String>,
     pub tencent_secret_key: Option<String>,
     pub clear_tencent_credentials: bool,
@@ -76,9 +76,9 @@ impl UpdateSettingsRequest {
         let openai_base_url = validate_url("OpenAI 兼容地址", &self.openai_base_url)?;
         let ollama_model = validate_model("Ollama 模型", &self.ollama_model)?;
         let openai_model = validate_model("OpenAI 兼容模型", &self.openai_model)?;
-        if !(MIN_CONCURRENCY..=MAX_CONCURRENCY).contains(&self.max_concurrency) {
+        if !(MIN_CONCURRENCY..=MAX_CONCURRENCY).contains(&self.order_recognition_max_concurrency) {
             return Err(crate::error::AppError::InvalidInput(
-                "最大并发数必须在 1 到 8 之间".into(),
+                "订单识别最大并发数必须在 1 到 8 之间".into(),
             ));
         }
         if !(MIN_CONCURRENCY..=MAX_INVOICE_OCR_CONCURRENCY).contains(&self.invoice_ocr_concurrency)
@@ -100,14 +100,14 @@ impl UpdateSettingsRequest {
             ));
         }
         Ok(AppSettings {
-            order_recognition_provider: self.order_recognition_provider,
+            llm_provider: self.llm_provider,
             ollama_base_url,
             ollama_model,
             openai_base_url,
             openai_model,
             openai_api_key_masked: None,
             openai_api_key_configured: false,
-            max_concurrency: self.max_concurrency,
+            order_recognition_max_concurrency: self.order_recognition_max_concurrency,
             tencent_secret_id_masked: None,
             tencent_credentials_configured: false,
             invoice_ocr_concurrency: self.invoice_ocr_concurrency,
@@ -121,13 +121,13 @@ impl UpdateSettingsRequest {
 
 #[derive(Clone, Debug)]
 pub struct PrivateAppSettings {
-    pub order_recognition_provider: OrderRecognitionProvider,
+    pub llm_provider: LlmProvider,
     pub ollama_base_url: String,
     pub ollama_model: String,
     pub openai_base_url: String,
     pub openai_model: String,
     pub openai_api_key: String,
-    pub max_concurrency: u8,
+    pub order_recognition_max_concurrency: u8,
     pub tencent_secret_id: String,
     pub tencent_secret_key: String,
     pub invoice_ocr_concurrency: u8,
@@ -140,14 +140,14 @@ pub struct PrivateAppSettings {
 impl PrivateAppSettings {
     pub fn public(&self) -> AppSettings {
         AppSettings {
-            order_recognition_provider: self.order_recognition_provider,
+            llm_provider: self.llm_provider,
             ollama_base_url: self.ollama_base_url.clone(),
             ollama_model: self.ollama_model.clone(),
             openai_base_url: self.openai_base_url.clone(),
             openai_model: self.openai_model.clone(),
             openai_api_key_masked: mask_secret_id(&self.openai_api_key),
             openai_api_key_configured: !self.openai_api_key.is_empty(),
-            max_concurrency: self.max_concurrency,
+            order_recognition_max_concurrency: self.order_recognition_max_concurrency,
             tencent_secret_id_masked: mask_secret_id(&self.tencent_secret_id),
             tencent_credentials_configured: !self.tencent_secret_id.is_empty()
                 && !self.tencent_secret_key.is_empty(),
@@ -159,33 +159,72 @@ impl PrivateAppSettings {
         }
     }
 
-    pub fn order_recognition(&self) -> OrderRecognitionSettings {
-        OrderRecognitionSettings {
-            provider: self.order_recognition_provider,
-            base_url: match self.order_recognition_provider {
-                OrderRecognitionProvider::Ollama => self.ollama_base_url.clone(),
-                OrderRecognitionProvider::Openai => self.openai_base_url.clone(),
+    pub fn llm(&self) -> LlmSettings {
+        LlmSettings {
+            provider: self.llm_provider,
+            base_url: match self.llm_provider {
+                LlmProvider::Ollama => self.ollama_base_url.clone(),
+                LlmProvider::Openai => self.openai_base_url.clone(),
             },
-            model: match self.order_recognition_provider {
-                OrderRecognitionProvider::Ollama => self.ollama_model.clone(),
-                OrderRecognitionProvider::Openai => self.openai_model.clone(),
+            model: match self.llm_provider {
+                LlmProvider::Ollama => self.ollama_model.clone(),
+                LlmProvider::Openai => self.openai_model.clone(),
             },
-            api_key: match self.order_recognition_provider {
-                OrderRecognitionProvider::Ollama => String::new(),
-                OrderRecognitionProvider::Openai => self.openai_api_key.clone(),
+            api_key: match self.llm_provider {
+                LlmProvider::Ollama => String::new(),
+                LlmProvider::Openai => self.openai_api_key.clone(),
             },
-            max_concurrency: self.max_concurrency,
         }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct OrderRecognitionSettings {
-    pub provider: OrderRecognitionProvider,
+pub struct LlmSettings {
+    pub provider: LlmProvider,
     pub base_url: String,
     pub model: String,
     pub api_key: String,
-    pub max_concurrency: u8,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MatchSummaryInvoiceItem {
+    pub name: String,
+    pub specification: Option<String>,
+    pub unit: Option<String>,
+    pub quantity: Option<String>,
+    pub unit_price_fen: Option<i64>,
+    pub amount_fen: Option<i64>,
+    pub tax_rate: Option<String>,
+    pub tax_fen: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MatchSummaryOrder {
+    pub shop_name: Option<String>,
+    pub product_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MatchSummaryInput {
+    #[serde(skip_serializing)]
+    pub invoice_id: String,
+    pub seller_name: Option<String>,
+    pub invoice_items: Vec<MatchSummaryInvoiceItem>,
+    pub orders: Vec<MatchSummaryOrder>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClaimedMatchSummary {
+    pub invoice_id: String,
+    pub input: MatchSummaryInput,
+    pub input_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummaryUpdatedEvent {
+    pub invoice_id: String,
+    pub status: String,
 }
 
 fn validate_url(label: &str, value: &str) -> crate::error::AppResult<String> {
@@ -403,8 +442,8 @@ pub struct BootstrapState {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RecognizerStatus {
-    pub provider: OrderRecognitionProvider,
+pub struct LlmStatus {
+    pub provider: LlmProvider,
     pub reachable: bool,
     pub model_available: bool,
     pub version: Option<String>,
@@ -909,6 +948,12 @@ pub struct MatchingInvoiceItem {
     pub candidates: Vec<MatchCandidate>,
     pub confirmed_source: Option<String>,
     pub confirmed_at: Option<String>,
+    pub display_name: Option<String>,
+    pub summary_status: Option<String>,
+    pub summary_error: Option<String>,
+    pub summary_provider: Option<String>,
+    pub summary_model: Option<String>,
+    pub summary_generated_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1023,6 +1068,12 @@ pub struct ProjectOrderSummary {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectInvoiceMember {
     pub id: String,
+    pub display_name: String,
+    pub summary_status: Option<String>,
+    pub summary_error: Option<String>,
+    pub summary_provider: Option<String>,
+    pub summary_model: Option<String>,
+    pub summary_generated_at: Option<String>,
     pub position: i32,
     pub type_description: String,
     pub invoice_code: Option<String>,

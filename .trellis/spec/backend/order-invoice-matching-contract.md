@@ -12,6 +12,7 @@ list_matchable_orders(query: MatchableOrdersQuery) -> MatchableOrdersPage
 confirm_invoice_match(request: ConfirmInvoiceMatchRequest) -> ConfirmInvoiceMatchResult
 confirm_invoice_matches(request: { matches: ConfirmInvoiceMatchRequest[] }) -> ConfirmInvoiceMatchResult[]
 unconfirm_invoice_match(request: { id: string }) -> ()
+retry_match_summary(request: { id: string }) -> ()
 ledger_match_projection(maxOrdersPerCandidate, maxCandidatesPerInvoice) -> {
   invoices: Map<invoiceId, "unmatched" | "matched" | "confirmed">,
   orders: Map<orderId, "unmatched" | "matched" | "confirmed">
@@ -24,7 +25,7 @@ Durable schema:
 invoices 1 -- 0..1 invoice_matches 1 -- 1..* invoice_match_orders * -- 1 orders
 ```
 
-`invoice_matches.invoice_id` is unique. `invoice_match_orders.order_id` is globally unique so an order cannot belong to two confirmed invoices.
+`invoice_matches.invoice_id` is unique. `invoice_match_orders.order_id` is globally unique so an order cannot belong to two confirmed invoices. `invoice_matches` also stores nullable `display_name`, `summary_error`, provider/model/input-hash/generated-at audit, and `summary_status = pending | processing | succeeded | failed`.
 
 ## 3. Contracts
 
@@ -40,8 +41,13 @@ invoices 1 -- 0..1 invoice_matches 1 -- 1..* invoice_match_orders * -- 1 orders
 - Automatic candidates are limited by version-1 `settings.toml` `[matching]` values: `max_orders_per_candidate` defaults to `10` and validates to `2..=20`; `max_candidates_per_invoice` defaults to `100` and validates to `10..=500`. A deterministic search-node budget also prevents no-solution exponential traversal; exhausting either limit routes the invoice to custom matching. Missing sections in an older version-1 file receive defaults.
 - Single automatic confirmation revalidates that the selected combination still exists; conflict combinations may be selected manually. Batch confirmation additionally requires every item to remain globally conflict-free and commits all items in one transaction.
 - Custom matching may override money, date, and shop differences. The first request returns `confirmed: false` plus concrete `differences`; only a repeated request with `acceptMismatches: true` may persist it.
-- Updating an order's amount/date/shop or an invoice's total/date/currency deletes its confirmed relationship in the same transaction. Other field changes preserve it.
+- Single and batch confirmation create `pending` summary state inside the existing confirmation transaction. After commit, a separate single-concurrency queue claims work, re-reads the current global LLM setting, and calls no external service inside the match transaction. Existing successful summaries remain unchanged when the configured model changes.
+- Summary input is exactly the invoice seller and every invoice line item's name/spec/unit/quantity/unit-price/amount/tax fields plus every confirmed order's shop and all ordered product names. Internal IDs are excluded from the model payload. The prompt asks for a short Chinese product overview, does not require purpose, and forbids inferring purchase purpose, reimbursement context, project, user, merchant names, money, identifiers, and quantity lists. Output must be non-empty, single-line, and at most 60 Unicode characters.
+- `displayName` is backend-owned: use a successful generated summary; otherwise join all non-empty confirmed-order product names in order; otherwise join external order numbers/internal IDs. Matching, project detail, XLSX, and ZIP folder naming must consume that projection rather than reimplement fallback rules.
+- Startup migration backfills historical matches as `pending`; startup recovery changes interrupted `processing` work to `pending`. Failures remain `failed` with a bounded error and provider/model audit until `retry_match_summary` explicitly returns them to `pending`; they do not auto-loop.
+- Updating an order's amount/date/shop or an invoice's total/date/currency deletes its confirmed relationship in the same transaction. Preserved-match changes to order product names or invoice seller reset summary state to `pending`; the claimed input hash prevents an older response from completing after a reset. Current invoice line items have no edit API, but any future line-item mutation must apply the same reset rule.
 - Delete commands return `matching_locked` for confirmed orders or invoices. Bulk delete retains its per-item continuation behavior.
+- The backend emits `match-summary-updated` as `{ invoiceId, status }` after durable state changes. It is an invalidation signal; consumers reload matching/project projections instead of deriving state from the event payload.
 
 ## 4. Validation & Error Matrix
 
@@ -59,6 +65,9 @@ invoices 1 -- 0..1 invoice_matches 1 -- 1..* invoice_match_orders * -- 1 orders
 | Delete a confirmed record | Return `matching_locked` before filesystem compensation starts |
 | Invoice belongs to an archived project | Omit it from matching candidates/page; preserve any confirmed relationship and order occupancy |
 | Automatic graph has ambiguity, conflict, or overflow | Project the unconfirmed invoice/orders as `unmatched`, not `matched` |
+| Summary request/protocol/output fails | Keep the match confirmed, mark summary `failed`, expose deterministic fallback, and allow explicit retry |
+| App exits while summary is `processing` | Recover it to `pending` after migrations and process it on startup |
+| Summary input changes during an in-flight request | Reset to `pending`; reject the stale completion by status/input hash |
 
 ## 5. Good/Base/Bad Cases
 
@@ -66,6 +75,8 @@ invoices 1 -- 0..1 invoice_matches 1 -- 1..* invoice_match_orders * -- 1 orders
 - Good: equal-count suspected-repurchase groups with repeated complete dates still produce non-overlapping suggestions; IDs make same-day pairing deterministic without becoming business grouping fields.
 - Good: a custom mismatch preview writes nothing; explicit acceptance then stores one relationship transactionally.
 - Good: the order and invoice ledgers call the same global candidate projection, so a cross-invoice order conflict is `unmatched` on both pages.
+- Good: confirming a match returns immediately; the summary later becomes `succeeded` and replaces the fallback product name without changing the relationship.
+- Base: the model is offline, so the match stays confirmed/exportable, the UI shows all product names as `displayName`, and the failed item offers retry.
 - Base: candidate enumeration reaches its configured limit and returns a conflict reason with no confirmable truncated combination.
 - Bad: persisting suggestions, computing match state from only the current page, treating missing money as zero, enforcing date comparison when one date is absent, confirming batch items one transaction at a time, or relying only on React to prevent order reuse.
 
@@ -76,6 +87,7 @@ invoices 1 -- 0..1 invoice_matches 1 -- 1..* invoice_match_orders * -- 1 orders
 - Projection tests must assert unique suggestions as `matched`, persisted relationships as `confirmed`, cross-conflicts as `unmatched`, and archived project members absent from matching while their confirmed orders remain occupied.
 - Migration tests for fresh files, m0003 upgrade with seeded orders/invoices, interrupted m0004 recovery, cascade behavior, and the unique order constraint.
 - Settings tests for defaults, ranges, old version-1 files, atomic replacement, permissions, and credential-free public responses.
+- Summary tests for complete model input, no-purpose prompt, Ollama/OpenAI strict schemas, single-line/length validation, migration/backfill/restart recovery, explicit retry, product/seller edit reset, stale-hash discard, deterministic fallback, and invalidation events.
 
 ## 7. Wrong vs Correct
 
@@ -94,3 +106,7 @@ Correct: validate current automatic suggestions, then insert every relationship 
 Wrong: derive ledger state from whether a record happens to have any candidate on the current page.
 
 Correct: build the complete shared candidate graph once, apply global conflict classification, then map invoice and order IDs to the three ledger states.
+
+Wrong: call the LLM before committing a confirmed match or make summary success an export prerequisite.
+
+Correct: commit `pending` atomically with the match, generate afterward through the durable queue, and always expose a deterministic non-blocking `displayName` fallback.

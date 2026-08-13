@@ -10,10 +10,12 @@ import {
   Download,
   FileArchive,
   FolderKanban,
+  Info,
   LoaderCircle,
   Pencil,
   Plus,
   Search,
+  RefreshCw,
   Trash2,
   X,
 } from "lucide-react"
@@ -200,6 +202,17 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
     }
   }
 
+  const retrySummary = async (invoiceId: string) => {
+    if (!detail) return
+    try {
+      await api.retryMatchSummary(invoiceId)
+      toast.success("商品摘要已重新排队")
+      await loadDetail(detail.id)
+    } catch (error) {
+      toast.error(errorMessage(error))
+    }
+  }
+
   const chooseExportDirectory = async () => {
     if (!detail || !detail.exportable || exporting) return
     const directory = await open({ directory: true, multiple: false, title: "选择项目材料包导出目录" })
@@ -243,8 +256,9 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
               </div>
             </div>
             {detail.blockingReason && <div className="shrink-0 border-b px-6 py-3"><Alert variant={detail.exportable ? "default" : "destructive"}><AlertTriangle /><AlertTitle>当前不可导出</AlertTitle><AlertDescription>{detail.blockingReason}</AlertDescription></Alert></div>}
+            {detail.invoices.some((invoice) => invoice.summaryStatus === "pending" || invoice.summaryStatus === "processing" || invoice.summaryStatus === "failed") && <div className="shrink-0 border-b px-6 py-3"><Alert><Info /><AlertTitle>部分商品摘要尚未完成</AlertTitle><AlertDescription>当前使用订单商品或订单号作为组合名称，不影响材料包导出。</AlertDescription></Alert></div>}
             <div className={cn("min-h-0 flex-1 overflow-auto", detailLoading && "opacity-60")}>
-              <Table><TableHeader className="sticky top-0 z-10 bg-zinc-50"><TableRow><TableHead className="w-20">顺序</TableHead><TableHead>发票</TableHead><TableHead>销售方</TableHead><TableHead>订单与商品</TableHead><TableHead>状态</TableHead><TableHead className="text-right">发票金额</TableHead><TableHead className="text-right">订单金额</TableHead><TableHead className="text-right">实际金额</TableHead></TableRow></TableHeader><TableBody>{detail.invoices.map((invoice, index) => <TableRow key={invoice.id} className="h-16"><TableCell><div className="flex items-center gap-1"><span className="w-6 text-xs tabular-nums text-muted-foreground">{index + 1}</span><Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`上移 ${invoice.invoiceNumber ?? invoice.id}`} disabled={Boolean(detail.archivedAt) || index === 0 || reordering} onClick={() => void moveInvoice(index, -1)} />}><ArrowUp /></TooltipTrigger><TooltipContent>上移</TooltipContent></Tooltip><Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`下移 ${invoice.invoiceNumber ?? invoice.id}`} disabled={Boolean(detail.archivedAt) || index === detail.invoices.length - 1 || reordering} onClick={() => void moveInvoice(index, 1)} />}><ArrowDown /></TooltipTrigger><TooltipContent>下移</TooltipContent></Tooltip></div></TableCell><TableCell><p className="font-medium">{invoice.invoiceNumber ?? "未识别号码"}</p><p className="mt-1 text-xs text-muted-foreground">{invoice.typeDescription} · {invoice.invoiceDate ?? "日期缺失"}</p></TableCell><TableCell className="max-w-44 truncate">{invoice.sellerName ?? "-"}</TableCell><TableCell className="max-w-72"><p className="truncate">{invoice.orders.map((order) => order.externalOrderNumber ?? order.id).join("、") || "-"}</p><p className="mt-1 truncate text-xs text-muted-foreground">{invoice.orders.flatMap((order) => order.productNames).join("、") || "暂无商品摘要"}</p></TableCell><TableCell>{invoice.blockingReason ? <Tooltip><TooltipTrigger render={<Badge variant="destructive" />}>异常</TooltipTrigger><TooltipContent>{invoice.blockingReason}</TooltipContent></Tooltip> : <Badge variant="outline">已确认</Badge>}</TableCell><MoneyCell value={invoice.invoiceAmountFen} /><MoneyCell value={invoice.orderAmountFen} /><MoneyCell value={invoice.actualAmountFen} strong /></TableRow>)}{detail.invoices.length === 0 && <TableRow><TableCell colSpan={8} className="h-72 text-center text-sm text-muted-foreground">请在发票台账中选择发票并分配到此项目</TableCell></TableRow>}</TableBody></Table>
+              <Table><TableHeader className="sticky top-0 z-10 bg-zinc-50"><TableRow><TableHead className="w-20">顺序</TableHead><TableHead>发票</TableHead><TableHead>销售方</TableHead><TableHead>订单组合</TableHead><TableHead>状态</TableHead><TableHead className="text-right">发票金额</TableHead><TableHead className="text-right">订单金额</TableHead><TableHead className="text-right">实际金额</TableHead></TableRow></TableHeader><TableBody>{detail.invoices.map((invoice, index) => <TableRow key={invoice.id} className="h-16"><TableCell><div className="flex items-center gap-1"><span className="w-6 text-xs tabular-nums text-muted-foreground">{index + 1}</span><Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`上移 ${invoice.invoiceNumber ?? invoice.id}`} disabled={Boolean(detail.archivedAt) || index === 0 || reordering} onClick={() => void moveInvoice(index, -1)} />}><ArrowUp /></TooltipTrigger><TooltipContent>上移</TooltipContent></Tooltip><Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`下移 ${invoice.invoiceNumber ?? invoice.id}`} disabled={Boolean(detail.archivedAt) || index === detail.invoices.length - 1 || reordering} onClick={() => void moveInvoice(index, 1)} />}><ArrowDown /></TooltipTrigger><TooltipContent>下移</TooltipContent></Tooltip></div></TableCell><TableCell><p className="font-medium">{invoice.invoiceNumber ?? "未识别号码"}</p><p className="mt-1 text-xs text-muted-foreground">{invoice.typeDescription} · {invoice.invoiceDate ?? "日期缺失"}</p></TableCell><TableCell className="max-w-44 truncate">{invoice.sellerName ?? "-"}</TableCell><TableCell className="max-w-72"><div className="flex items-center gap-1"><p className="truncate font-medium">{invoice.displayName}</p>{invoice.summaryStatus === "pending" && <Badge variant="secondary">待生成</Badge>}{invoice.summaryStatus === "processing" && <Badge variant="secondary"><LoaderCircle className="animate-spin" />生成中</Badge>}{invoice.summaryStatus === "failed" && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`重试商品摘要 ${invoice.invoiceNumber ?? invoice.id}`} onClick={() => void retrySummary(invoice.id)} />}><RefreshCw /></TooltipTrigger><TooltipContent>{invoice.summaryError ?? "商品摘要生成失败"}</TooltipContent></Tooltip>}</div><p className="mt-1 truncate text-xs text-muted-foreground">{invoice.orders.map((order) => order.externalOrderNumber ?? order.id).join("、") || "-"}</p></TableCell><TableCell>{invoice.blockingReason ? <Tooltip><TooltipTrigger render={<Badge variant="destructive" />}>异常</TooltipTrigger><TooltipContent>{invoice.blockingReason}</TooltipContent></Tooltip> : <Badge variant="outline">已确认</Badge>}</TableCell><MoneyCell value={invoice.invoiceAmountFen} /><MoneyCell value={invoice.orderAmountFen} /><MoneyCell value={invoice.actualAmountFen} strong /></TableRow>)}{detail.invoices.length === 0 && <TableRow><TableCell colSpan={8} className="h-72 text-center text-sm text-muted-foreground">请在发票台账中选择发票并分配到此项目</TableCell></TableRow>}</TableBody></Table>
             </div>
           </> : <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground"><FileArchive className="size-10" /><p className="text-sm">选择或创建一个项目</p></div>}
         </main>

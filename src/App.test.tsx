@@ -8,14 +8,14 @@ vi.mock("@/lib/api", () => ({
   api: {
     bootstrap: vi.fn().mockResolvedValue({
       settings: {
-        orderRecognitionProvider: "ollama",
+        llmProvider: "ollama",
         ollamaBaseUrl: "http://127.0.0.1:11434",
         ollamaModel: "model",
         openaiBaseUrl: "https://example.com/v1",
         openaiModel: "vision-model",
         openaiApiKeyMasked: null,
         openaiApiKeyConfigured: false,
-        maxConcurrency: 3,
+        orderRecognitionMaxConcurrency: 3,
         tencentSecretIdMasked: null,
         tencentCredentialsConfigured: false,
         invoiceOcrConcurrency: 3,
@@ -28,6 +28,7 @@ vi.mock("@/lib/api", () => ({
     }),
     listenForOrderImportUpdates: vi.fn().mockResolvedValue(() => undefined),
     listenForInvoiceTaskUpdates: vi.fn().mockResolvedValue(() => undefined),
+    listenForMatchSummaryUpdates: vi.fn().mockResolvedValue(() => undefined),
   },
   errorMessage: () => "操作失败",
 }))

@@ -9,7 +9,7 @@ import type {
   OrderImportPool,
   OrderImportUpdateEvent,
   ImportOrderImagesResult,
-  RecognizerStatus,
+  LlmStatus,
   OrderDetail,
   OrdersPage,
   OrdersQuery,
@@ -30,6 +30,7 @@ import type {
   MatchableOrdersQuery,
   MatchingPageData,
   MatchingQuery,
+  MatchSummaryUpdatedEvent,
   AssignInvoicesResult,
   ExportProjectResult,
   ProjectDetail,
@@ -42,8 +43,8 @@ export const api = {
   getSettings: () => invoke<AppSettings>("get_settings"),
   saveSettings: (request: SaveSettingsRequest) =>
     invoke<AppSettings>("save_settings", { request }),
-  checkOrderRecognizer: (request: SaveSettingsRequest) =>
-    invoke<RecognizerStatus>("check_order_recognizer", { request }),
+  checkLlm: (request: SaveSettingsRequest) =>
+    invoke<LlmStatus>("check_llm", { request }),
   importOrderImages: (imagePaths: string[]) =>
     invoke<ImportOrderImagesResult>("import_order_images", {
       request: { platform: "taobao", imagePaths },
@@ -93,6 +94,8 @@ export const api = {
     invoke<ConfirmInvoiceMatchResult[]>("confirm_invoice_matches", { request: { matches } }),
   unconfirmInvoiceMatch: (id: string) =>
     invoke<void>("unconfirm_invoice_match", { request: { id } }),
+  retryMatchSummary: (id: string) =>
+    invoke<void>("retry_match_summary", { request: { id } }),
   listProjects: (query: ProjectsQuery) =>
     invoke<ProjectsPageData>("list_projects", { query }),
   getProject: (id: string) =>
@@ -128,6 +131,10 @@ export const api = {
     handler: (payload: InvoiceTaskUpdateEvent) => void,
   ): Promise<UnlistenFn> =>
     listen<InvoiceTaskUpdateEvent>("invoice-task-updated", (event) => handler(event.payload)),
+  listenForMatchSummaryUpdates: (
+    handler: (payload: MatchSummaryUpdatedEvent) => void,
+  ): Promise<UnlistenFn> =>
+    listen<MatchSummaryUpdatedEvent>("match-summary-updated", (event) => handler(event.payload)),
   imageUrl: (absolutePath: string) => convertFileSrc(absolutePath),
 }
 

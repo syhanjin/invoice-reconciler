@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  Sparkles,
   Unlink,
 } from "lucide-react"
 import { useCallback, useEffect, useMemo, useState } from "react"
@@ -36,6 +37,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   Table,
   TableBody,
@@ -156,6 +158,19 @@ export function MatchingPage({ refreshToken }: { refreshToken: string }) {
     }
   }
 
+  const retrySummary = async (id: string) => {
+    setSubmitting(true)
+    try {
+      await api.retryMatchSummary(id)
+      toast.success("商品摘要已重新排队")
+      await load()
+    } catch (error) {
+      toast.error(errorMessage(error))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   const totalPages = Math.max(1, Math.ceil(data.total / data.pageSize))
 
   return (
@@ -210,6 +225,7 @@ export function MatchingPage({ refreshToken }: { refreshToken: string }) {
               onConfirm={(candidate) => void confirmOne(item, candidate)}
               onCustom={() => setCustomInvoice(item)}
               onUnconfirm={() => void unconfirm(item.id)}
+              onRetrySummary={() => void retrySummary(item.id)}
             />
           ))}
           {!loading && !data.items.length && <div className="flex h-64 flex-col items-center justify-center gap-3 text-muted-foreground"><GitCompareArrows className="size-8" /><p className="text-sm">当前筛选下没有发票</p></div>}
@@ -223,7 +239,7 @@ export function MatchingPage({ refreshToken }: { refreshToken: string }) {
   )
 }
 
-function MatchingRow({ item, selected, disabled, onSelected, onOpenInvoice, onOpenOrder, onConfirm, onCustom, onUnconfirm }: {
+function MatchingRow({ item, selected, disabled, onSelected, onOpenInvoice, onOpenOrder, onConfirm, onCustom, onUnconfirm, onRetrySummary }: {
   item: MatchingInvoiceItem
   selected: boolean
   disabled: boolean
@@ -233,6 +249,7 @@ function MatchingRow({ item, selected, disabled, onSelected, onOpenInvoice, onOp
   onConfirm: (candidate: MatchCandidate) => void
   onCustom: () => void
   onUnconfirm: () => void
+  onRetrySummary: () => void
 }) {
   const [candidateIndex, setCandidateIndex] = useState(0)
   useEffect(() => setCandidateIndex(0), [item.id, item.candidates.length])
@@ -249,6 +266,7 @@ function MatchingRow({ item, selected, disabled, onSelected, onOpenInvoice, onOp
       </div>
       <div className="min-h-32 p-4">
         {candidate ? <>
+          {item.status === "confirmed" && <div className="mb-3 flex min-h-7 items-center gap-2"><Sparkles className="size-4 text-emerald-700" /><span className="min-w-0 flex-1 truncate text-sm font-medium">{item.displayName ?? "订单组合"}</span>{item.summaryStatus === "pending" && <Badge variant="secondary">待生成</Badge>}{item.summaryStatus === "processing" && <Badge variant="secondary"><LoaderCircle className="animate-spin" />生成中</Badge>}{item.summaryStatus === "failed" && <Tooltip><TooltipTrigger render={<Button type="button" size="icon-xs" variant="outline" aria-label={`重试商品摘要 ${item.invoiceNumber ?? item.id}`} disabled={disabled} onClick={onRetrySummary} />}><RefreshCw /></TooltipTrigger><TooltipContent>{item.summaryError ?? "商品摘要生成失败，点击重试"}</TooltipContent></Tooltip>}</div>}
           {item.candidates.length > 1 && <div className="mb-3 flex flex-wrap gap-2">{item.candidates.map((value, index) => <Button key={value.orderIds.join(":")} size="xs" variant={index === candidateIndex ? "default" : "outline"} onClick={() => setCandidateIndex(index)}>组合 {index + 1}</Button>)}</div>}
           <div className="divide-y border">{candidate.orders.map((order) => <button type="button" key={order.id} className="grid w-full grid-cols-[minmax(150px,1fr)_130px_110px] gap-3 px-3 py-2 text-left text-xs hover:bg-zinc-50" onClick={() => onOpenOrder(order.id)}><span className="truncate"><strong className="font-medium">{order.externalOrderNumber ?? order.id}</strong><span className="ml-2 text-muted-foreground">{order.productSummary}</span></span><span className="truncate">{order.shopName ?? "-"}</span><span className="text-right tabular-nums">{money(order.paidAmountFen)}</span></button>)}</div>
           <div className="mt-3 flex items-center justify-between"><span className="text-xs text-muted-foreground">{candidate.orders.length} 张订单，合计 {money(candidate.totalFen)}</span><div className="flex gap-2">{item.status !== "confirmed" && item.status !== "ineligible" && <Button size="sm" variant="outline" onClick={onCustom}><Settings2 />自定义</Button>}{item.status !== "confirmed" && <Button size="sm" disabled={disabled} onClick={() => onConfirm(candidate)}><Check />确认组合</Button>}{item.status === "confirmed" && <Button size="sm" variant="outline" disabled={disabled} onClick={onUnconfirm}><Unlink />撤销确认</Button>}</div></div>

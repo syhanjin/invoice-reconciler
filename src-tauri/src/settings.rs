@@ -8,16 +8,17 @@ use tokio::sync::RwLock;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     DEFAULT_INVOICE_OCR_CONCURRENCY, DEFAULT_MATCH_MAX_CANDIDATES, DEFAULT_MATCH_MAX_ORDERS,
-    DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, MAX_MATCH_MAX_CANDIDATES, MAX_MATCH_MAX_ORDERS,
-    MIN_MATCH_MAX_CANDIDATES, MIN_MATCH_MAX_ORDERS, OrderRecognitionProvider, PrivateAppSettings,
+    DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, LlmProvider, MAX_MATCH_MAX_CANDIDATES,
+    MAX_MATCH_MAX_ORDERS, MIN_MATCH_MAX_CANDIDATES, MIN_MATCH_MAX_ORDERS, PrivateAppSettings,
     UpdateSettingsRequest,
 };
 
-const SETTINGS_VERSION: u32 = 3;
+const SETTINGS_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SettingsFile {
     version: u32,
+    llm: LlmFile,
     order_recognition: OrderRecognitionFile,
     tencent_cloud: TencentSettings,
     #[serde(default)]
@@ -42,7 +43,7 @@ struct LegacySettingsFile {
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum LegacyOrderRecognitionProvider {
+enum LegacyLlmProvider {
     Ollama,
     Openai,
     AliyunBatch,
@@ -58,12 +59,29 @@ struct LegacyProviderSettingsFile {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+struct VersionThreeSettingsFile {
+    version: u32,
+    order_recognition: VersionThreeOrderRecognitionFile,
+    tencent_cloud: TencentSettings,
+    #[serde(default)]
+    matching: MatchingSettings,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 struct LegacyOrderRecognitionFile {
-    provider: LegacyOrderRecognitionProvider,
+    provider: LegacyLlmProvider,
     max_concurrency: u8,
     ollama: ProviderEndpoint,
     openai: AuthenticatedEndpoint,
     aliyun_batch: LegacyAliyunBatchEndpoint,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct VersionThreeOrderRecognitionFile {
+    provider: LlmProvider,
+    max_concurrency: u8,
+    ollama: ProviderEndpoint,
+    openai: AuthenticatedEndpoint,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -76,8 +94,12 @@ struct LegacyAliyunBatchEndpoint {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct OrderRecognitionFile {
-    provider: OrderRecognitionProvider,
     max_concurrency: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct LlmFile {
+    provider: LlmProvider,
     ollama: ProviderEndpoint,
     openai: AuthenticatedEndpoint,
 }
@@ -160,6 +182,17 @@ impl SettingsStore {
                     write_file(&path, &upgraded).await?;
                     upgraded
                 }
+                3 => {
+                    let legacy: VersionThreeSettingsFile =
+                        toml::from_str(&content).map_err(|_| {
+                            AppError::Settings(
+                                "设置格式无效，请检查 settings.toml 的字段和版本".into(),
+                            )
+                        })?;
+                    let upgraded = from_version_three_file(legacy);
+                    write_file(&path, &upgraded).await?;
+                    upgraded
+                }
                 value if value == i64::from(SETTINGS_VERSION) => {
                     toml::from_str(&content).map_err(|_| {
                         AppError::Settings("设置格式无效，请检查 settings.toml 的字段和版本".into())
@@ -170,9 +203,8 @@ impl SettingsStore {
         } else {
             let initial = SettingsFile {
                 version: SETTINGS_VERSION,
-                order_recognition: OrderRecognitionFile {
-                    provider: OrderRecognitionProvider::Ollama,
-                    max_concurrency: legacy.max_concurrency,
+                llm: LlmFile {
+                    provider: LlmProvider::Ollama,
                     ollama: ProviderEndpoint {
                         base_url: legacy.ollama_base_url,
                         model: legacy.ollama_model,
@@ -182,6 +214,9 @@ impl SettingsStore {
                         model: DEFAULT_OPENAI_MODEL.into(),
                         api_key: String::new(),
                     },
+                },
+                order_recognition: OrderRecognitionFile {
+                    max_concurrency: legacy.order_recognition_max_concurrency,
                 },
                 tencent_cloud: TencentSettings {
                     secret_id: String::new(),
@@ -251,9 +286,8 @@ impl SettingsStore {
         }
         let file = SettingsFile {
             version: SETTINGS_VERSION,
-            order_recognition: OrderRecognitionFile {
-                provider: validated.order_recognition_provider,
-                max_concurrency: validated.max_concurrency,
+            llm: LlmFile {
+                provider: validated.llm_provider,
                 ollama: ProviderEndpoint {
                     base_url: validated.ollama_base_url,
                     model: validated.ollama_model,
@@ -263,6 +297,9 @@ impl SettingsStore {
                     model: validated.openai_model,
                     api_key: openai_api_key,
                 },
+            },
+            order_recognition: OrderRecognitionFile {
+                max_concurrency: validated.order_recognition_max_concurrency,
             },
             tencent_cloud: TencentSettings {
                 secret_id,
@@ -288,23 +325,13 @@ impl SettingsStore {
 
 fn to_private(file: SettingsFile, path: &Path, warning: Option<String>) -> PrivateAppSettings {
     PrivateAppSettings {
-        order_recognition_provider: file.order_recognition.provider,
-        ollama_base_url: file
-            .order_recognition
-            .ollama
-            .base_url
-            .trim_end_matches('/')
-            .to_owned(),
-        ollama_model: file.order_recognition.ollama.model,
-        openai_base_url: file
-            .order_recognition
-            .openai
-            .base_url
-            .trim_end_matches('/')
-            .to_owned(),
-        openai_model: file.order_recognition.openai.model,
-        openai_api_key: file.order_recognition.openai.api_key,
-        max_concurrency: file.order_recognition.max_concurrency.clamp(1, 8),
+        llm_provider: file.llm.provider,
+        ollama_base_url: file.llm.ollama.base_url.trim_end_matches('/').to_owned(),
+        ollama_model: file.llm.ollama.model,
+        openai_base_url: file.llm.openai.base_url.trim_end_matches('/').to_owned(),
+        openai_model: file.llm.openai.model,
+        openai_api_key: file.llm.openai.api_key,
+        order_recognition_max_concurrency: file.order_recognition.max_concurrency.clamp(1, 8),
         tencent_secret_id: file.tencent_cloud.secret_id,
         tencent_secret_key: file.tencent_cloud.secret_key,
         invoice_ocr_concurrency: file.tencent_cloud.invoice_ocr_concurrency.clamp(1, 5),
@@ -336,9 +363,8 @@ fn from_legacy_file(legacy: LegacySettingsFile) -> SettingsFile {
     debug_assert_eq!(legacy.version, 1);
     SettingsFile {
         version: SETTINGS_VERSION,
-        order_recognition: OrderRecognitionFile {
-            provider: OrderRecognitionProvider::Ollama,
-            max_concurrency: legacy.ollama.max_concurrency,
+        llm: LlmFile {
+            provider: LlmProvider::Ollama,
             ollama: ProviderEndpoint {
                 base_url: legacy.ollama.base_url,
                 model: legacy.ollama.model,
@@ -348,6 +374,9 @@ fn from_legacy_file(legacy: LegacySettingsFile) -> SettingsFile {
                 model: DEFAULT_OPENAI_MODEL.into(),
                 api_key: String::new(),
             },
+        },
+        order_recognition: OrderRecognitionFile {
+            max_concurrency: legacy.ollama.max_concurrency,
         },
         tencent_cloud: legacy.tencent_cloud,
         matching: legacy.matching,
@@ -364,15 +393,33 @@ fn from_provider_file(legacy: LegacyProviderSettingsFile) -> SettingsFile {
     );
     SettingsFile {
         version: SETTINGS_VERSION,
-        order_recognition: OrderRecognitionFile {
+        llm: LlmFile {
             provider: match legacy.order_recognition.provider {
-                LegacyOrderRecognitionProvider::Ollama
-                | LegacyOrderRecognitionProvider::AliyunBatch => OrderRecognitionProvider::Ollama,
-                LegacyOrderRecognitionProvider::Openai => OrderRecognitionProvider::Openai,
+                LegacyLlmProvider::Ollama | LegacyLlmProvider::AliyunBatch => LlmProvider::Ollama,
+                LegacyLlmProvider::Openai => LlmProvider::Openai,
             },
-            max_concurrency: legacy.order_recognition.max_concurrency,
             ollama: legacy.order_recognition.ollama,
             openai: legacy.order_recognition.openai,
+        },
+        order_recognition: OrderRecognitionFile {
+            max_concurrency: legacy.order_recognition.max_concurrency,
+        },
+        tencent_cloud: legacy.tencent_cloud,
+        matching: legacy.matching,
+    }
+}
+
+fn from_version_three_file(legacy: VersionThreeSettingsFile) -> SettingsFile {
+    debug_assert_eq!(legacy.version, 3);
+    SettingsFile {
+        version: SETTINGS_VERSION,
+        llm: LlmFile {
+            provider: legacy.order_recognition.provider,
+            ollama: legacy.order_recognition.ollama,
+            openai: legacy.order_recognition.openai,
+        },
+        order_recognition: OrderRecognitionFile {
+            max_concurrency: legacy.order_recognition.max_concurrency,
         },
         tencent_cloud: legacy.tencent_cloud,
         matching: legacy.matching,
@@ -486,14 +533,14 @@ mod tests {
 
     fn legacy() -> AppSettings {
         AppSettings {
-            order_recognition_provider: OrderRecognitionProvider::Ollama,
+            llm_provider: LlmProvider::Ollama,
             ollama_base_url: "http://127.0.0.1:11434".into(),
             ollama_model: "qwen".into(),
             openai_base_url: DEFAULT_OPENAI_BASE_URL.into(),
             openai_model: DEFAULT_OPENAI_MODEL.into(),
             openai_api_key_masked: None,
             openai_api_key_configured: false,
-            max_concurrency: 3,
+            order_recognition_max_concurrency: 3,
             tencent_secret_id_masked: None,
             tencent_credentials_configured: false,
             invoice_ocr_concurrency: 3,
@@ -512,14 +559,14 @@ mod tests {
             .unwrap();
         let saved = store
             .save(UpdateSettingsRequest {
-                order_recognition_provider: OrderRecognitionProvider::Openai,
+                llm_provider: LlmProvider::Openai,
                 ollama_base_url: "http://localhost:11434".into(),
                 ollama_model: "qwen".into(),
                 openai_base_url: "https://api.example.com/v1".into(),
                 openai_model: "vision-model".into(),
                 openai_api_key: Some("openai-private".into()),
                 clear_openai_api_key: false,
-                max_concurrency: 2,
+                order_recognition_max_concurrency: 2,
                 tencent_secret_id: Some("AKID1234567890".into()),
                 tencent_secret_key: Some("private-value".into()),
                 clear_tencent_credentials: false,
@@ -586,16 +633,14 @@ mod tests {
             .await
             .unwrap();
         let public = store.public().await;
-        assert_eq!(
-            public.order_recognition_provider,
-            OrderRecognitionProvider::Ollama
-        );
+        assert_eq!(public.llm_provider, LlmProvider::Ollama);
         assert_eq!(public.match_max_orders, DEFAULT_MATCH_MAX_ORDERS);
         assert_eq!(public.match_max_candidates, DEFAULT_MATCH_MAX_CANDIDATES);
         let upgraded = tokio::fs::read_to_string(directory.path().join("settings.toml"))
             .await
             .unwrap();
-        assert!(upgraded.contains("version = 3"));
+        assert!(upgraded.contains("version = 4"));
+        assert!(upgraded.contains("[llm]"));
         assert!(upgraded.contains("provider = \"ollama\""));
     }
 
@@ -637,15 +682,58 @@ invoice_ocr_concurrency = 3
         let store = SettingsStore::load_or_migrate(directory.path(), legacy())
             .await
             .unwrap();
-        assert_eq!(
-            store.public().await.order_recognition_provider,
-            OrderRecognitionProvider::Ollama
-        );
+        assert_eq!(store.public().await.llm_provider, LlmProvider::Ollama);
         let upgraded = tokio::fs::read_to_string(directory.path().join("settings.toml"))
             .await
             .unwrap();
-        assert!(upgraded.contains("version = 3"));
+        assert!(upgraded.contains("version = 4"));
         assert!(!upgraded.contains("aliyun"));
         assert!(!upgraded.contains("ALIYUN-SENSITIVE-SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn version_three_settings_promote_provider_to_llm_without_losing_key() {
+        let directory = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            directory.path().join("settings.toml"),
+            r#"version = 3
+
+[order_recognition]
+provider = "openai"
+max_concurrency = 5
+
+[order_recognition.ollama]
+base_url = "http://localhost:11434"
+model = "qwen3-vl"
+
+[order_recognition.openai]
+base_url = "https://example.com/v1"
+model = "shared-model"
+api_key = "SENSITIVE-OPENAI-KEY"
+
+[tencent_cloud]
+secret_id = ""
+secret_key = ""
+invoice_ocr_concurrency = 3
+"#,
+        )
+        .await
+        .unwrap();
+
+        let store = SettingsStore::load_or_migrate(directory.path(), legacy())
+            .await
+            .unwrap();
+        let public = store.public().await;
+        assert_eq!(public.llm_provider, LlmProvider::Openai);
+        assert_eq!(public.order_recognition_max_concurrency, 5);
+        assert!(public.openai_api_key_configured);
+        let upgraded = tokio::fs::read_to_string(directory.path().join("settings.toml"))
+            .await
+            .unwrap();
+        assert!(upgraded.contains("version = 4"));
+        assert!(upgraded.contains("[llm.openai]"));
+        assert!(upgraded.contains("SENSITIVE-OPENAI-KEY"));
+        assert!(upgraded.contains("[order_recognition]"));
+        assert!(!upgraded.contains("[order_recognition.openai]"));
     }
 }

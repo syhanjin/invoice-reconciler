@@ -540,6 +540,7 @@ pub async fn update_invoice(
         .update_invoice(request)
         .await
         .map_err(crate::error::CommandError::from)?;
+    state.match_summary_queue.wake();
     resolve_detail_paths(&state, &mut value).map_err(crate::error::CommandError::from)?;
     Ok(value)
 }

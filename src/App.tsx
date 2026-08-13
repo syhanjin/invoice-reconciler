@@ -54,6 +54,7 @@ export function App() {
   const projectRefreshToken = useAtomValue(projectsRefreshAtom)
   const refreshProjects = useSetAtom(projectsRefreshAtom)
   const workspaceRefreshToken = useAtomValue(workspaceRefreshAtom)
+  const refreshWorkspaces = useSetAtom(workspaceRefreshAtom)
   const [activeInvoiceBatch, setActiveInvoiceBatch] = useAtom(activeInvoiceBatchAtom)
   const mergeInvoiceBatch = useSetAtom(mergeInvoiceBatchAtom)
   const mergeInvoiceBatchEvent = useSetAtom(mergeInvoiceBatchEventAtom)
@@ -74,6 +75,7 @@ export function App() {
     let disposed = false
     let unlisten: (() => void) | undefined
     let unlistenInvoice: (() => void) | undefined
+    let unlistenSummary: (() => void) | undefined
     api
       .bootstrap()
       .then((state) => {
@@ -94,12 +96,17 @@ export function App() {
       if (disposed) dispose()
       else unlistenInvoice = dispose
     })
+    api.listenForMatchSummaryUpdates(() => refreshWorkspaces((value) => value + 1)).then((dispose) => {
+      if (disposed) dispose()
+      else unlistenSummary = dispose
+    })
     return () => {
       disposed = true
       unlisten?.()
       unlistenInvoice?.()
+      unlistenSummary?.()
     }
-  }, [mergeOrderImportEvent, mergeInvoiceBatchEvent, setActiveInvoiceBatch, setSettings])
+  }, [mergeOrderImportEvent, mergeInvoiceBatchEvent, refreshWorkspaces, setActiveInvoiceBatch, setSettings])
 
   return (
     <TooltipProvider>
@@ -130,7 +137,7 @@ export function App() {
           )}
           {view === "projects" && (
             <Suspense fallback={<Initializing />}>
-              <ProjectsPage refreshToken={projectRefreshToken} />
+              <ProjectsPage refreshToken={projectRefreshToken + workspaceRefreshToken} />
             </Suspense>
           )}
           {view === "importTasks" && settings && (

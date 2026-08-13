@@ -1,14 +1,14 @@
 export type NavigationView = "orders" | "invoices" | "matching" | "projects" | "importTasks" | "settings"
 
 export interface AppSettings {
-  orderRecognitionProvider: OrderRecognitionProvider
+  llmProvider: LlmProvider
   ollamaBaseUrl: string
   ollamaModel: string
   openaiBaseUrl: string
   openaiModel: string
   openaiApiKeyMasked: string | null
   openaiApiKeyConfigured: boolean
-  maxConcurrency: number
+  orderRecognitionMaxConcurrency: number
   tencentSecretIdMasked: string | null
   tencentCredentialsConfigured: boolean
   invoiceOcrConcurrency: number
@@ -19,14 +19,14 @@ export interface AppSettings {
 }
 
 export interface SaveSettingsRequest {
-  orderRecognitionProvider: OrderRecognitionProvider
+  llmProvider: LlmProvider
   ollamaBaseUrl: string
   ollamaModel: string
   openaiBaseUrl: string
   openaiModel: string
   openaiApiKey: string | null
   clearOpenaiApiKey: boolean
-  maxConcurrency: number
+  orderRecognitionMaxConcurrency: number
   tencentSecretId: string | null
   tencentSecretKey: string | null
   clearTencentCredentials: boolean
@@ -35,7 +35,7 @@ export interface SaveSettingsRequest {
   matchMaxCandidates: number
 }
 
-export type OrderRecognitionProvider = "ollama" | "openai"
+export type LlmProvider = "ollama" | "openai"
 
 export type OrderImportTaskStatus =
   | "pending"
@@ -93,8 +93,13 @@ export interface OrderImportUpdateEvent {
   orderId: string | null
 }
 
-export interface RecognizerStatus {
-  provider: OrderRecognitionProvider
+export interface MatchSummaryUpdatedEvent {
+  invoiceId: string
+  status: MatchSummaryStatus
+}
+
+export interface LlmStatus {
+  provider: LlmProvider
   reachable: boolean
   modelAvailable: boolean
   version: string | null
@@ -444,7 +449,15 @@ export interface MatchingInvoiceItem {
   candidates: MatchCandidate[]
   confirmedSource: "automatic" | "custom" | null
   confirmedAt: string | null
+  displayName: string | null
+  summaryStatus: MatchSummaryStatus | null
+  summaryError: string | null
+  summaryProvider: string | null
+  summaryModel: string | null
+  summaryGeneratedAt: string | null
 }
+
+export type MatchSummaryStatus = "pending" | "processing" | "succeeded" | "failed"
 
 export interface MatchingSummary {
   total: number
@@ -555,6 +568,12 @@ export interface ProjectOrderSummary {
 
 export interface ProjectInvoiceMember {
   id: string
+  displayName: string
+  summaryStatus: MatchSummaryStatus | null
+  summaryError: string | null
+  summaryProvider: string | null
+  summaryModel: string | null
+  summaryGeneratedAt: string | null
   position: number
   typeDescription: string
   invoiceCode: string | null

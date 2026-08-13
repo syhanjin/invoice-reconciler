@@ -93,6 +93,13 @@ impl Database {
                  WHERE status = 'processing'",
             ))
             .await?;
+        connection
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "UPDATE invoice_matches SET summary_status = 'pending', summary_error = NULL \
+                 WHERE summary_status = 'processing'",
+            ))
+            .await?;
         let database = Self { connection };
         database.refresh_open_batches().await?;
         database.refresh_open_invoice_batches().await?;
@@ -482,16 +489,31 @@ impl Database {
         let new_number = clean_optional(request.external_order_number);
         let next_ordered_at = clean_optional(request.ordered_at);
         let next_shop_name = clean_optional(request.shop_name);
+        let old_product_names = order_item::Entity::find()
+            .filter(order_item::Column::OrderId.eq(&request.id))
+            .order_by_asc(order_item::Column::Position)
+            .all(&transaction)
+            .await?
+            .into_iter()
+            .map(|item| item.product_name)
+            .collect::<Vec<_>>();
+        let next_product_names = request
+            .product_names
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let summary_input_changed = old_product_names != next_product_names;
         let matching_fields_changed = model.paid_amount_fen != request.paid_amount_fen
             || model.ordered_at != next_ordered_at
             || model.shop_name != next_shop_name;
-        if matching_fields_changed
-            && let Some(link) = invoice_match_order::Entity::find()
-                .filter(invoice_match_order::Column::OrderId.eq(&request.id))
-                .one(&transaction)
-                .await?
-        {
-            invoice_match::Entity::delete_by_id(link.invoice_id)
+        let matched_link = invoice_match_order::Entity::find()
+            .filter(invoice_match_order::Column::OrderId.eq(&request.id))
+            .one(&transaction)
+            .await?;
+        if matching_fields_changed && let Some(link) = &matched_link {
+            invoice_match::Entity::delete_by_id(&link.invoice_id)
                 .exec(&transaction)
                 .await?;
         }
@@ -506,7 +528,13 @@ impl Database {
             .filter(order_item::Column::OrderId.eq(&request.id))
             .exec(&transaction)
             .await?;
-        insert_products(&transaction, &request.id, &request.product_names).await?;
+        insert_products(&transaction, &request.id, &next_product_names).await?;
+        if summary_input_changed
+            && !matching_fields_changed
+            && let Some(link) = &matched_link
+        {
+            crate::match_summary::reset_match_summary(&transaction, &link.invoice_id).await?;
+        }
         refresh_duplicate_group(&transaction, old_number.as_deref()).await?;
         refresh_duplicate_group(&transaction, new_number.as_deref()).await?;
         transaction.commit().await?;
@@ -666,14 +694,15 @@ impl From<import_task::Model> for ImportTask {
 
 fn settings_from_model(model: app_setting::Model) -> AppSettings {
     AppSettings {
-        order_recognition_provider: crate::models::OrderRecognitionProvider::Ollama,
+        llm_provider: crate::models::LlmProvider::Ollama,
         ollama_base_url: model.ollama_base_url,
         ollama_model: model.ollama_model,
         openai_base_url: crate::models::DEFAULT_OPENAI_BASE_URL.into(),
         openai_model: crate::models::DEFAULT_OPENAI_MODEL.into(),
         openai_api_key_masked: None,
         openai_api_key_configured: false,
-        max_concurrency: u8::try_from(model.max_concurrency).unwrap_or(DEFAULT_MAX_CONCURRENCY),
+        order_recognition_max_concurrency: u8::try_from(model.max_concurrency)
+            .unwrap_or(DEFAULT_MAX_CONCURRENCY),
         tencent_secret_id_masked: None,
         tencent_credentials_configured: false,
         invoice_ocr_concurrency: crate::models::DEFAULT_INVOICE_OCR_CONCURRENCY,

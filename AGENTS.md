@@ -54,6 +54,9 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - Runtime settings live in a versioned application-data `settings.toml`, not
   SQLite. Keep the public settings response credential-free, preserve atomic
   replacement, and enforce `0600` on Unix or a current-user ACL on Windows.
+  Ollama/OpenAI-compatible provider, endpoint, model, and API key are one global
+  LLM configuration shared by order recognition and confirmed-match summaries;
+  order recognition owns only its concurrency setting.
 - Invoice OCR uses Tencent Cloud `RecognizeGeneralInvoice` through the dedicated
   invoice queue. Preserve local preflight/confirmation, the global 5 QPS limit,
   durable raw-response auditing, and the separate `invoice-task-updated` event.
@@ -72,6 +75,12 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
   amount/normalized seller/subtype, then pair equal-count groups by complete dates.
   Repeated dates are allowed and use record IDs only as stable same-day tie-breakers;
   missing dates retain a `疑似回购冲突`. Custom selection omits confirmed orders.
+  Every confirmed relationship owns a durable asynchronous product-summary state.
+  Generate it from all invoice line items and seller plus all matched-order product
+  items and shops; summarize actual goods without requiring or inferring purpose.
+  Preserve single-concurrency processing, startup backfill/recovery, input-hash stale
+  response guards, explicit failed retry, provider/model audit, and deterministic
+  product/order fallback names. Summary failure must never block matching or export.
 - Projects own ordered invoice membership only; one invoice belongs to at most one
   project. Preserve transactional reassignment, position compaction after membership
   or invoice deletion, and project deletion without deleting invoices, matches, files,
@@ -82,7 +91,8 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
   every member has a valid confirmed match, CNY/non-negative amounts, and readable
   independent invoice/order files. Keep money in integer fen, compute actual amount as
   `min(invoice total, confirmed order sum)`, preserve project order across XLSX/folders/PDF,
-  and use temporary generation plus recoverable overwrite for the final ZIP. Prefer an
+  use the backend match `displayName` for the XLSX order-summary column and material
+  folder names, and use temporary generation plus recoverable overwrite for the final ZIP. Prefer an
   original invoice source only when it is proven to contain exactly that invoice; otherwise
   preserve extracted PDF pages or use a same-page cut/crop. Never rasterize PDF materials,
   downsample exported images, or use lossy image re-encoding. Preserve independent image

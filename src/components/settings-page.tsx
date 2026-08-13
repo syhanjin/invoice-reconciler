@@ -5,6 +5,7 @@ import {
   CloudCog,
   FileKey2,
   GitCompareArrows,
+  MessageSquareText,
   LoaderCircle,
   PlugZap,
   Save,
@@ -24,21 +25,21 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api, errorMessage } from "@/lib/api"
-import type { AppSettings, OrderRecognitionProvider, RecognizerStatus, SaveSettingsRequest } from "@/lib/types"
+import type { AppSettings, LlmProvider, LlmStatus, SaveSettingsRequest } from "@/lib/types"
 
 const httpUrl = z
   .url("请输入有效地址")
   .refine((value) => value.startsWith("http://") || value.startsWith("https://"), "仅支持 HTTP(S) 地址")
 
 const settingsSchema = z.object({
-  orderRecognitionProvider: z.enum(["ollama", "openai"]),
+  llmProvider: z.enum(["ollama", "openai"]),
   ollamaBaseUrl: httpUrl,
   ollamaModel: z.string().trim().min(1, "模型名称不能为空").max(200),
   openaiBaseUrl: httpUrl,
   openaiModel: z.string().trim().min(1, "模型名称不能为空").max(200),
   openaiApiKey: z.string().trim().max(500),
   clearOpenaiApiKey: z.boolean(),
-  maxConcurrency: z.number().int().min(1).max(8),
+  orderRecognitionMaxConcurrency: z.number().int().min(1).max(8),
   tencentSecretId: z.string().trim().max(200),
   tencentSecretKey: z.string().trim().max(200),
   clearTencentCredentials: z.boolean(),
@@ -59,19 +60,19 @@ interface SettingsPageProps {
   onSettingsChange: (settings: AppSettings) => void
 }
 
-const providerNames: Record<OrderRecognitionProvider, string> = {
+const providerNames: Record<LlmProvider, string> = {
   ollama: "Ollama",
   openai: "OpenAI 兼容",
 }
 
 export default function SettingsPage({ settings, onSettingsChange }: SettingsPageProps) {
-  const [status, setStatus] = useState<RecognizerStatus | null>(null)
+  const [status, setStatus] = useState<LlmStatus | null>(null)
   const [checking, setChecking] = useState(false)
   const form = useForm<SettingsForm>({
     resolver: zodResolver(settingsSchema),
     defaultValues: formValues(settings),
   })
-  const provider = form.watch("orderRecognitionProvider")
+  const provider = form.watch("llmProvider")
   const clearOpenaiApiKey = form.watch("clearOpenaiApiKey")
   const clearTencentCredentials = form.watch("clearTencentCredentials")
 
@@ -97,7 +98,7 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
     setChecking(true)
     setStatus(null)
     try {
-      setStatus(await api.checkOrderRecognizer(requestFrom(form.getValues())))
+      setStatus(await api.checkLlm(requestFrom(form.getValues())))
     } catch (error) {
       setStatus({
         provider,
@@ -115,7 +116,7 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
     <div className="h-screen overflow-y-auto px-5 py-6 md:px-8 md:py-7">
       <header className="mb-6">
         <h1 className="text-xl font-semibold">设置</h1>
-        <p className="mt-1 text-sm text-muted-foreground">管理订单识别、发票识别与自动匹配参数。</p>
+        <p className="mt-1 text-sm text-muted-foreground">管理模型、订单识别、发票识别与自动匹配参数。</p>
       </header>
       <form onSubmit={save} className="max-w-3xl space-y-5">
         {settings.permissionWarning && (
@@ -129,16 +130,16 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
         <Card className="rounded-md shadow-none">
           <CardHeader>
             <div className="flex items-center gap-3">
-              <div className="flex size-9 items-center justify-center rounded-md bg-zinc-100"><ScanLine className="size-4" /></div>
-              <div><CardTitle className="text-base">订单识别</CardTitle><CardDescription>实时服务自动处理订单任务池</CardDescription></div>
+              <div className="flex size-9 items-center justify-center rounded-md bg-zinc-100"><MessageSquareText className="size-4" /></div>
+              <div><CardTitle className="text-base">模型配置</CardTitle><CardDescription>用于订单图片识别和确认组合商品摘要</CardDescription></div>
             </div>
           </CardHeader>
           <CardContent className="space-y-5">
-            <Field label="识别方案">
+            <Field label="模型服务">
               <Select
                 value={provider}
                 onValueChange={(value) => {
-                  form.setValue("orderRecognitionProvider", value as OrderRecognitionProvider, { shouldDirty: true })
+                  form.setValue("llmProvider", value as LlmProvider, { shouldDirty: true })
                   setStatus(null)
                 }}
               >
@@ -155,7 +156,7 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
                 <Field label="服务地址" error={form.formState.errors.ollamaBaseUrl?.message}>
                   <Input {...form.register("ollamaBaseUrl")} />
                 </Field>
-                <Field label="视觉模型" error={form.formState.errors.ollamaModel?.message}>
+                <Field label="模型" error={form.formState.errors.ollamaModel?.message}>
                   <Input {...form.register("ollamaModel")} />
                 </Field>
               </div>
@@ -167,7 +168,7 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
                   <Field label="API 地址" error={form.formState.errors.openaiBaseUrl?.message}>
                     <Input {...form.register("openaiBaseUrl")} />
                   </Field>
-                  <Field label="视觉模型" error={form.formState.errors.openaiModel?.message}>
+                  <Field label="模型" error={form.formState.errors.openaiModel?.message}>
                     <Input {...form.register("openaiModel")} />
                   </Field>
                 </div>
@@ -182,9 +183,6 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
               </>
             )}
 
-            <Field label="最大同时请求数" error={form.formState.errors.maxConcurrency?.message}>
-              <Input type="number" min={1} max={8} className="w-28" {...form.register("maxConcurrency", { valueAsNumber: true })} />
-            </Field>
             <Button type="button" variant="outline" disabled={checking} onClick={check}>
               {checking ? <LoaderCircle className="animate-spin" /> : <PlugZap />}测试连接
             </Button>
@@ -198,6 +196,20 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
             <AlertDescription>{status.message}</AlertDescription>
           </Alert>
         )}
+
+        <Card className="rounded-md shadow-none">
+          <CardHeader>
+            <div className="flex items-center gap-3">
+              <div className="flex size-9 items-center justify-center rounded-md bg-zinc-100"><ScanLine className="size-4" /></div>
+              <div><CardTitle className="text-base">订单识别</CardTitle><CardDescription>实时处理订单图片任务池</CardDescription></div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <Field label="最大同时请求数" error={form.formState.errors.orderRecognitionMaxConcurrency?.message}>
+              <Input type="number" min={1} max={8} className="w-28" {...form.register("orderRecognitionMaxConcurrency", { valueAsNumber: true })} />
+            </Field>
+          </CardContent>
+        </Card>
 
         <Card className="rounded-md shadow-none">
           <CardHeader>
@@ -267,14 +279,14 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
 
 function requestFrom(values: SettingsForm): SaveSettingsRequest {
   return {
-    orderRecognitionProvider: values.orderRecognitionProvider,
+    llmProvider: values.llmProvider,
     ollamaBaseUrl: values.ollamaBaseUrl,
     ollamaModel: values.ollamaModel,
     openaiBaseUrl: values.openaiBaseUrl,
     openaiModel: values.openaiModel,
     openaiApiKey: values.openaiApiKey || null,
     clearOpenaiApiKey: values.clearOpenaiApiKey,
-    maxConcurrency: values.maxConcurrency,
+    orderRecognitionMaxConcurrency: values.orderRecognitionMaxConcurrency,
     tencentSecretId: values.tencentSecretId || null,
     tencentSecretKey: values.tencentSecretKey || null,
     clearTencentCredentials: values.clearTencentCredentials,
@@ -286,14 +298,14 @@ function requestFrom(values: SettingsForm): SaveSettingsRequest {
 
 function formValues(settings: AppSettings): SettingsForm {
   return {
-    orderRecognitionProvider: settings.orderRecognitionProvider,
+    llmProvider: settings.llmProvider,
     ollamaBaseUrl: settings.ollamaBaseUrl,
     ollamaModel: settings.ollamaModel,
     openaiBaseUrl: settings.openaiBaseUrl,
     openaiModel: settings.openaiModel,
     openaiApiKey: "",
     clearOpenaiApiKey: false,
-    maxConcurrency: settings.maxConcurrency,
+    orderRecognitionMaxConcurrency: settings.orderRecognitionMaxConcurrency,
     tencentSecretId: "",
     tencentSecretKey: "",
     clearTencentCredentials: false,

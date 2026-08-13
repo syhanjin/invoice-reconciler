@@ -29,6 +29,12 @@ struct InvoiceRow {
     currency: String,
     confirmed_source: Option<String>,
     confirmed_at: Option<String>,
+    display_name: Option<String>,
+    summary_status: Option<String>,
+    summary_error: Option<String>,
+    summary_provider: Option<String>,
+    summary_model: Option<String>,
+    summary_generated_at: Option<String>,
 }
 
 #[derive(Clone, Debug, FromQueryResult)]
@@ -39,6 +45,11 @@ struct OrderRow {
     ordered_at: Option<String>,
     shop_name: Option<String>,
     product_summary: String,
+}
+
+struct ConfirmedOrders {
+    candidates: HashMap<String, MatchCandidate>,
+    product_names: HashMap<String, Vec<String>>,
 }
 
 pub(crate) struct LedgerMatchProjection {
@@ -81,7 +92,8 @@ impl Database {
         let invoices = InvoiceRow::find_by_statement(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT i.id,i.invoice_number,i.subtype,i.subtype_description,i.invoice_date,i.seller_name,\
-             i.total_fen,i.currency,m.source confirmed_source,m.confirmed_at \
+             i.total_fen,i.currency,m.source confirmed_source,m.confirmed_at,m.display_name,\
+             m.summary_status,m.summary_error,m.summary_provider,m.summary_model,m.summary_generated_at \
              FROM invoices i LEFT JOIN invoice_matches m ON m.invoice_id=i.id \
              LEFT JOIN project_invoices pi ON pi.invoice_id=i.id \
              LEFT JOIN projects p ON p.id=pi.project_id \
@@ -144,6 +156,7 @@ impl Database {
                     "confirmed".to_owned(),
                     None,
                     confirmed_orders
+                        .candidates
                         .get(&value.id)
                         .cloned()
                         .into_iter()
@@ -207,6 +220,31 @@ impl Database {
                     }
                 }
             };
+            let display_name = if status == "confirmed" {
+                let candidate = candidates.first();
+                let products = confirmed_orders
+                    .product_names
+                    .get(&value.id)
+                    .cloned()
+                    .unwrap_or_default();
+                let labels = candidate
+                    .into_iter()
+                    .flat_map(|candidate| candidate.orders.iter())
+                    .map(|order| {
+                        order
+                            .external_order_number
+                            .clone()
+                            .unwrap_or_else(|| order.id.clone())
+                    })
+                    .collect::<Vec<_>>();
+                Some(crate::match_summary::display_name(
+                    value.display_name.as_deref(),
+                    &products,
+                    &labels,
+                ))
+            } else {
+                None
+            };
             items.push(MatchingInvoiceItem {
                 id: value.id,
                 invoice_number: value.invoice_number,
@@ -220,6 +258,12 @@ impl Database {
                 candidates,
                 confirmed_source: value.confirmed_source,
                 confirmed_at: value.confirmed_at,
+                display_name,
+                summary_status: value.summary_status,
+                summary_error: value.summary_error,
+                summary_provider: value.summary_provider,
+                summary_model: value.summary_model,
+                summary_generated_at: value.summary_generated_at,
             });
         }
         Ok(items)
@@ -293,6 +337,12 @@ impl Database {
                         .contains(&search)
                     || item
                         .seller_name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&search)
+                    || item
+                        .display_name
                         .as_deref()
                         .unwrap_or_default()
                         .to_lowercase()
@@ -525,6 +575,13 @@ impl Database {
             invoice_id: Set(request.invoice_id.clone()),
             source: Set(request.source),
             confirmed_at: Set(now()),
+            display_name: Set(None),
+            summary_status: Set("pending".into()),
+            summary_error: Set(None),
+            summary_provider: Set(None),
+            summary_model: Set(None),
+            summary_input_hash: Set(None),
+            summary_generated_at: Set(None),
         }
         .insert(transaction)
         .await?;
@@ -555,9 +612,7 @@ impl Database {
     }
 }
 
-async fn confirmed_orders(
-    connection: &sea_orm::DatabaseConnection,
-) -> AppResult<HashMap<String, MatchCandidate>> {
+async fn confirmed_orders(connection: &sea_orm::DatabaseConnection) -> AppResult<ConfirmedOrders> {
     #[derive(FromQueryResult)]
     struct ConfirmedOrderRow {
         invoice_id: String,
@@ -568,17 +623,30 @@ async fn confirmed_orders(
         shop_name: Option<String>,
         product_summary: String,
     }
+    #[derive(FromQueryResult)]
+    struct ConfirmedProductRow {
+        invoice_id: String,
+        product_name: String,
+    }
     let rows = ConfirmedOrderRow::find_by_statement(Statement::from_string(
         DbBackend::Sqlite,
         "SELECT mo.invoice_id,o.id,o.external_order_number,o.paid_amount_fen,o.ordered_at,o.shop_name,\
-         COALESCE((SELECT group_concat(product_name,' · ') FROM (SELECT product_name FROM order_items WHERE order_id=o.id ORDER BY position LIMIT 2)),'') product_summary \
+         COALESCE((SELECT group_concat(product_name,' · ') FROM (SELECT product_name FROM order_items WHERE order_id=o.id ORDER BY position)),'') product_summary \
          FROM invoice_match_orders mo JOIN orders o ON o.id=mo.order_id ORDER BY mo.invoice_id,mo.position",
     ))
     .all(connection)
     .await?;
-    let mut result = HashMap::<String, MatchCandidate>::new();
+    let product_rows = ConfirmedProductRow::find_by_statement(Statement::from_string(
+        DbBackend::Sqlite,
+        "SELECT mo.invoice_id,oi.product_name FROM invoice_match_orders mo \
+         JOIN order_items oi ON oi.order_id=mo.order_id \
+         ORDER BY mo.invoice_id,mo.position,oi.position",
+    ))
+    .all(connection)
+    .await?;
+    let mut candidates = HashMap::<String, MatchCandidate>::new();
     for row in rows {
-        let candidate = result
+        let candidate = candidates
             .entry(row.invoice_id)
             .or_insert_with(|| MatchCandidate {
                 order_ids: Vec::new(),
@@ -597,10 +665,20 @@ async fn confirmed_orders(
             product_summary: row.product_summary,
         });
     }
-    for candidate in result.values_mut() {
+    for candidate in candidates.values_mut() {
         candidate.shop_name = common_shop(&candidate.orders);
     }
-    Ok(result)
+    let mut product_names = HashMap::<String, Vec<String>>::new();
+    for row in product_rows {
+        product_names
+            .entry(row.invoice_id)
+            .or_default()
+            .push(row.product_name);
+    }
+    Ok(ConfirmedOrders {
+        candidates,
+        product_names,
+    })
 }
 
 fn resolve_repurchase_candidates(
@@ -1049,11 +1127,15 @@ pub async fn confirm_invoice_match(
 ) -> CommandResult<ConfirmInvoiceMatchResult> {
     let settings = state.settings.private().await;
     validate_automatic_suggestion(&state, &request, &settings, false).await?;
-    state
+    let result = state
         .database
         .confirm_invoice_match(request)
         .await
-        .map_err(Into::into)
+        .map_err(crate::error::CommandError::from)?;
+    if result.confirmed {
+        state.match_summary_queue.wake();
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1068,11 +1150,13 @@ pub async fn confirm_invoice_matches(
     for item in &request.matches {
         validate_automatic_suggestion(&state, item, &settings, true).await?;
     }
-    state
+    let results = state
         .database
         .confirm_invoice_matches(request.matches)
         .await
-        .map_err(Into::into)
+        .map_err(crate::error::CommandError::from)?;
+    state.match_summary_queue.wake();
+    Ok(results)
 }
 
 async fn validate_automatic_suggestion(
@@ -1130,6 +1214,22 @@ pub async fn unconfirm_invoice_match(
         .unconfirm_invoice_match(&request.id)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn retry_match_summary(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: IdRequest,
+) -> CommandResult<()> {
+    state
+        .database
+        .retry_match_summary(&request.id)
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    crate::match_summary_queue::emit_update(&app, &request.id, "pending");
+    state.match_summary_queue.wake();
+    Ok(())
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   unarchiveProject: vi.fn(),
   reorderProjectInvoices: vi.fn(),
   exportProject: vi.fn(),
+  retryMatchSummary: vi.fn(),
 }))
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.open }))
@@ -27,6 +28,7 @@ vi.mock("@/lib/api", () => ({
     unarchiveProject: mocks.unarchiveProject,
     reorderProjectInvoices: mocks.reorderProjectInvoices,
     exportProject: mocks.exportProject,
+    retryMatchSummary: mocks.retryMatchSummary,
   },
   errorMessage: (error: { message?: string }) => error?.message ?? "操作失败",
   errorCode: (error: { code?: string }) => error?.code ?? null,
@@ -35,7 +37,7 @@ vi.mock("@/lib/api", () => ({
 import { ProjectsPage } from "./projects-page"
 
 const summary = { id: "project-a", name: "差旅项目", invoiceCount: 2, confirmedCount: 2, unconfirmedCount: 0, actualAmountFen: 1800, exportable: true, blockingReason: null, createdAt: "2026-08-13T00:00:00Z", updatedAt: "2026-08-13T00:00:00Z", archivedAt: null }
-const invoice = (id: string, number: string, position: number) => ({ id, position, typeDescription: "增值税发票", invoiceCode: null, invoiceNumber: number, invoiceDate: "2026-08-13", buyerName: null, buyerTaxId: null, sellerName: "销售方", sellerTaxId: null, amountFen: 900, taxFen: 100, invoiceAmountFen: 1000, orderAmountFen: 900, actualAmountFen: 900, currency: "CNY", confirmed: true, fileAvailable: true, blockingReason: null, orders: [{ id: `order-${id}`, externalOrderNumber: `ORDER-${id}`, paidAmountFen: 900, productNames: ["差旅用品"] }] })
+const invoice = (id: string, number: string, position: number) => ({ id, displayName: "差旅用品", summaryStatus: "succeeded" as const, summaryError: null, summaryProvider: "ollama", summaryModel: "qwen", summaryGeneratedAt: "2026-08-13T00:00:00Z", position, typeDescription: "增值税发票", invoiceCode: null, invoiceNumber: number, invoiceDate: "2026-08-13", buyerName: null, buyerTaxId: null, sellerName: "销售方", sellerTaxId: null, amountFen: 900, taxFen: 100, invoiceAmountFen: 1000, orderAmountFen: 900, actualAmountFen: 900, currency: "CNY", confirmed: true, fileAvailable: true, blockingReason: null, orders: [{ id: `order-${id}`, externalOrderNumber: `ORDER-${id}`, paidAmountFen: 900, productNames: ["差旅用品"] }] })
 const detail = { ...summary, invoices: [invoice("invoice-a", "INV-A", 0), invoice("invoice-b", "INV-B", 1)] }
 
 describe("ProjectsPage", () => {
@@ -126,5 +128,25 @@ describe("ProjectsPage", () => {
     await user.click(await screen.findByRole("button", { name: "解除归档" }))
     await waitFor(() => expect(mocks.unarchiveProject).toHaveBeenCalledWith("project-a"))
     expect(screen.queryByRole("button", { name: "重命名项目" })).not.toBeInTheDocument()
+  })
+
+  it("keeps export available with a fallback name and retries a failed summary", async () => {
+    const user = userEvent.setup()
+    const failedInvoice = {
+      ...detail.invoices[0],
+      displayName: "差旅用品",
+      summaryStatus: "failed" as const,
+      summaryError: "模型服务请求失败：离线",
+    }
+    const failedDetail = { ...detail, invoices: [failedInvoice] }
+    mocks.getProject.mockResolvedValue(failedDetail)
+    mocks.retryMatchSummary.mockResolvedValue(undefined)
+    render(<ProjectsPage refreshToken={0} />)
+
+    expect(await screen.findByText("部分商品摘要尚未完成")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "导出材料包" })).toBeEnabled()
+    await user.click(screen.getByRole("button", { name: "重试商品摘要 INV-A" }))
+
+    await waitFor(() => expect(mocks.retryMatchSummary).toHaveBeenCalledWith("invoice-a"))
   })
 })

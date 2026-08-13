@@ -46,6 +46,12 @@ struct ProjectMemberRow {
     media_type: String,
     raw_response_json: Option<String>,
     confirmed_source: Option<String>,
+    generated_display_name: Option<String>,
+    summary_status: Option<String>,
+    summary_error: Option<String>,
+    summary_provider: Option<String>,
+    summary_model: Option<String>,
+    summary_generated_at: Option<String>,
 }
 
 #[derive(Clone, Debug, FromQueryResult)]
@@ -60,7 +66,6 @@ struct ProjectOrderRow {
 pub(crate) struct ProjectExportOrder {
     pub id: String,
     pub external_order_number: Option<String>,
-    pub product_names: Vec<String>,
     pub image_path: PathBuf,
 }
 
@@ -170,7 +175,9 @@ impl Database {
             "SELECT i.id,pi.position,i.type_description,i.invoice_code,i.invoice_number,i.invoice_date,\
              i.buyer_name,i.buyer_tax_id,i.seller_name,i.seller_tax_id,i.amount_fen,i.tax_fen,\
              i.total_fen,i.currency,i.preview_path,i.page_start,i.page_end,i.raw_invoice_json,\
-             t.source_path,t.media_type,t.raw_response_json,m.source confirmed_source \
+             t.source_path,t.media_type,t.raw_response_json,m.source confirmed_source,\
+             m.display_name generated_display_name,m.summary_status,m.summary_error,\
+             m.summary_provider,m.summary_model,m.summary_generated_at \
              FROM project_invoices pi JOIN invoices i ON i.id=pi.invoice_id \
              JOIN invoice_tasks t ON t.id=i.task_id \
              LEFT JOIN invoice_matches m ON m.invoice_id=i.id \
@@ -214,7 +221,6 @@ impl Database {
                     export_orders.push(ProjectExportOrder {
                         id: order_row.id,
                         external_order_number: order_row.external_order_number,
-                        product_names,
                         image_path,
                     });
                 }
@@ -251,8 +257,32 @@ impl Database {
                 order_files_available,
             );
             let file_available = material_available && order_files_available;
+            let product_names = public_orders
+                .iter()
+                .flat_map(|order| order.product_names.iter().cloned())
+                .collect::<Vec<_>>();
+            let order_labels = public_orders
+                .iter()
+                .map(|order| {
+                    order
+                        .external_order_number
+                        .clone()
+                        .unwrap_or_else(|| order.id.clone())
+                })
+                .collect::<Vec<_>>();
+            let display_name = crate::match_summary::display_name(
+                row.generated_display_name.as_deref(),
+                &product_names,
+                &order_labels,
+            );
             let member = ProjectInvoiceMember {
                 id: row.id,
+                display_name,
+                summary_status: row.summary_status,
+                summary_error: row.summary_error,
+                summary_provider: row.summary_provider,
+                summary_model: row.summary_model,
+                summary_generated_at: row.summary_generated_at,
                 position: row.position,
                 type_description: row.type_description,
                 invoice_code: row.invoice_code,
@@ -1089,6 +1119,12 @@ mod tests {
             media_type: media_type.into(),
             raw_response_json: Some(raw_response_json.to_string()),
             confirmed_source: None,
+            generated_display_name: None,
+            summary_status: None,
+            summary_error: None,
+            summary_provider: None,
+            summary_model: None,
+            summary_generated_at: None,
         }
     }
 

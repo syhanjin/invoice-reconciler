@@ -7,6 +7,8 @@ mod invoice_commands;
 mod invoice_db;
 mod invoice_files;
 mod invoice_queue;
+mod match_summary;
+mod match_summary_queue;
 mod matching;
 mod migration;
 mod models;
@@ -23,15 +25,16 @@ use std::path::PathBuf;
 
 use db::Database;
 use error::AppError;
-use ocr::OllamaClient;
+use ocr::LlmClient;
 use queue::QueueManager;
 use settings::SettingsStore;
 use tauri::Manager;
 
 pub struct AppState {
     database: Database,
-    ollama: OllamaClient,
+    llm: LlmClient,
     queue: QueueManager,
+    match_summary_queue: match_summary_queue::MatchSummaryQueue,
     invoice_queue: invoice_queue::InvoiceQueueManager,
     invoice_preflights: invoice_commands::InvoicePreflightStore,
     settings: SettingsStore,
@@ -42,14 +45,14 @@ pub struct AppState {
 #[cfg(test)]
 impl AppState {
     async fn test(database: Database, app_data_dir: PathBuf, images_dir: PathBuf) -> Self {
-        let ollama = OllamaClient::new().unwrap();
+        let llm = LlmClient::new().unwrap();
         let legacy = database.settings().await.unwrap();
         let settings = SettingsStore::load_or_migrate(&app_data_dir, legacy)
             .await
             .unwrap();
         let queue = QueueManager::new(
             database.clone(),
-            ollama.clone(),
+            llm.clone(),
             settings.clone(),
             app_data_dir.clone(),
         );
@@ -58,10 +61,16 @@ impl AppState {
             tencent_ocr::TencentOcrClient::new().unwrap(),
             app_data_dir.clone(),
         );
+        let match_summary_queue = match_summary_queue::MatchSummaryQueue::new(
+            database.clone(),
+            llm.clone(),
+            settings.clone(),
+        );
         Self {
             database,
-            ollama,
+            llm,
             queue,
+            match_summary_queue,
             invoice_queue,
             invoice_preflights: invoice_commands::InvoicePreflightStore::default(),
             settings,
@@ -86,7 +95,7 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             let database_path = app_data_dir.join("db.sqlite3");
             let images_dir = app_data_dir.join("images");
-            let ollama = OllamaClient::new().map_err(to_boxed_error)?;
+            let llm = LlmClient::new().map_err(to_boxed_error)?;
             let database = tauri::async_runtime::block_on(Database::connect(&database_path))
                 .map_err(to_boxed_error)?;
             let legacy_settings =
@@ -98,7 +107,7 @@ pub fn run() {
             .map_err(to_boxed_error)?;
             let queue = QueueManager::new(
                 database.clone(),
-                ollama.clone(),
+                llm.clone(),
                 settings.clone(),
                 app_data_dir.clone(),
             );
@@ -108,11 +117,18 @@ pub fn run() {
                 tencent,
                 app_data_dir.clone(),
             );
+            let match_summary_queue = match_summary_queue::MatchSummaryQueue::new(
+                database.clone(),
+                llm.clone(),
+                settings.clone(),
+            );
             queue.start(app.handle().clone());
+            match_summary_queue.start(app.handle().clone());
             app.manage(AppState {
                 database,
-                ollama,
+                llm,
                 queue,
+                match_summary_queue,
                 invoice_queue,
                 invoice_preflights: invoice_commands::InvoicePreflightStore::default(),
                 settings,
@@ -125,7 +141,7 @@ pub fn run() {
             commands::bootstrap,
             commands::get_settings,
             commands::save_settings,
-            commands::check_order_recognizer,
+            commands::check_llm,
             commands::import_order_images,
             commands::get_order_import_pool,
             commands::list_order_import_logs,
@@ -154,6 +170,7 @@ pub fn run() {
             matching::confirm_invoice_match,
             matching::confirm_invoice_matches,
             matching::unconfirm_invoice_match,
+            matching::retry_match_summary,
             projects::list_projects,
             projects::get_project,
             projects::create_project,

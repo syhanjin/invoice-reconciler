@@ -37,11 +37,12 @@ projects 1 -- * project_invoices * -- 1 invoices
 - An unconfirmed invoice may be assigned. Assignment appends in input order. Moving an invoice from another project first returns conflicts without writing; only `acceptReassignment: true` moves every requested member in one transaction.
 - Reorder receives the complete current member set exactly once. Missing, extra, duplicate, or stale IDs reject the whole request. Removal, reassignment, and invoice-deletion cascades compact positions to `0..n-1` and touch affected projects before commit.
 - Project order is the single ordering source for detail rows, XLSX rows, material folder indexes, and combined PDF groups.
+- Every project member exposes the backend-owned match `displayName` plus summary status/error/provider/model/generated-at audit. Generated summary success is informational, not an export prerequisite; pending/processing/failed summaries keep the deterministic product/order fallback name.
 - For each member, `invoiceAmountFen = invoices.total_fen`, `orderAmountFen = sum(confirmed orders.paid_amount_fen)`, and `actualAmountFen = min(invoiceAmountFen, orderAmountFen)`. Project actual amount is the sum of currently valid member actual amounts. Money remains integer fen until XLSX/UI/file-name presentation.
 - Export requires a non-empty project. Every member must have a persisted confirmed match containing at least one order, CNY/non-negative invoice money, non-negative order money, a readable independent invoice preview, and readable matched-order managed images. Backend revalidates current SQLite and filesystem state before generating anything.
-- The output name is `{safe project name}_{actual yuan to two decimals}.zip`. The ZIP root contains `发票明细.xlsx`, `组合材料.pdf`, and one `NNN_{product summary}_{actual amount}` folder per member.
+- The output name is `{safe project name}_{actual yuan to two decimals}.zip`. The ZIP root contains `发票明细.xlsx`, `组合材料.pdf`, and one `NNN_{displayName}_{actual amount}` folder per member.
 - Each member folder contains one independent invoice material and every matched order image. Prefer the managed original invoice source only when its complete successful OCR response belongs to that one invoice, no source page contains multiple recognized items, and a PDF invoice spans the complete source PDF. Otherwise use the independent preview: keep partial PDFs as extracted PDF pages, and use an image only when same-page invoices require an OCR cut or local crop. Never export a source that may contain another invoice.
-- Preserve independent order and invoice image bytes in the ZIP and store image entries without ZIP recompression. The XLSX sheet has one ordered row per member and numeric yuan cells for invoice, order, and actual amounts.
+- Preserve independent order and invoice image bytes in the ZIP and store image entries without ZIP recompression. The XLSX sheet has one ordered row per member, a backend `displayName` “订单摘要” column followed by the original confirmed-order-number column, and numeric yuan cells for invoice, order, and actual amounts.
 - The combined PDF appends every matched order as one fitted A4 image page, then every page of the selected independent invoice material. Image pages retain their original pixel dimensions, are never downsampled, and use only lossless PDF image encoding. Use `lopdf` object merging for existing PDF pages; do not rasterize, parse, or redraw them.
 - Generate to a same-directory temporary file. A new same-name target that appears during generation still requires overwrite acceptance. Confirmed replacement uses backup/restore; any generation or replacement failure cleans temporary output and preserves the prior archive whenever restoration succeeds.
 
@@ -59,6 +60,7 @@ projects 1 -- * project_invoices * -- 1 invoices
 | Output directory missing/not a directory | `invalid_input` before generation |
 | Same-name ZIP exists, overwrite false | `destination_exists`; preserve the target |
 | Generation/replacement fails | Remove new temporary artifacts and preserve/restore the old target |
+| Product summary is pending/processing/failed | Keep export eligibility unchanged and use the deterministic `displayName` fallback without making an LLM call during export |
 
 ## 5. Good/Base/Bad Cases
 
@@ -74,7 +76,8 @@ projects 1 -- * project_invoices * -- 1 invoices
 - Migration tests: fresh database, seeded m0007 upgrade, interrupted m0008 recovery, nullable archive timestamp, one-project-per-invoice uniqueness, project-position uniqueness, and both cascade directions.
 - Repository tests: unique names, atomic create-and-assign rollback, assignment preview/acceptance, transactional reassignment, archived source/target mutation rejection, removal and invoice-deletion compaction, complete-set reorder rejection, archive/unarchive list visibility, and the less/equal/greater actual-amount cases.
 - Eligibility tests: empty project, unconfirmed member, missing/negative invoice or order money, non-CNY, empty match, missing invoice preview, and missing order image.
-- Archive tests must reopen the ZIP/XLSX/PDF and assert fixed root names, safe folder/file names, all 16 XLSX headers, numeric money cells, byte-for-byte independent image preservation, order-first page sequence/count, original image dimensions with lossless PDF filters, and multi-page invoice retention without rasterization.
+- Archive tests must reopen the ZIP/XLSX/PDF and assert fixed root names, safe `displayName` folder names, all 17 XLSX headers including “订单摘要” and “确认订单号”, numeric money cells, byte-for-byte independent image preservation, order-first page sequence/count, original image dimensions with lossless PDF filters, and multi-page invoice retention without rasterization.
+- Summary fallback tests must prove a failed summary remains exportable and the same backend `displayName` appears in project detail, XLSX, and ZIP folder naming.
 - Material-selection tests must cover complete single-invoice images/PDFs, partial PDF ranges, same-page multi-invoice sources, malformed or partial OCR audits, and missing source fallback.
 - Failure tests must prove an existing ZIP survives generation failure and temporary files are removed. Test `destination_exists` and confirmed overwrite behavior at the command/service boundary.
 - Run Rust formatting, Clippy with warnings denied, and the complete Rust test suite.

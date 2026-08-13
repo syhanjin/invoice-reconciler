@@ -4,7 +4,7 @@
 
 ### 1. Scope / Trigger
 
-This contract applies when changing the React shell, unified order import pool, immutable completion log, orders table, order editor, recognition settings, Tauri invoke wrappers, or `order-import-task-updated` listener. The first screen is the operational orders workspace, not a landing page. Invoice import remains a separate batch-based tab and event domain.
+This contract applies when changing the React shell, unified order import pool, immutable completion log, orders table, order editor, global model settings, Tauri invoke wrappers, or invalidation listeners. The first screen is the operational orders workspace, not a landing page. Invoice import remains a separate batch-based tab and event domain.
 
 ### 2. Signatures
 
@@ -12,7 +12,7 @@ All backend access lives in `src/lib/api.ts`. Components call typed wrappers rat
 
 ```ts
 api.bootstrap(): Promise<BootstrapState>
-api.checkOrderRecognizer(request: SaveSettingsRequest): Promise<RecognizerStatus>
+api.checkLlm(request: SaveSettingsRequest): Promise<LlmStatus>
 api.importOrderImages(imagePaths: string[]): Promise<ImportOrderImagesResult>
 api.getOrderImportPool(): Promise<OrderImportPool>
 api.listOrderImportLogs(query): Promise<OrderImportLogsPage>
@@ -40,11 +40,13 @@ Rust serializes public structs with `camelCase`; Tauri command names remain snak
 
 `order-import-task-updated` is an invalidation event. Increment the order refresh token and reload pool/log projections; do not increment local counters, infer task transitions, or reuse `invoice-task-updated`. Successful recognition refreshes the server-paged orders query.
 
-#### Recognition settings
+#### Global model settings
 
-Settings use a provider Select with values `ollama` and `openai`, then render only the relevant base URL/model/key controls. API key fields preserve an existing key when blank, support explicit clearing, and show only configured/masked state returned by the backend. “Check service” validates the currently selected provider through `checkOrderRecognizer`.
+Settings present model configuration separately from task-specific concurrency. The provider Select has `ollama` and `openai`, renders only the relevant base URL/model/key controls, and explains that the model serves both order image recognition and confirmed-combination product summaries. API key fields preserve an existing key when blank, support explicit clearing, and show only configured/masked state returned by the backend. “Test connection” validates the selected global provider through `checkLlm`.
 
-Ollama and OpenAI-compatible providers share the realtime concurrency setting. Do not expose Aliyun endpoint, key, thinking, submission, cancellation, or recovery controls.
+Order recognition retains its own `orderRecognitionMaxConcurrency`; it is not part of `LlmProvider`. Do not expose Aliyun endpoint, key, thinking, submission, cancellation, or recovery controls.
+
+`match-summary-updated` is also an invalidation event. Increment the shared workspace token so matching and project detail reload their authoritative `displayName` and status; do not derive summary transitions from the event payload. Unlisten it on component teardown like the order and invoice events.
 
 #### Orders table and mutations
 
@@ -89,7 +91,7 @@ Ollama and OpenAI-compatible providers share the realtime concurrency setting. D
 - API/store tests: command names and camel-case arguments, absence of old order batch state, and order event invalidation behavior.
 - Orders-page component tests: file import totals, duplicate reporting, task-center navigation, and server-query refresh.
 - Import-task component tests: desktop pool/log data, mobile tabs, all realtime pool statuses, absence of Batch actions, retry-all/single, delete confirmation, historical Aliyun label, and log pagination.
-- Settings component tests: exactly two provider options, conditional fields, masked/preserved/cleared OpenAI keys, validation, and provider-aware service check.
+- Settings component tests: global model copy, exactly two provider options, conditional fields, masked/preserved/cleared OpenAI keys, separate order concurrency, validation, and `checkLlm` payload.
 - Existing order-table tests: every sort mapping/cycle, search/filter/page reset, invalid-page correction, presentation preferences, selection, and mixed bulk-delete results.
 - Ledger status tests: match/project filter query payloads, status/membership columns, row background classes, and archived-project refresh invalidation.
 - Desktop smoke tests at default and minimum window sizes for dual-pane scrolling, responsive tabs, order preview/editor, and settings.
@@ -101,7 +103,7 @@ Ollama and OpenAI-compatible providers share the realtime concurrency setting. D
 
 ```ts
 // Removed runtime providers must not remain in the current settings union.
-type OrderRecognitionProvider = "ollama" | "openai" | "aliyun_batch"
+type LlmProvider = "ollama" | "openai" | "aliyun_batch"
 ```
 
 ```ts
@@ -112,7 +114,7 @@ const [activeBatch, setActiveBatch] = useAtom(activeBatchAtom)
 #### Correct
 
 ```ts
-type OrderRecognitionProvider = "ollama" | "openai"
+type LlmProvider = "ollama" | "openai"
 ```
 
 ```ts

@@ -41,14 +41,14 @@ invoice_batches 1 -- * invoice_tasks 1 -- * invoices 1 -- * invoice_items
                                       `-- * invoice_source_links * -- 1 invoices
 ```
 
-`settings.toml` is version `1` and has `[ollama]` plus `[tencent_cloud]`. SQLite retains the old Ollama settings row only as the one-time migration source.
+`settings.toml` is version `4` and has global `[llm]`, order-only `[order_recognition]`, `[tencent_cloud]`, and `[matching]` sections. SQLite retains the old Ollama settings row only as the one-time migration source.
 
 ### 3. Contracts
 
 - `settings.toml` lives in the Tauri application-data directory. Writes use a private same-directory temporary file, flush it, and atomically replace the destination. Unix mode is `0600`; Windows restricts the ACL to the current user and uses replace-existing/write-through semantics.
 - Permission tightening failure does not stop startup or save. It becomes `permissionWarning` and remains visible in Settings.
 - `get_settings` returns only a masked SecretId and a configured boolean. SecretKey is never serialized into a public response, event, log, SQLite row, or test snapshot.
-- If no TOML exists, migrate Ollama URL, model, and concurrency from SQLite. After that, the TOML store is authoritative for Ollama and Tencent settings.
+- If no TOML exists, migrate Ollama URL/model into global LLM settings and concurrency into the order-recognition section. After that, the TOML store is authoritative for LLM, Tencent, and matching settings.
 - Preflight is local-only, accepts at most `500` PNG/JPG/JPEG/PDF files, validates magic bytes, image dimensions, PDF page count, and Base64 encoded size, then returns a single-use token valid for ten minutes.
 - Create consumes the token, rechecks every file fingerprint, then copies valid sources and writes tasks. It checks the durable SHA-256 set again during creation to close the preflight race. Duplicate and invalid selections become failed audit tasks and make zero OCR calls.
 - Tencent calls `RecognizeGeneralInvoice` version `2018-11-19` at `ocr.tencentcloudapi.com`, with `EnableOther`, `EnablePdf`, `EnableMultiplePage`, and `EnableCutImage`. `Types` is omitted for automatic recognition and contains exactly one validated type when forced.

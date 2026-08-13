@@ -6,7 +6,7 @@ import type { AppSettings } from "@/lib/types"
 
 const mocks = vi.hoisted(() => ({
   saveSettings: vi.fn(),
-  checkOrderRecognizer: vi.fn(),
+  checkLlm: vi.fn(),
 }))
 
 vi.mock("@/lib/api", () => ({
@@ -17,14 +17,14 @@ vi.mock("@/lib/api", () => ({
 import SettingsPage from "./settings-page"
 
 const settings: AppSettings = {
-  orderRecognitionProvider: "ollama",
+  llmProvider: "ollama",
   ollamaBaseUrl: "http://127.0.0.1:11434",
   ollamaModel: "qwen3-vl:4b",
   openaiBaseUrl: "https://example.com/v1",
   openaiModel: "vision-model",
   openaiApiKeyMasked: "sk-****1234",
   openaiApiKeyConfigured: true,
-  maxConcurrency: 3,
+  orderRecognitionMaxConcurrency: 3,
   tencentSecretIdMasked: "AKID****7890",
   tencentCredentialsConfigured: true,
   invoiceOcrConcurrency: 3,
@@ -39,7 +39,7 @@ describe("SettingsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.saveSettings.mockResolvedValue(settings)
-    mocks.checkOrderRecognizer.mockResolvedValue({
+    mocks.checkLlm.mockResolvedValue({
       provider: "ollama",
       reachable: true,
       modelAvailable: true,
@@ -102,5 +102,18 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("option", { name: "Ollama" })).toBeInTheDocument()
     expect(screen.getByRole("option", { name: "OpenAI 兼容" })).toBeInTheDocument()
     expect(screen.queryByText(/阿里云百炼/)).not.toBeInTheDocument()
+  })
+
+  it("checks the shared model configuration with the global LLM command", async () => {
+    const user = userEvent.setup()
+    render(<SettingsPage settings={settings} onSettingsChange={vi.fn()} />)
+
+    expect(screen.getByText("用于订单图片识别和确认组合商品摘要")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "测试连接" }))
+
+    await waitFor(() => expect(mocks.checkLlm).toHaveBeenCalledWith(expect.objectContaining({
+      llmProvider: "ollama",
+      orderRecognitionMaxConcurrency: 3,
+    })))
   })
 })

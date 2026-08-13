@@ -20,6 +20,7 @@ api.unarchiveProject(id): Promise<void>
 api.assignInvoicesToProject(invoiceIds, projectId, acceptReassignment): Promise<AssignInvoicesResult>
 api.reorderProjectInvoices(projectId, invoiceIds): Promise<ProjectDetail>
 api.exportProject(id, outputDirectory, overwrite): Promise<ExportProjectResult>
+api.retryMatchSummary(invoiceId): Promise<void>
 ```
 
 Project summaries/details expose nullable `archivedAt`. Ledger rows expose backend-provided `matchStatus` plus nullable `projectId`/`projectName`.
@@ -27,7 +28,7 @@ Project summaries/details expose nullable `archivedAt`. Ledger rows expose backe
 ## 3. Contracts
 
 - Project is a first-level operational workspace. A segmented active/archived view sends `archived: false|true`; both views support search, paging, detail, current valid actual amount, export status, and delete.
-- Project detail renders backend-provided ordered members, match state, order/product summary, invoice/order/actual amounts, and the concrete blocking reason. Frontend must not recompute export eligibility or amounts.
+- Project detail renders backend-provided ordered members, match state, `displayName`, summary state, invoice/order/actual amounts, and the concrete blocking reason. Frontend must not recompute product fallback names, export eligibility, or amounts.
 - Active project detail supports rename, archive, and reorder. Move controls use Lucide icon buttons with tooltips, disable unavailable directions, and send the complete reordered ID list. A failed reorder reloads authoritative detail.
 - Archived detail displays archive state/time and allows only view, export, delete, and unarchive. Rename and reorder controls are hidden or disabled; archive/unarchive refreshes order, invoice, matching, and project projections through the shared invalidation atom.
 - Deleting a project requires confirmation and explains that only membership is removed. It must not imply invoices, orders, matches, or files are deleted.
@@ -35,6 +36,7 @@ Project summaries/details expose nullable `archivedAt`. Ledger rows expose backe
 - The invoice ledger displays nullable project membership and filters by all, assigned, unassigned, or one active project. Query changes clear page selection and reset page one.
 - Selected invoice rows expose assignment only when all selected rows are unassigned. Existing project targets use `acceptReassignment: false`; “新建项目” creates and assigns atomically. There is no invoice-ledger remove or reassignment confirmation flow.
 - Membership changes clear selection, reload invoice/project projections, and show one result toast. Jotai refresh atoms are invalidation tokens, not durable membership state.
+- Any pending/processing/failed member summary produces one non-blocking information alert explaining that fallback names remain usable and export remains unaffected. Failed rows expose an icon retry action with error tooltip; `match-summary-updated` reloads current detail through the shared workspace token.
 
 ## 4. Validation & Error Matrix
 
@@ -50,17 +52,19 @@ Project summaries/details expose nullable `archivedAt`. Ledger rows expose backe
 | Directory picker canceled | Invoke no export command |
 | Backend returns `destination_exists` | Ask before calling export again with overwrite enabled |
 | Project delete confirmed | Reload list; do not mutate invoice/order entities in React |
+| Member summary is unfinished or failed | Keep export enabled when all ordinary material checks pass; render backend fallback and allow failed retry |
 
 ## 5. Good/Base/Bad Cases
 
 - Good: select several ledger rows, assign to one project, then view the same membership and order in Project detail.
 - Good: archive a project, continue to inspect/export it in the archived view, then unarchive and recover the same ordered members.
 - Base: an empty or partially matched project remains searchable/editable while export is visibly unavailable.
+- Base: a fully matched project with an offline model remains exportable using product fallback names and shows an informational summary alert.
 - Bad: showing archived projects as editable, offering ledger reassignment/removal, computing `Math.min` in React as export authority, asking for a ZIP filename, or overwriting after one click violates this contract.
 
 ## 6. Tests Required
 
-- Project-page tests: active/archived queries, detail selection, create/rename/archive/unarchive/delete confirmation, archived read-only controls, empty/blocked export state, move payload, directory cancel/select, `destination_exists`, and confirmed overwrite.
+- Project-page tests: active/archived queries, detail selection, create/rename/archive/unarchive/delete confirmation, archived read-only controls, empty/blocked export state, summary fallback/non-blocking export/failed retry, move payload, directory cancel/select, `destination_exists`, and confirmed overwrite.
 - Invoice-page tests: match/membership display, all/assigned/unassigned/specific query payloads, occupied-selection disablement, new-project atomic assignment, and absence of remove/reassignment controls.
 - API/type checks must cover archive command names, camel-case payloads, nullable `archivedAt`/membership, match status, blocking reason, and `destination_exists` error-code extraction.
 - Run `bun run lint`, `bun run test`, and `bun run build`; inspect the project split view at the Tauri minimum `920x640` and default `1360x840` sizes.
@@ -87,3 +91,7 @@ if (project.exportable) {
 Wrong: clear a project's detail locally after archive and assume other workspaces will converge on their own.
 
 Correct: increment the shared workspace invalidation token after archive/unarchive so every affected server projection reloads.
+
+Wrong: disable project export while a generated summary is pending or failed.
+
+Correct: trust backend `exportable`; summary state is informational because `displayName` always has a deterministic fallback.

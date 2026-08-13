@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   confirmInvoiceMatch: vi.fn(),
   confirmInvoiceMatches: vi.fn(),
   unconfirmInvoiceMatch: vi.fn(),
+  retryMatchSummary: vi.fn(),
 }))
 
 vi.mock("@/lib/api", () => ({
@@ -28,11 +29,20 @@ const candidate = (id: string, amount = 100) => ({
   shopName: "店铺",
 })
 
+const noSummary = {
+  displayName: null,
+  summaryStatus: null,
+  summaryError: null,
+  summaryProvider: null,
+  summaryModel: null,
+  summaryGeneratedAt: null,
+} as const
+
 const page: MatchingPageData = {
   items: [
-    { id: "invoice-a", invoiceNumber: "INV-A", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 100, currency: "CNY", status: "suggested", reason: null, candidates: [candidate("order-a")], confirmedSource: null, confirmedAt: null },
-    { id: "invoice-b", invoiceNumber: "INV-B", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 100, currency: "CNY", status: "conflict", reason: "疑似回购冲突：订单 2 条，发票 3 张，数量不一致", candidates: [candidate("order-b"), candidate("order-c")], confirmedSource: null, confirmedAt: null },
-    { id: "invoice-c", invoiceNumber: "INV-C", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 120, currency: "CNY", status: "unmatched", reason: "没有满足自动规则的订单组合", candidates: [], confirmedSource: null, confirmedAt: null },
+    { ...noSummary, id: "invoice-a", invoiceNumber: "INV-A", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 100, currency: "CNY", status: "suggested", reason: null, candidates: [candidate("order-a")], confirmedSource: null, confirmedAt: null },
+    { ...noSummary, id: "invoice-b", invoiceNumber: "INV-B", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 100, currency: "CNY", status: "conflict", reason: "疑似回购冲突：订单 2 条，发票 3 张，数量不一致", candidates: [candidate("order-b"), candidate("order-c")], confirmedSource: null, confirmedAt: null },
+    { ...noSummary, id: "invoice-c", invoiceNumber: "INV-C", subtypeDescription: "增值税发票", invoiceDate: "2026-08-10", sellerName: "销售方", totalFen: 120, currency: "CNY", status: "unmatched", reason: "没有满足自动规则的订单组合", candidates: [], confirmedSource: null, confirmedAt: null },
   ],
   summary: { total: 3, suggested: 1, conflict: 1, unmatched: 1, ineligible: 0, confirmed: 0 },
   total: 3,
@@ -127,5 +137,30 @@ describe("MatchingPage", () => {
       source: "custom",
       acceptMismatches: true,
     }))
+  })
+
+  it("shows a fallback product name and retries a failed generated summary", async () => {
+    const user = userEvent.setup()
+    mocks.getMatchingPage.mockResolvedValue({
+      ...page,
+      items: [{
+        ...page.items[0],
+        status: "confirmed",
+        displayName: "商品",
+        summaryStatus: "failed",
+        summaryError: "模型服务请求失败：离线",
+        confirmedSource: "automatic",
+        confirmedAt: "2026-08-13T00:00:00Z",
+      }],
+      summary: { total: 1, suggested: 0, conflict: 0, unmatched: 0, ineligible: 0, confirmed: 1 },
+      total: 1,
+    })
+    mocks.retryMatchSummary.mockResolvedValue(undefined)
+    render(<MatchingPage refreshToken="0:0" />)
+
+    expect((await screen.findAllByText("商品")).length).toBeGreaterThanOrEqual(2)
+    await user.click(screen.getByRole("button", { name: "重试商品摘要 INV-A" }))
+
+    await waitFor(() => expect(mocks.retryMatchSummary).toHaveBeenCalledWith("invoice-a"))
   })
 })

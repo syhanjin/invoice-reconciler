@@ -15,9 +15,94 @@ impl MigratorTrait for Migrator {
             Box::new(M0006RemoveAliyunBatch),
             Box::new(M0007Projects),
             Box::new(M0008ProjectArchival),
+            Box::new(M0009MatchSummaries),
         ]
     }
 }
+
+pub struct M0009MatchSummaries;
+
+#[async_trait::async_trait]
+impl MigrationName for M0009MatchSummaries {
+    fn name(&self) -> &str {
+        "m0009_match_summaries"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for M0009MatchSummaries {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        let connection = manager.get_connection();
+        for (column, sql) in MATCH_SUMMARY_COLUMNS {
+            if !manager.has_column("invoice_matches", column).await? {
+                connection
+                    .execute(Statement::from_string(backend, *sql))
+                    .await?;
+            }
+        }
+        connection
+            .execute(Statement::from_string(
+                backend,
+                "CREATE INDEX IF NOT EXISTS idx_invoice_matches_summary_status ON invoice_matches(summary_status, confirmed_at, invoice_id)",
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        let connection = manager.get_connection();
+        connection
+            .execute(Statement::from_string(
+                backend,
+                "DROP INDEX IF EXISTS idx_invoice_matches_summary_status",
+            ))
+            .await?;
+        for column in MATCH_SUMMARY_COLUMNS.iter().rev().map(|(column, _)| column) {
+            if manager.has_column("invoice_matches", column).await? {
+                connection
+                    .execute(Statement::from_string(
+                        backend,
+                        format!("ALTER TABLE invoice_matches DROP COLUMN {column}"),
+                    ))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+const MATCH_SUMMARY_COLUMNS: &[(&str, &str)] = &[
+    (
+        "display_name",
+        "ALTER TABLE invoice_matches ADD COLUMN display_name TEXT",
+    ),
+    (
+        "summary_status",
+        "ALTER TABLE invoice_matches ADD COLUMN summary_status TEXT NOT NULL DEFAULT 'pending' CHECK (summary_status IN ('pending', 'processing', 'succeeded', 'failed'))",
+    ),
+    (
+        "summary_error",
+        "ALTER TABLE invoice_matches ADD COLUMN summary_error TEXT",
+    ),
+    (
+        "summary_provider",
+        "ALTER TABLE invoice_matches ADD COLUMN summary_provider TEXT",
+    ),
+    (
+        "summary_model",
+        "ALTER TABLE invoice_matches ADD COLUMN summary_model TEXT",
+    ),
+    (
+        "summary_input_hash",
+        "ALTER TABLE invoice_matches ADD COLUMN summary_input_hash TEXT",
+    ),
+    (
+        "summary_generated_at",
+        "ALTER TABLE invoice_matches ADD COLUMN summary_generated_at TEXT",
+    ),
+];
 
 pub struct M0008ProjectArchival;
 
@@ -574,10 +659,10 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching', 'm0005_unified_order_import_pool', 'm0006_remove_aliyun_batch', 'm0007_projects', 'm0008_project_archival')",
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching', 'm0005_unified_order_import_pool', 'm0006_remove_aliyun_batch', 'm0007_projects', 'm0008_project_archival', 'm0009_match_summaries')",
             )
             .await,
-            8
+            9
         );
         assert_eq!(
             scalar(
@@ -1268,5 +1353,65 @@ mod tests {
             .await,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn upgrades_existing_matches_to_pending_summaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("match-summary-upgrade.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(8)).await.unwrap();
+        connection.execute_unprepared(
+            "INSERT INTO invoice_batches (id,status,created_at) VALUES ('b','completed','now');
+             INSERT INTO invoice_tasks (id,batch_id,original_file_name,source_sha256,media_type,status,retry_count,created_at) VALUES ('t','b','i.pdf','h','application/pdf','succeeded',0,'now');
+             INSERT INTO invoices (id,task_id,type,subtype,type_description,subtype_description,currency,preview_path,raw_invoice_json,created_at,updated_at) VALUES ('i','t',3,'VatInvoice','发票','发票','CNY','i.pdf','{}','now','now');
+             INSERT INTO invoice_matches (invoice_id,source,confirmed_at) VALUES ('i','automatic','now');"
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM invoice_matches WHERE invoice_id='i' AND summary_status='pending' AND display_name IS NULL").await, 1);
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM pragma_table_info('invoice_matches') WHERE name LIKE 'summary_%' OR name='display_name'").await, 7);
+    }
+
+    #[tokio::test]
+    async fn resumes_interrupted_match_summary_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume-match-summary.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(8)).await.unwrap();
+        connection.execute_unprepared(
+            "ALTER TABLE invoice_matches ADD COLUMN display_name TEXT;
+             ALTER TABLE invoice_matches ADD COLUMN summary_status TEXT NOT NULL DEFAULT 'pending' CHECK (summary_status IN ('pending','processing','succeeded','failed'));"
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM pragma_table_info('invoice_matches') WHERE name LIKE 'summary_%' OR name='display_name'").await, 7);
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version='m0009_match_summaries'"
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn recovers_processing_match_summaries_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recover-match-summary.sqlite3");
+        let database = Database::connect(&path).await.unwrap();
+        database.connection.execute_unprepared(
+            "INSERT INTO invoice_batches (id,status,created_at) VALUES ('b','completed','now');
+             INSERT INTO invoice_tasks (id,batch_id,original_file_name,source_sha256,media_type,status,retry_count,created_at) VALUES ('t','b','i.pdf','h','application/pdf','succeeded',0,'now');
+             INSERT INTO invoices (id,task_id,type,subtype,type_description,subtype_description,currency,preview_path,raw_invoice_json,created_at,updated_at) VALUES ('i','t',3,'VatInvoice','发票','发票','CNY','i.pdf','{}','now','now');
+             INSERT INTO invoice_matches (invoice_id,source,confirmed_at,summary_status,summary_error,summary_input_hash) VALUES ('i','automatic','now','processing','旧错误','old-hash');"
+        ).await.unwrap();
+        database.connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM invoice_matches WHERE invoice_id='i' AND summary_status='pending' AND summary_error IS NULL").await, 1);
     }
 }

@@ -196,7 +196,7 @@ fn generate_archive(snapshot: &ProjectExportSnapshot, destination: &Path) -> App
 }
 
 fn generate_excel(snapshot: &ProjectExportSnapshot) -> AppResult<Vec<u8>> {
-    const HEADERS: [&str; 16] = [
+    const HEADERS: [&str; 17] = [
         "序号",
         "发票类型",
         "发票代码",
@@ -212,11 +212,12 @@ fn generate_excel(snapshot: &ProjectExportSnapshot) -> AppResult<Vec<u8>> {
         "订单金额",
         "实际金额",
         "币种",
+        "订单摘要",
         "确认订单号",
     ];
-    const WIDTHS: [f64; 16] = [
+    const WIDTHS: [f64; 17] = [
         8.0, 18.0, 18.0, 22.0, 14.0, 26.0, 22.0, 26.0, 22.0, 14.0, 12.0, 14.0, 14.0, 14.0, 10.0,
-        30.0,
+        32.0, 30.0,
     ];
     let header_format = Format::new()
         .set_bold()
@@ -256,16 +257,17 @@ fn generate_excel(snapshot: &ProjectExportSnapshot) -> AppResult<Vec<u8>> {
         write_optional_money(worksheet, row, 12, member.order_amount_fen, &money_format)?;
         write_optional_money(worksheet, row, 13, member.actual_amount_fen, &money_format)?;
         write_optional_text(worksheet, row, 14, Some(&member.currency))?;
+        write_optional_text(worksheet, row, 15, Some(&member.display_name))?;
         let order_numbers = invoice
             .orders
             .iter()
             .map(|order| order.external_order_number.as_deref().unwrap_or(&order.id))
             .collect::<Vec<_>>()
             .join("、");
-        write_optional_text(worksheet, row, 15, Some(&order_numbers))?;
+        write_optional_text(worksheet, row, 16, Some(&order_numbers))?;
     }
     worksheet
-        .autofilter(0, 0, snapshot.invoices.len() as u32, 15)
+        .autofilter(0, 0, snapshot.invoices.len() as u32, 16)
         .map_err(xlsx_error)?;
     workbook.save_to_buffer().map_err(xlsx_error)
 }
@@ -503,29 +505,10 @@ fn image_document(
 }
 
 fn material_folder_name(index: usize, invoice: &ProjectExportInvoice) -> String {
-    let product_name = invoice
-        .orders
-        .iter()
-        .flat_map(|order| order.product_names.iter())
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join("、");
-    let fallback_orders = invoice
-        .orders
-        .iter()
-        .map(|order| order.external_order_number.as_deref().unwrap_or(&order.id))
-        .collect::<Vec<_>>()
-        .join("、");
-    let label = if product_name.is_empty() {
-        fallback_orders
-    } else {
-        product_name
-    };
     format!(
         "{:03}_{}_{}",
         index + 1,
-        safe_component(&label, "订单", 80),
+        safe_component(&invoice.member.display_name, "订单", 80),
         format_fen(invoice.member.actual_amount_fen.unwrap_or_default())
     )
 }
@@ -767,6 +750,12 @@ mod tests {
             invoices: vec![ProjectExportInvoice {
                 member: ProjectInvoiceMember {
                     id: "invoice-a".into(),
+                    display_name: "办公用品与墨盒".into(),
+                    summary_status: Some("succeeded".into()),
+                    summary_error: None,
+                    summary_provider: Some("ollama".into()),
+                    summary_model: Some("qwen".into()),
+                    summary_generated_at: Some("now".into()),
                     position: 0,
                     type_description: "增值税发票".into(),
                     invoice_code: Some("CODE".into()),
@@ -792,13 +781,11 @@ mod tests {
                     ProjectExportOrder {
                         id: "order-a".into(),
                         external_order_number: Some("A/1".into()),
-                        product_names: vec!["办公/用品".into()],
                         image_path: order_a,
                     },
                     ProjectExportOrder {
                         id: "order-b".into(),
                         external_order_number: Some("B-2".into()),
-                        product_names: vec!["墨盒".into()],
                         image_path: order_b,
                     },
                 ],
@@ -851,6 +838,7 @@ mod tests {
             "订单金额",
             "实际金额",
             "币种",
+            "订单摘要",
             "确认订单号",
         ] {
             assert!(
@@ -877,7 +865,7 @@ mod tests {
         assert_eq!(first_invoice, (595.0, 842.0));
         assert_lossless_page_image(&combined, 1, 320, 180, &order_a_pixels);
         assert_lossless_page_image(&combined, 2, 180, 320, &order_b_pixels);
-        let folder = "001_办公_用品、墨盒_10.00";
+        let folder = "001_办公用品与墨盒_10.00";
         let mut invoice_pdf = Vec::new();
         archive
             .by_name(&format!("{folder}/发票_INV_1.pdf"))
@@ -922,6 +910,12 @@ mod tests {
             invoices: vec![ProjectExportInvoice {
                 member: ProjectInvoiceMember {
                     id: "invoice".into(),
+                    display_name: "订单".into(),
+                    summary_status: Some("failed".into()),
+                    summary_error: Some("模型离线".into()),
+                    summary_provider: None,
+                    summary_model: None,
+                    summary_generated_at: None,
                     position: 0,
                     type_description: "增值税发票".into(),
                     invoice_code: None,

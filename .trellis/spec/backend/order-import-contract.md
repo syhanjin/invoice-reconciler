@@ -14,7 +14,7 @@ Tauri commands use camel-case serialized request and response fields:
 bootstrap() -> BootstrapState
 get_settings() -> AppSettings
 save_settings(request: UpdateSettingsRequest) -> AppSettings
-check_order_recognizer(request: UpdateSettingsRequest) -> RecognizerStatus
+check_llm(request: UpdateSettingsRequest) -> LlmStatus
 import_order_images(request: { platform: "taobao", imagePaths: string[] }) -> ImportOrderImagesResult
 get_order_import_pool() -> OrderImportPool
 list_order_import_logs(query: OrderImportLogsQuery) -> OrderImportLogsPage
@@ -29,14 +29,14 @@ Durable order-import tables are `order_import_pool`, `order_import_logs`, `order
 
 ### 3. Contracts
 
-#### Provider settings
+#### Global LLM settings
 
-`orderRecognitionProvider` is `ollama` or `openai`. Both consume the same realtime queue and use global `maxConcurrency` in `1..=8`.
+`llmProvider` is `ollama` or `openai`. Provider, endpoint, model, and optional API key form one global LLM configuration shared by order image recognition and confirmed-match product summaries. Order recognition separately owns `orderRecognitionMaxConcurrency` in `1..=8`; summary generation is always single concurrency.
 
 - Ollama uses `/api/chat`, has no key, and preserves its own base URL/model.
 - OpenAI-compatible recognition uses `/chat/completions`, an optional bearer key, and its own base URL/model.
 
-Runtime settings live in versioned application-data `settings.toml`. Public `AppSettings` exposes only masked/configured credential state. A blank key preserves the stored value and an explicit clear flag removes it. Version 2 settings upgrade to version 3 by dropping the Aliyun endpoint/key/thinking fields; `provider = "aliyun_batch"` falls back to `ollama`. Replacement remains atomic with `0600` on Unix or a current-user ACL on Windows.
+Runtime settings live in versioned application-data `settings.toml`. Version 4 stores provider endpoints under `[llm]`, keeps only concurrency under `[order_recognition]`, and preserves the existing Tencent/matching sections. Public `AppSettings` exposes only masked/configured credential state. A blank key preserves the stored value and an explicit clear flag removes it. Version 1/2/3 files upgrade directly to version 4; version 2 `provider = "aliyun_batch"` falls back to Ollama and erases the retired Aliyun key, while version 3 preserves the selected provider, both endpoints/models, OpenAI key, and concurrency. Replacement remains atomic with `0600` on Unix or a current-user ACL on Windows.
 
 #### Pool and logs
 
@@ -75,14 +75,15 @@ The migration uses resumable `_m0006_old` backup tables. On rerun, copy missing 
 | Process exits during recognition | Mark `processing` failed at startup; do not auto-retry |
 | Delete a processing task | Return `invalid_input`; preserve row and image |
 | Pool deletion database failure | Restore its temporarily moved image |
-| Version 2 settings select Aliyun | Migrate provider to Ollama and erase Aliyun key from version 3 file |
+| Version 2 settings select Aliyun | Migrate provider to Ollama and erase Aliyun key from the version 4 file |
+| Version 3 settings contain an OpenAI key | Move the endpoint/model/key under `[llm.openai]` without exposing or losing the key |
 | Legacy task is batch locked/submitting | Migrate to failed/manual retry; preserve image and hash |
 | Historical log provider is Aliyun | Return provider/model unchanged as read-only audit data |
 | Delete a recognized order | Remove its owned image/hash claim; preserve immutable log |
 
 ### 5. Good/Base/Bad Cases
 
-- Good: new screenshots join the durable pool and start automatically as realtime capacity becomes available.
+- Good: new screenshots join the durable pool and use the same current model configuration that later generates confirmed-match summaries.
 - Good: an m0005 database with locked Aliyun work upgrades with those images retained as failed, manually retryable tasks.
 - Good: a historical Aliyun order remains matched and its log still identifies its original provider/model after upgrade.
 - Base: a response omits an optional date; valid fields produce an order and immutable log with a warning.
@@ -91,7 +92,7 @@ The migration uses resumable `_m0006_old` backup tables. On rerun, copy missing 
 ### 6. Tests Required
 
 - Migration: fresh file, m0005 upgrade with normal/locked/completed data, and interrupted m0006 recovery from backup tables.
-- Settings: version 1 upgrade, version 2 Aliyun fallback/key removal, atomic writes, credential masking, and permission hardening.
+- Settings: version 1 upgrade, version 2 Aliyun fallback/key removal, lossless version 3 to 4 promotion, atomic writes, credential masking, and permission hardening.
 - Pool database: atomic/idempotent completion, retry transitions, task deletion compensation, and immutable logs.
 - Realtime queue: peak in-flight work never exceeds configured concurrency.
 - Protocol mocks: Ollama/OpenAI paths, bearer auth, image data URL, strict schema, and normalized response.
@@ -119,13 +120,13 @@ WHERE status IN ('batch_submitting', 'batch_locked');
 #### Wrong
 
 ```ts
-type OrderRecognitionProvider = "ollama" | "openai" | "aliyun_batch"
+type LlmProvider = "ollama" | "openai" | "aliyun_batch"
 ```
 
 #### Correct
 
 ```ts
-type OrderRecognitionProvider = "ollama" | "openai"
+type LlmProvider = "ollama" | "openai"
 ```
 
 Aliyun remains valid only as a historical string in immutable log data and legacy migration inputs, never as a current provider or executable code path.
