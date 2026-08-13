@@ -7,6 +7,7 @@ pub const DEFAULT_INVOICE_OCR_CONCURRENCY: u8 = 3;
 pub const MAX_INVOICE_OCR_CONCURRENCY: u8 = 5;
 pub const DEFAULT_MATCH_MAX_ORDERS: u8 = 10;
 pub const DEFAULT_MATCH_MAX_CANDIDATES: u16 = 100;
+pub const DEFAULT_SUMMARY_GENERATION_CONCURRENCY: u8 = 1;
 pub const MIN_MATCH_MAX_ORDERS: u8 = 2;
 pub const MAX_MATCH_MAX_ORDERS: u8 = 20;
 pub const MIN_MATCH_MAX_CANDIDATES: u16 = 10;
@@ -31,6 +32,14 @@ impl LlmProvider {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryGenerationMode {
+    #[default]
+    Automatic,
+    Manual,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -42,6 +51,8 @@ pub struct AppSettings {
     pub openai_api_key_masked: Option<String>,
     pub openai_api_key_configured: bool,
     pub order_recognition_max_concurrency: u8,
+    pub summary_generation_mode: SummaryGenerationMode,
+    pub summary_generation_max_concurrency: u8,
     pub tencent_secret_id_masked: Option<String>,
     pub tencent_credentials_configured: bool,
     pub invoice_ocr_concurrency: u8,
@@ -62,6 +73,8 @@ pub struct UpdateSettingsRequest {
     pub openai_api_key: Option<String>,
     pub clear_openai_api_key: bool,
     pub order_recognition_max_concurrency: u8,
+    pub summary_generation_mode: SummaryGenerationMode,
+    pub summary_generation_max_concurrency: u8,
     pub tencent_secret_id: Option<String>,
     pub tencent_secret_key: Option<String>,
     pub clear_tencent_credentials: bool,
@@ -79,6 +92,11 @@ impl UpdateSettingsRequest {
         if !(MIN_CONCURRENCY..=MAX_CONCURRENCY).contains(&self.order_recognition_max_concurrency) {
             return Err(crate::error::AppError::InvalidInput(
                 "订单识别最大并发数必须在 1 到 8 之间".into(),
+            ));
+        }
+        if !(MIN_CONCURRENCY..=MAX_CONCURRENCY).contains(&self.summary_generation_max_concurrency) {
+            return Err(crate::error::AppError::InvalidInput(
+                "摘要生成最大并发数必须在 1 到 8 之间".into(),
             ));
         }
         if !(MIN_CONCURRENCY..=MAX_INVOICE_OCR_CONCURRENCY).contains(&self.invoice_ocr_concurrency)
@@ -108,6 +126,8 @@ impl UpdateSettingsRequest {
             openai_api_key_masked: None,
             openai_api_key_configured: false,
             order_recognition_max_concurrency: self.order_recognition_max_concurrency,
+            summary_generation_mode: self.summary_generation_mode,
+            summary_generation_max_concurrency: self.summary_generation_max_concurrency,
             tencent_secret_id_masked: None,
             tencent_credentials_configured: false,
             invoice_ocr_concurrency: self.invoice_ocr_concurrency,
@@ -128,6 +148,8 @@ pub struct PrivateAppSettings {
     pub openai_model: String,
     pub openai_api_key: String,
     pub order_recognition_max_concurrency: u8,
+    pub summary_generation_mode: SummaryGenerationMode,
+    pub summary_generation_max_concurrency: u8,
     pub tencent_secret_id: String,
     pub tencent_secret_key: String,
     pub invoice_ocr_concurrency: u8,
@@ -148,6 +170,8 @@ impl PrivateAppSettings {
             openai_api_key_masked: mask_secret_id(&self.openai_api_key),
             openai_api_key_configured: !self.openai_api_key.is_empty(),
             order_recognition_max_concurrency: self.order_recognition_max_concurrency,
+            summary_generation_mode: self.summary_generation_mode,
+            summary_generation_max_concurrency: self.summary_generation_max_concurrency,
             tencent_secret_id_masked: mask_secret_id(&self.tencent_secret_id),
             tencent_credentials_configured: !self.tencent_secret_id.is_empty()
                 && !self.tencent_secret_key.is_empty(),
@@ -186,7 +210,7 @@ pub struct LlmSettings {
     pub api_key: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MatchSummaryInvoiceItem {
     pub name: String,
     pub specification: Option<String>,
@@ -198,23 +222,82 @@ pub struct MatchSummaryInvoiceItem {
     pub tax_fen: Option<i64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MatchSummaryOrder {
     pub shop_name: Option<String>,
     pub product_names: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MatchSummaryInput {
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, default)]
     pub invoice_id: String,
     pub seller_name: Option<String>,
     pub invoice_items: Vec<MatchSummaryInvoiceItem>,
     pub orders: Vec<MatchSummaryOrder>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummaryInputSnapshot {
+    pub seller_name: Option<String>,
+    pub invoice_items: Vec<MatchSummaryInvoiceItemSnapshot>,
+    pub orders: Vec<MatchSummaryOrderSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummaryInvoiceItemSnapshot {
+    pub name: String,
+    pub specification: Option<String>,
+    pub unit: Option<String>,
+    pub quantity: Option<String>,
+    pub unit_price_fen: Option<i64>,
+    pub amount_fen: Option<i64>,
+    pub tax_rate: Option<String>,
+    pub tax_fen: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummaryOrderSnapshot {
+    pub shop_name: Option<String>,
+    pub product_names: Vec<String>,
+}
+
+impl From<MatchSummaryInput> for MatchSummaryInputSnapshot {
+    fn from(value: MatchSummaryInput) -> Self {
+        Self {
+            seller_name: value.seller_name,
+            invoice_items: value
+                .invoice_items
+                .into_iter()
+                .map(|item| MatchSummaryInvoiceItemSnapshot {
+                    name: item.name,
+                    specification: item.specification,
+                    unit: item.unit,
+                    quantity: item.quantity,
+                    unit_price_fen: item.unit_price_fen,
+                    amount_fen: item.amount_fen,
+                    tax_rate: item.tax_rate,
+                    tax_fen: item.tax_fen,
+                })
+                .collect(),
+            orders: value
+                .orders
+                .into_iter()
+                .map(|order| MatchSummaryOrderSnapshot {
+                    shop_name: order.shop_name,
+                    product_names: order.product_names,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ClaimedMatchSummary {
+    pub attempt_id: String,
     pub invoice_id: String,
     pub input: MatchSummaryInput,
     pub input_hash: String,
@@ -225,6 +308,114 @@ pub struct ClaimedMatchSummary {
 pub struct MatchSummaryUpdatedEvent {
     pub invoice_id: String,
     pub status: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummariesQuery {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub search: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummaryCounts {
+    pub total: i64,
+    pub not_generated: i64,
+    pub pending: i64,
+    pub processing: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+}
+
+impl MatchSummaryCounts {
+    pub fn add(&mut self, status: &str) {
+        self.add_count(status, 1);
+    }
+
+    pub fn add_count(&mut self, status: &str, count: i64) {
+        self.total += count;
+        match status {
+            "not_generated" => self.not_generated += count,
+            "pending" => self.pending += count,
+            "processing" => self.processing += count,
+            "succeeded" => self.succeeded += count,
+            "failed" => self.failed += count,
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, sea_orm::FromQueryResult)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummaryListItem {
+    pub invoice_id: String,
+    pub invoice_number: Option<String>,
+    pub seller_name: Option<String>,
+    pub project_name: Option<String>,
+    pub display_name: String,
+    pub summary_status: String,
+    pub summary_source: Option<String>,
+    pub summary_error: Option<String>,
+    pub summary_provider: Option<String>,
+    pub summary_model: Option<String>,
+    pub summary_generated_at: Option<String>,
+    pub confirmed_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummariesPage {
+    pub items: Vec<MatchSummaryListItem>,
+    pub counts: MatchSummaryCounts,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummaryAttemptsQuery {
+    pub invoice_id: Option<String>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub search: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummaryAttemptItem {
+    pub id: String,
+    pub invoice_id: String,
+    pub invoice_number: Option<String>,
+    pub input: MatchSummaryInputSnapshot,
+    pub trigger: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub status: String,
+    pub result_summary: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSummaryAttemptsPage {
+    pub items: Vec<MatchSummaryAttemptItem>,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMatchSummaryRequest {
+    pub invoice_id: String,
+    pub display_name: String,
 }
 
 fn validate_url(label: &str, value: &str) -> crate::error::AppResult<String> {
@@ -900,6 +1091,7 @@ pub struct MatchingQuery {
     pub page_size: Option<u32>,
     pub search: Option<String>,
     pub status: Option<String>,
+    pub summary_status: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -950,6 +1142,7 @@ pub struct MatchingInvoiceItem {
     pub confirmed_at: Option<String>,
     pub display_name: Option<String>,
     pub summary_status: Option<String>,
+    pub summary_source: Option<String>,
     pub summary_error: Option<String>,
     pub summary_provider: Option<String>,
     pub summary_model: Option<String>,
@@ -961,6 +1154,7 @@ pub struct MatchingInvoiceItem {
 pub struct MatchingPage {
     pub items: Vec<MatchingInvoiceItem>,
     pub summary: MatchingSummary,
+    pub summary_counts: MatchSummaryCounts,
     pub total: i64,
     pub page: u32,
     pub page_size: u32,
@@ -1038,6 +1232,8 @@ pub struct ProjectSummary {
     pub invoice_count: i64,
     pub confirmed_count: i64,
     pub unconfirmed_count: i64,
+    pub summary_status: String,
+    pub summary_counts: MatchSummaryCounts,
     pub actual_amount_fen: i64,
     pub exportable: bool,
     pub blocking_reason: Option<String>,
@@ -1070,6 +1266,7 @@ pub struct ProjectInvoiceMember {
     pub id: String,
     pub display_name: String,
     pub summary_status: Option<String>,
+    pub summary_source: Option<String>,
     pub summary_error: Option<String>,
     pub summary_provider: Option<String>,
     pub summary_model: Option<String>,
@@ -1103,6 +1300,8 @@ pub struct ProjectDetail {
     pub invoice_count: i64,
     pub confirmed_count: i64,
     pub unconfirmed_count: i64,
+    pub summary_status: String,
+    pub summary_counts: MatchSummaryCounts,
     pub actual_amount_fen: i64,
     pub exportable: bool,
     pub blocking_reason: Option<String>,

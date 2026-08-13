@@ -16,9 +16,110 @@ impl MigratorTrait for Migrator {
             Box::new(M0007Projects),
             Box::new(M0008ProjectArchival),
             Box::new(M0009MatchSummaries),
+            Box::new(M0010SummaryManagement),
         ]
     }
 }
+
+pub struct M0010SummaryManagement;
+
+#[async_trait::async_trait]
+impl MigrationName for M0010SummaryManagement {
+    fn name(&self) -> &str {
+        "m0010_summary_management"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for M0010SummaryManagement {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        let connection = manager.get_connection();
+        let matches_exist = manager.has_table("invoice_matches").await?;
+        let backup_exists = manager.has_table("invoice_matches_m0010_old").await?;
+        let orders_backup_exists = manager.has_table("invoice_match_orders_m0010_old").await?;
+        let needs_rebuild = backup_exists
+            || orders_backup_exists
+            || (matches_exist
+                && !manager
+                    .has_column("invoice_matches", "summary_source")
+                    .await?);
+
+        if needs_rebuild {
+            if !backup_exists {
+                connection
+                    .execute(Statement::from_string(
+                        backend,
+                        "CREATE TABLE invoice_matches_m0010_old AS SELECT * FROM invoice_matches",
+                    ))
+                    .await?;
+            }
+            if !orders_backup_exists {
+                connection
+                    .execute(Statement::from_string(
+                        backend,
+                        "CREATE TABLE invoice_match_orders_m0010_old AS SELECT * FROM invoice_match_orders",
+                    ))
+                    .await?;
+            }
+            for sql in [
+                "DROP TABLE IF EXISTS invoice_match_orders",
+                "DROP TABLE IF EXISTS invoice_matches",
+                SUMMARY_MATCH_TABLE,
+                SUMMARY_MATCH_ORDERS_TABLE,
+                "INSERT OR IGNORE INTO invoice_matches (invoice_id,source,confirmed_at,display_name,summary_status,summary_error,summary_provider,summary_model,summary_input_hash,summary_generated_at) SELECT invoice_id,source,confirmed_at,display_name,summary_status,summary_error,summary_provider,summary_model,summary_input_hash,summary_generated_at FROM invoice_matches_m0010_old",
+                "INSERT OR IGNORE INTO invoice_match_orders (invoice_id,order_id,position) SELECT invoice_id,order_id,position FROM invoice_match_orders_m0010_old",
+                "DROP TABLE invoice_match_orders_m0010_old",
+                "DROP TABLE invoice_matches_m0010_old",
+            ] {
+                connection
+                    .execute(Statement::from_string(backend, sql))
+                    .await?;
+            }
+        } else {
+            for sql in [SUMMARY_MATCH_TABLE, SUMMARY_MATCH_ORDERS_TABLE] {
+                connection
+                    .execute(Statement::from_string(backend, sql))
+                    .await?;
+            }
+        }
+
+        for sql in SUMMARY_MANAGEMENT_STATEMENTS {
+            connection
+                .execute(Statement::from_string(backend, *sql))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        for sql in [
+            "DROP TABLE IF EXISTS match_summary_attempts",
+            "DROP INDEX IF EXISTS idx_invoice_matches_summary_status",
+            "CREATE INDEX IF NOT EXISTS idx_invoice_matches_summary_status ON invoice_matches(summary_status, confirmed_at, invoice_id)",
+        ] {
+            manager
+                .get_connection()
+                .execute(Statement::from_string(backend, sql))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+const SUMMARY_MATCH_TABLE: &str = "CREATE TABLE IF NOT EXISTS invoice_matches (invoice_id TEXT PRIMARY KEY REFERENCES invoices(id) ON DELETE CASCADE, source TEXT NOT NULL CHECK (source IN ('automatic', 'custom')), confirmed_at TEXT NOT NULL, display_name TEXT, summary_status TEXT NOT NULL DEFAULT 'pending' CHECK (summary_status IN ('not_generated', 'pending', 'processing', 'succeeded', 'failed')), summary_source TEXT CHECK (summary_source IS NULL OR summary_source IN ('generated', 'manual')), summary_trigger TEXT, summary_error TEXT, summary_provider TEXT, summary_model TEXT, summary_input_hash TEXT, summary_generated_at TEXT)";
+
+const SUMMARY_MATCH_ORDERS_TABLE: &str = "CREATE TABLE IF NOT EXISTS invoice_match_orders (invoice_id TEXT NOT NULL REFERENCES invoice_matches(invoice_id) ON DELETE CASCADE, order_id TEXT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE, position INTEGER NOT NULL, PRIMARY KEY (invoice_id, order_id), UNIQUE (invoice_id, position))";
+
+const SUMMARY_MANAGEMENT_STATEMENTS: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_invoice_matches_confirmed ON invoice_matches(confirmed_at DESC, invoice_id)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_matches_summary_status ON invoice_matches(summary_status, confirmed_at, invoice_id)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_match_orders_invoice ON invoice_match_orders(invoice_id, position)",
+    "CREATE TABLE IF NOT EXISTS match_summary_attempts (id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE, input_hash TEXT NOT NULL, input_json TEXT NOT NULL, trigger TEXT NOT NULL, provider TEXT, model TEXT, status TEXT NOT NULL CHECK (status IN ('processing', 'succeeded', 'failed', 'interrupted', 'discarded', 'manual_edit')), result_summary TEXT, error_message TEXT, started_at TEXT NOT NULL, completed_at TEXT)",
+    "CREATE INDEX IF NOT EXISTS idx_match_summary_attempts_invoice ON match_summary_attempts(invoice_id, started_at DESC, id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_match_summary_attempts_status ON match_summary_attempts(status, started_at DESC, id DESC)",
+];
 
 pub struct M0009MatchSummaries;
 
@@ -659,10 +760,10 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching', 'm0005_unified_order_import_pool', 'm0006_remove_aliyun_batch', 'm0007_projects', 'm0008_project_archival', 'm0009_match_summaries')",
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching', 'm0005_unified_order_import_pool', 'm0006_remove_aliyun_batch', 'm0007_projects', 'm0008_project_archival', 'm0009_match_summaries', 'm0010_summary_management')",
             )
             .await,
-            9
+            10
         );
         assert_eq!(
             scalar(
@@ -1371,7 +1472,7 @@ mod tests {
 
         let database = Database::connect(&path).await.unwrap();
         assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM invoice_matches WHERE invoice_id='i' AND summary_status='pending' AND display_name IS NULL").await, 1);
-        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM pragma_table_info('invoice_matches') WHERE name LIKE 'summary_%' OR name='display_name'").await, 7);
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM pragma_table_info('invoice_matches') WHERE name LIKE 'summary_%' OR name='display_name'").await, 9);
     }
 
     #[tokio::test]
@@ -1387,7 +1488,7 @@ mod tests {
         connection.close().await.unwrap();
 
         let database = Database::connect(&path).await.unwrap();
-        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM pragma_table_info('invoice_matches') WHERE name LIKE 'summary_%' OR name='display_name'").await, 7);
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM pragma_table_info('invoice_matches') WHERE name LIKE 'summary_%' OR name='display_name'").await, 9);
         assert_eq!(
             scalar(
                 &database.connection,
@@ -1413,5 +1514,70 @@ mod tests {
 
         let database = Database::connect(&path).await.unwrap();
         assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM invoice_matches WHERE invoice_id='i' AND summary_status='pending' AND summary_error IS NULL").await, 1);
+    }
+
+    #[tokio::test]
+    async fn upgrades_m0009_matches_and_attempt_log_constraints() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("summary-management-upgrade.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(9)).await.unwrap();
+        connection.execute_unprepared(
+            "INSERT INTO invoice_batches (id,status,created_at) VALUES ('b','completed','now');
+             INSERT INTO invoice_tasks (id,batch_id,original_file_name,source_sha256,media_type,status,retry_count,created_at) VALUES ('t','b','i.pdf','h','application/pdf','succeeded',0,'now');
+             INSERT INTO invoices (id,task_id,type,subtype,type_description,subtype_description,currency,preview_path,raw_invoice_json,created_at,updated_at) VALUES ('i','t',3,'VatInvoice','发票','发票','CNY','i.pdf','{}','now','now');
+             INSERT INTO invoice_matches (invoice_id,source,confirmed_at,summary_status) VALUES ('i','automatic','now','failed');",
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM invoice_matches WHERE invoice_id='i' AND summary_status='failed'").await, 1);
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM sqlite_master WHERE type='table' AND name='match_summary_attempts'").await, 1);
+        assert!(
+            database
+                .connection
+                .execute_unprepared(
+                    "UPDATE invoice_matches SET summary_status='not_generated' WHERE invoice_id='i'"
+                )
+                .await
+                .is_ok()
+        );
+        assert!(
+            database
+                .connection
+                .execute_unprepared(
+                    "UPDATE invoice_matches SET summary_status='invalid' WHERE invoice_id='i'"
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn resumes_interrupted_summary_management_rebuild() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("summary-management-resume.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(9)).await.unwrap();
+        connection.execute_unprepared(
+            "INSERT INTO invoice_batches (id,status,created_at) VALUES ('b','completed','now');
+             INSERT INTO invoice_tasks (id,batch_id,original_file_name,source_sha256,media_type,status,retry_count,created_at) VALUES ('t','b','i.pdf','h','application/pdf','succeeded',0,'now');
+             INSERT INTO invoices (id,task_id,type,subtype,type_description,subtype_description,currency,preview_path,raw_invoice_json,created_at,updated_at) VALUES ('i','t',3,'VatInvoice','发票','发票','CNY','i.pdf','{}','now','now');
+             INSERT INTO invoice_matches (invoice_id,source,confirmed_at,summary_status) VALUES ('i','automatic','now','pending');
+             CREATE TABLE invoice_matches_m0010_old AS SELECT * FROM invoice_matches;",
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM invoice_matches WHERE invoice_id='i'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM sqlite_master WHERE type='table' AND name LIKE '%m0010_old'").await, 0);
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM seaql_migrations WHERE version='m0010_summary_management'").await, 1);
     }
 }

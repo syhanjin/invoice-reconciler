@@ -48,6 +48,7 @@ struct ProjectMemberRow {
     confirmed_source: Option<String>,
     generated_display_name: Option<String>,
     summary_status: Option<String>,
+    summary_source: Option<String>,
     summary_error: Option<String>,
     summary_provider: Option<String>,
     summary_model: Option<String>,
@@ -176,7 +177,7 @@ impl Database {
              i.buyer_name,i.buyer_tax_id,i.seller_name,i.seller_tax_id,i.amount_fen,i.tax_fen,\
              i.total_fen,i.currency,i.preview_path,i.page_start,i.page_end,i.raw_invoice_json,\
              t.source_path,t.media_type,t.raw_response_json,m.source confirmed_source,\
-             m.display_name generated_display_name,m.summary_status,m.summary_error,\
+             m.display_name generated_display_name,m.summary_status,m.summary_source,m.summary_error,\
              m.summary_provider,m.summary_model,m.summary_generated_at \
              FROM project_invoices pi JOIN invoices i ON i.id=pi.invoice_id \
              JOIN invoice_tasks t ON t.id=i.task_id \
@@ -279,6 +280,7 @@ impl Database {
                 id: row.id,
                 display_name,
                 summary_status: row.summary_status,
+                summary_source: row.summary_source,
                 summary_error: row.summary_error,
                 summary_provider: row.summary_provider,
                 summary_model: row.summary_model,
@@ -668,6 +670,24 @@ fn detail_from_members(
     let invoice_count = invoices.len() as i64;
     let confirmed_count = invoices.iter().filter(|invoice| invoice.confirmed).count() as i64;
     let unconfirmed_count = invoice_count - confirmed_count;
+    let mut summary_counts = crate::models::MatchSummaryCounts::default();
+    for invoice in invoices.iter().filter(|invoice| invoice.confirmed) {
+        if let Some(status) = &invoice.summary_status {
+            summary_counts.add(status);
+        }
+    }
+    let summary_status = if summary_counts.total == 0 {
+        "not_applicable"
+    } else if summary_counts.failed > 0 {
+        "failed"
+    } else if summary_counts.pending > 0 || summary_counts.processing > 0 {
+        "processing"
+    } else if summary_counts.not_generated > 0 {
+        "not_generated"
+    } else {
+        "succeeded"
+    }
+    .to_owned();
     let actual_amount_fen = invoices
         .iter()
         .filter(|invoice| invoice.blocking_reason.is_none())
@@ -691,6 +711,8 @@ fn detail_from_members(
         invoice_count,
         confirmed_count,
         unconfirmed_count,
+        summary_status,
+        summary_counts,
         actual_amount_fen: actual_amount_fen.unwrap_or_default(),
         exportable: blocking_reason.is_none(),
         blocking_reason,
@@ -708,6 +730,8 @@ fn summary_from_detail(detail: ProjectDetail) -> ProjectSummary {
         invoice_count: detail.invoice_count,
         confirmed_count: detail.confirmed_count,
         unconfirmed_count: detail.unconfirmed_count,
+        summary_status: detail.summary_status,
+        summary_counts: detail.summary_counts,
         actual_amount_fen: detail.actual_amount_fen,
         exportable: detail.exportable,
         blocking_reason: detail.blocking_reason,
@@ -1121,6 +1145,7 @@ mod tests {
             confirmed_source: None,
             generated_display_name: None,
             summary_status: None,
+            summary_source: None,
             summary_error: None,
             summary_provider: None,
             summary_model: None,
@@ -1176,6 +1201,59 @@ mod tests {
         assert_eq!(actual_amount(Some(1_500), Some(1_300)), Some(1_300));
         assert_eq!(actual_amount(Some(1_300), Some(1_300)), Some(1_300));
         assert_eq!(actual_amount(None, Some(1_300)), None);
+    }
+
+    #[test]
+    fn project_summary_state_uses_the_full_confirmed_member_priority() {
+        let member = |id: &str, status: &str| ProjectInvoiceMember {
+            id: id.into(),
+            display_name: id.into(),
+            summary_status: Some(status.into()),
+            summary_source: None,
+            summary_error: None,
+            summary_provider: None,
+            summary_model: None,
+            summary_generated_at: None,
+            position: 0,
+            type_description: "发票".into(),
+            invoice_code: None,
+            invoice_number: None,
+            invoice_date: None,
+            buyer_name: None,
+            buyer_tax_id: None,
+            seller_name: None,
+            seller_tax_id: None,
+            amount_fen: Some(100),
+            tax_fen: Some(0),
+            invoice_amount_fen: Some(100),
+            order_amount_fen: Some(100),
+            actual_amount_fen: Some(100),
+            currency: "CNY".into(),
+            confirmed: true,
+            file_available: true,
+            blocking_reason: None,
+            orders: vec![],
+        };
+        let detail = detail_from_members(
+            "project".into(),
+            "项目".into(),
+            "now".into(),
+            "now".into(),
+            None,
+            vec![
+                member("a", "succeeded"),
+                member("b", "not_generated"),
+                member("c", "processing"),
+                member("d", "failed"),
+            ],
+        );
+
+        assert_eq!(detail.summary_status, "failed");
+        assert_eq!(detail.summary_counts.total, 4);
+        assert_eq!(detail.summary_counts.succeeded, 1);
+        assert_eq!(detail.summary_counts.not_generated, 1);
+        assert_eq!(detail.summary_counts.processing, 1);
+        assert_eq!(detail.summary_counts.failed, 1);
     }
 
     #[test]

@@ -477,6 +477,8 @@ pub mod invoice_match {
         pub confirmed_at: String,
         pub display_name: Option<String>,
         pub summary_status: String,
+        pub summary_source: Option<String>,
+        pub summary_trigger: Option<String>,
         pub summary_error: Option<String>,
         pub summary_provider: Option<String>,
         pub summary_model: Option<String>,
@@ -486,6 +488,46 @@ pub mod invoice_match {
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod match_summary_attempt {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "match_summary_attempts")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: String,
+        pub invoice_id: String,
+        pub input_hash: String,
+        pub input_json: String,
+        pub trigger: String,
+        pub provider: Option<String>,
+        pub model: Option<String>,
+        pub status: String,
+        pub result_summary: Option<String>,
+        pub error_message: Option<String>,
+        pub started_at: String,
+        pub completed_at: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::invoice::Entity",
+            from = "Column::InvoiceId",
+            to = "super::invoice::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Invoice,
+    }
+    impl Related<super::invoice::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Invoice.def()
+        }
+    }
     impl ActiveModelBehavior for ActiveModel {}
 }
 

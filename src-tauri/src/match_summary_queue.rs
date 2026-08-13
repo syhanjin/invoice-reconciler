@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 
 use crate::db::Database;
 use crate::models::MatchSummaryUpdatedEvent;
@@ -53,64 +54,108 @@ impl MatchSummaryQueue {
     }
 
     async fn drain_with(&self, notify: impl Fn(&str, &str)) {
+        if self.settings.private().await.summary_generation_mode
+            == crate::models::SummaryGenerationMode::Automatic
+            && let Err(error) = self.database.activate_automatic_match_summaries().await
+        {
+            tracing::error!(error = %error, "failed to activate automatic match summaries");
+            return;
+        }
+        let mut running = JoinSet::new();
         loop {
-            let claimed = match self.database.claim_next_match_summary().await {
-                Ok(Some(claimed)) => claimed,
-                Ok(None) => return,
-                Err(error) => {
-                    tracing::error!(error = %error, "failed to claim match summary");
-                    return;
-                }
+            let concurrency = usize::from(
+                self.settings
+                    .private()
+                    .await
+                    .summary_generation_max_concurrency,
+            );
+            let mut claimed_jobs = Vec::new();
+            for _ in 0..concurrency.saturating_sub(running.len()) {
+                let settings = self.settings.private().await.llm();
+                let claimed = match self
+                    .database
+                    .claim_next_match_summary_with_model(
+                        settings.provider.as_str(),
+                        &settings.model,
+                    )
+                    .await
+                {
+                    Ok(Some(claimed)) => claimed,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::error!(error = %error, "failed to claim match summary");
+                        break;
+                    }
+                };
+                notify(&claimed.invoice_id, "processing");
+                claimed_jobs.push((claimed, settings));
+            }
+            for (claimed, settings) in claimed_jobs {
+                let queue = self.clone();
+                running.spawn(async move { queue.process_one(claimed, settings).await });
+            }
+            let Some(result) = running.join_next().await else {
+                return;
             };
-            notify(&claimed.invoice_id, "processing");
-            let settings = self.settings.private().await.llm();
-            let result = self.llm.summarize_match(&settings, &claimed.input).await;
             match result {
-                Ok(display_name) => {
-                    match self
-                        .database
-                        .complete_match_summary(
-                            &claimed.invoice_id,
-                            &claimed.input_hash,
-                            &display_name,
-                            settings.provider.as_str(),
-                            &settings.model,
-                        )
-                        .await
-                    {
-                        Ok(true) => notify(&claimed.invoice_id, "succeeded"),
-                        Ok(false) => tracing::info!(
-                            invoice_id = claimed.invoice_id,
-                            "discarded stale match summary response"
-                        ),
-                        Err(error) => tracing::error!(
-                            invoice_id = claimed.invoice_id,
-                            error = %error,
-                            "failed to persist match summary"
-                        ),
-                    }
-                }
+                Ok((invoice_id, Some(status))) => notify(&invoice_id, &status),
+                Ok((_invoice_id, None)) => {}
                 Err(error) => {
-                    tracing::warn!(
-                        invoice_id = claimed.invoice_id,
-                        error = %error,
-                        "match summary generation failed"
-                    );
-                    if self
-                        .database
-                        .fail_match_summary(
-                            &claimed.invoice_id,
-                            &claimed.input_hash,
-                            &error.to_string(),
-                            settings.provider.as_str(),
-                            &settings.model,
-                        )
-                        .await
-                        .unwrap_or(false)
-                    {
-                        notify(&claimed.invoice_id, "failed");
+                    tracing::error!(error = %error, "match summary worker stopped unexpectedly")
+                }
+            }
+        }
+    }
+
+    async fn process_one(
+        &self,
+        claimed: crate::models::ClaimedMatchSummary,
+        settings: crate::models::LlmSettings,
+    ) -> (String, Option<String>) {
+        let invoice_id = claimed.invoice_id.clone();
+        let result = self.llm.summarize_match(&settings, &claimed.input).await;
+        match result {
+            Ok(display_name) => {
+                match self
+                    .database
+                    .complete_match_summary(
+                        &claimed.invoice_id,
+                        &claimed.input_hash,
+                        &display_name,
+                        settings.provider.as_str(),
+                        &settings.model,
+                    )
+                    .await
+                {
+                    Ok(true) => (invoice_id, Some("succeeded".into())),
+                    Ok(false) => {
+                        tracing::info!(
+                            attempt_id = claimed.attempt_id,
+                            invoice_id,
+                            "discarded stale match summary response"
+                        );
+                        (invoice_id, None)
+                    }
+                    Err(error) => {
+                        tracing::error!(attempt_id = claimed.attempt_id, invoice_id, error = %error, "failed to persist match summary");
+                        (invoice_id, None)
                     }
                 }
+            }
+            Err(error) => {
+                tracing::warn!(attempt_id = claimed.attempt_id, invoice_id, error = %error, "match summary generation failed");
+                let status = self
+                    .database
+                    .fail_match_summary(
+                        &claimed.invoice_id,
+                        &claimed.input_hash,
+                        &error.to_string(),
+                        settings.provider.as_str(),
+                        &settings.model,
+                    )
+                    .await
+                    .unwrap_or(None);
+                (invoice_id, status)
             }
         }
     }
@@ -152,6 +197,8 @@ mod tests {
             openai_api_key_masked: None,
             openai_api_key_configured: false,
             order_recognition_max_concurrency: 8,
+            summary_generation_mode: crate::models::SummaryGenerationMode::Automatic,
+            summary_generation_max_concurrency: 2,
             tencent_secret_id_masked: None,
             tencent_credentials_configured: false,
             invoice_ocr_concurrency: DEFAULT_INVOICE_OCR_CONCURRENCY,
@@ -163,7 +210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn processes_match_summaries_with_peak_concurrency_one() {
+    async fn honors_configured_match_summary_concurrency() {
         let active = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
@@ -215,7 +262,7 @@ mod tests {
         queue.drain_with(|_, _| {}).await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
         let succeeded = crate::entities::invoice_match::Entity::find()
             .filter(crate::entities::invoice_match::Column::SummaryStatus.eq("succeeded"))
             .count(&database.connection)

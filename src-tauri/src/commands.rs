@@ -45,12 +45,32 @@ pub async fn save_settings(
     state: State<'_, AppState>,
     request: UpdateSettingsRequest,
 ) -> CommandResult<AppSettings> {
+    let previous = state.settings.private().await.summary_generation_mode;
     let settings = state
         .settings
         .save(request)
         .await
         .map_err(crate::error::CommandError::from)?;
     state.queue.wake();
+    if previous != settings.summary_generation_mode {
+        match settings.summary_generation_mode {
+            crate::models::SummaryGenerationMode::Automatic => {
+                state
+                    .database
+                    .activate_automatic_match_summaries()
+                    .await
+                    .map_err(crate::error::CommandError::from)?;
+            }
+            crate::models::SummaryGenerationMode::Manual => {
+                state
+                    .database
+                    .pause_pending_match_summaries()
+                    .await
+                    .map_err(crate::error::CommandError::from)?;
+            }
+        }
+    }
+    state.match_summary_queue.wake();
     Ok(settings)
 }
 

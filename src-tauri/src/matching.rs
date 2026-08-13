@@ -12,9 +12,10 @@ use crate::entities::{invoice, invoice_match, invoice_match_order, order};
 use crate::error::{AppError, AppResult, CommandResult};
 use crate::models::{
     ConfirmInvoiceMatchRequest, ConfirmInvoiceMatchResult, ConfirmInvoiceMatchesRequest, IdRequest,
-    MatchCandidate, MatchOrderSummary, MatchableOrderItem, MatchableOrdersPage,
-    MatchableOrdersQuery, MatchingInvoiceItem, MatchingPage, MatchingQuery, MatchingSummary,
-    OrderSort, SortDirection,
+    MatchCandidate, MatchOrderSummary, MatchSummariesPage, MatchSummariesQuery,
+    MatchSummaryAttemptsPage, MatchSummaryAttemptsQuery, MatchSummaryCounts, MatchableOrderItem,
+    MatchableOrdersPage, MatchableOrdersQuery, MatchingInvoiceItem, MatchingPage, MatchingQuery,
+    MatchingSummary, OrderSort, SortDirection, UpdateMatchSummaryRequest,
 };
 
 #[derive(Clone, Debug, FromQueryResult)]
@@ -31,6 +32,7 @@ struct InvoiceRow {
     confirmed_at: Option<String>,
     display_name: Option<String>,
     summary_status: Option<String>,
+    summary_source: Option<String>,
     summary_error: Option<String>,
     summary_provider: Option<String>,
     summary_model: Option<String>,
@@ -93,7 +95,7 @@ impl Database {
             DbBackend::Sqlite,
             "SELECT i.id,i.invoice_number,i.subtype,i.subtype_description,i.invoice_date,i.seller_name,\
              i.total_fen,i.currency,m.source confirmed_source,m.confirmed_at,m.display_name,\
-             m.summary_status,m.summary_error,m.summary_provider,m.summary_model,m.summary_generated_at \
+             m.summary_status,m.summary_source,m.summary_error,m.summary_provider,m.summary_model,m.summary_generated_at \
              FROM invoices i LEFT JOIN invoice_matches m ON m.invoice_id=i.id \
              LEFT JOIN project_invoices pi ON pi.invoice_id=i.id \
              LEFT JOIN projects p ON p.id=pi.project_id \
@@ -260,6 +262,7 @@ impl Database {
                 confirmed_at: value.confirmed_at,
                 display_name,
                 summary_status: value.summary_status,
+                summary_source: value.summary_source,
                 summary_error: value.summary_error,
                 summary_provider: value.summary_provider,
                 summary_model: value.summary_model,
@@ -311,6 +314,7 @@ impl Database {
     ) -> AppResult<MatchingPage> {
         let mut items = self.matching_items(max_orders, max_candidates).await?;
         let mut summary = MatchingSummary::default();
+        let mut summary_counts = MatchSummaryCounts::default();
         for item in &items {
             summary.total += 1;
             match item.status.as_str() {
@@ -321,12 +325,19 @@ impl Database {
                 "confirmed" => summary.confirmed += 1,
                 _ => {}
             }
+            if let Some(status) = &item.summary_status {
+                summary_counts.add(status);
+            }
         }
 
         let search = query.search.unwrap_or_default().trim().to_lowercase();
         let status_filter = query.status.unwrap_or_default();
+        let summary_status_filter = normalized_summary_filter(query.summary_status.as_deref())?;
         items.retain(|item| {
             (status_filter.is_empty() || status_filter == "all" || item.status == status_filter)
+                && summary_status_filter.is_none_or(|status| {
+                    item.status == "confirmed" && item.summary_status.as_deref() == Some(status)
+                })
                 && (search.is_empty()
                     || item.id.to_lowercase().contains(&search)
                     || item
@@ -361,6 +372,7 @@ impl Database {
         Ok(MatchingPage {
             items,
             summary,
+            summary_counts,
             total,
             page,
             page_size,
@@ -435,12 +447,24 @@ impl Database {
         })
     }
 
+    #[cfg(test)]
     pub async fn confirm_invoice_match(
         &self,
         request: ConfirmInvoiceMatchRequest,
     ) -> AppResult<ConfirmInvoiceMatchResult> {
+        self.confirm_invoice_match_with_summary_status(request, "pending")
+            .await
+    }
+
+    pub async fn confirm_invoice_match_with_summary_status(
+        &self,
+        request: ConfirmInvoiceMatchRequest,
+        summary_status: &str,
+    ) -> AppResult<ConfirmInvoiceMatchResult> {
         let transaction = self.connection.begin().await?;
-        let result = self.confirm_invoice_match_in(&transaction, request).await?;
+        let result = self
+            .confirm_invoice_match_in(&transaction, request, summary_status)
+            .await?;
         if result.confirmed {
             transaction.commit().await?;
         } else {
@@ -449,14 +473,26 @@ impl Database {
         Ok(result)
     }
 
+    #[cfg(test)]
     pub async fn confirm_invoice_matches(
         &self,
         requests: Vec<ConfirmInvoiceMatchRequest>,
     ) -> AppResult<Vec<ConfirmInvoiceMatchResult>> {
+        self.confirm_invoice_matches_with_summary_status(requests, "pending")
+            .await
+    }
+
+    pub async fn confirm_invoice_matches_with_summary_status(
+        &self,
+        requests: Vec<ConfirmInvoiceMatchRequest>,
+        summary_status: &str,
+    ) -> AppResult<Vec<ConfirmInvoiceMatchResult>> {
         let transaction = self.connection.begin().await?;
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
-            let result = self.confirm_invoice_match_in(&transaction, request).await?;
+            let result = self
+                .confirm_invoice_match_in(&transaction, request, summary_status)
+                .await?;
             if !result.confirmed {
                 return Err(AppError::InvalidInput(
                     "批量匹配中出现需要人工确认的差异".into(),
@@ -472,7 +508,11 @@ impl Database {
         &self,
         transaction: &DatabaseTransaction,
         request: ConfirmInvoiceMatchRequest,
+        summary_status: &str,
     ) -> AppResult<ConfirmInvoiceMatchResult> {
+        if summary_status != "pending" && summary_status != "not_generated" {
+            return Err(AppError::Internal("摘要初始状态无效".into()));
+        }
         if request.order_ids.is_empty() || request.order_ids.len() > 100 {
             return Err(AppError::InvalidInput(
                 "单次匹配请选择 1 到 100 张订单".into(),
@@ -576,7 +616,11 @@ impl Database {
             source: Set(request.source),
             confirmed_at: Set(now()),
             display_name: Set(None),
-            summary_status: Set("pending".into()),
+            summary_status: Set(summary_status.into()),
+            summary_source: Set(None),
+            summary_trigger: Set(
+                (summary_status == "pending").then(|| "automatic_confirmation".into())
+            ),
             summary_error: Set(None),
             summary_provider: Set(None),
             summary_model: Set(None),
@@ -609,6 +653,19 @@ impl Database {
             return Err(AppError::NotFound(format!("发票匹配 {invoice_id}")));
         }
         Ok(())
+    }
+}
+
+fn normalized_summary_filter(value: Option<&str>) -> AppResult<Option<&str>> {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "all")
+    {
+        None => Ok(None),
+        Some(value @ ("not_generated" | "pending" | "processing" | "succeeded" | "failed")) => {
+            Ok(Some(value))
+        }
+        Some(_) => Err(AppError::InvalidInput("摘要状态筛选无效".into())),
     }
 }
 
@@ -1129,7 +1186,13 @@ pub async fn confirm_invoice_match(
     validate_automatic_suggestion(&state, &request, &settings, false).await?;
     let result = state
         .database
-        .confirm_invoice_match(request)
+        .confirm_invoice_match_with_summary_status(
+            request,
+            match settings.summary_generation_mode {
+                crate::models::SummaryGenerationMode::Automatic => "pending",
+                crate::models::SummaryGenerationMode::Manual => "not_generated",
+            },
+        )
         .await
         .map_err(crate::error::CommandError::from)?;
     if result.confirmed {
@@ -1152,7 +1215,13 @@ pub async fn confirm_invoice_matches(
     }
     let results = state
         .database
-        .confirm_invoice_matches(request.matches)
+        .confirm_invoice_matches_with_summary_status(
+            request.matches,
+            match settings.summary_generation_mode {
+                crate::models::SummaryGenerationMode::Automatic => "pending",
+                crate::models::SummaryGenerationMode::Manual => "not_generated",
+            },
+        )
         .await
         .map_err(crate::error::CommandError::from)?;
     state.match_summary_queue.wake();
@@ -1183,6 +1252,7 @@ async fn validate_automatic_suggestion(
                     }
                     .into(),
                 ),
+                summary_status: None,
             },
             usize::from(settings.match_max_orders),
             usize::from(settings.match_max_candidates),
@@ -1229,6 +1299,88 @@ pub async fn retry_match_summary(
         .map_err(crate::error::CommandError::from)?;
     crate::match_summary_queue::emit_update(&app, &request.id, "pending");
     state.match_summary_queue.wake();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_match_summaries(
+    state: State<'_, AppState>,
+    query: MatchSummariesQuery,
+) -> CommandResult<MatchSummariesPage> {
+    state
+        .database
+        .clean_expired_match_summary_attempts()
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    state
+        .database
+        .list_match_summaries(query)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn list_match_summary_attempts(
+    state: State<'_, AppState>,
+    query: MatchSummaryAttemptsQuery,
+) -> CommandResult<MatchSummaryAttemptsPage> {
+    state
+        .database
+        .clean_expired_match_summary_attempts()
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    state
+        .database
+        .list_match_summary_attempts(query)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn enqueue_match_summary(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: IdRequest,
+) -> CommandResult<()> {
+    state
+        .database
+        .enqueue_match_summary(&request.id)
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    crate::match_summary_queue::emit_update(&app, &request.id, "pending");
+    state.match_summary_queue.wake();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn enqueue_all_match_summaries(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<u64> {
+    let affected = state
+        .database
+        .enqueue_all_match_summaries()
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    if affected > 0 {
+        crate::match_summary_queue::emit_update(&app, "", "pending");
+        state.match_summary_queue.wake();
+    }
+    Ok(affected)
+}
+
+#[tauri::command]
+pub async fn update_match_summary(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: UpdateMatchSummaryRequest,
+) -> CommandResult<()> {
+    state
+        .database
+        .update_match_summary(&request.invoice_id, &request.display_name)
+        .await
+        .map_err(crate::error::CommandError::from)?;
+    crate::match_summary_queue::emit_update(&app, &request.invoice_id, "succeeded");
     Ok(())
 }
 
@@ -1351,6 +1503,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1390,6 +1543,55 @@ mod tests {
         let confirmed = db.ledger_match_projection(10, 100).await.unwrap();
         assert_eq!(confirmed.invoice_statuses["invoice-a"], "confirmed");
         assert_eq!(confirmed.order_statuses["order-a"], "confirmed");
+    }
+
+    #[tokio::test]
+    async fn summary_filter_uses_confirmed_matches_and_keeps_global_counts() {
+        let db = Database::in_memory().await.unwrap();
+        seed_records(
+            &db,
+            &[("order-a", 100), ("order-b", 200)],
+            &[("invoice-a", 100), ("invoice-b", 200)],
+        )
+        .await;
+        for (invoice_id, order_id) in [("invoice-a", "order-a"), ("invoice-b", "order-b")] {
+            db.confirm_invoice_match(ConfirmInvoiceMatchRequest {
+                invoice_id: invoice_id.into(),
+                order_ids: vec![order_id.into()],
+                source: "automatic".into(),
+                accept_mismatches: false,
+            })
+            .await
+            .unwrap();
+        }
+        db.execute_test_statement(
+            "UPDATE invoice_matches SET summary_status='succeeded',display_name='商品甲' WHERE invoice_id='invoice-a';
+             UPDATE invoice_matches SET summary_status='failed',summary_error='模型离线' WHERE invoice_id='invoice-b';",
+        )
+        .await
+        .unwrap();
+
+        let page = db
+            .matching_page(
+                MatchingQuery {
+                    page: Some(1),
+                    page_size: Some(1),
+                    search: None,
+                    status: Some("confirmed".into()),
+                    summary_status: Some("failed".into()),
+                },
+                10,
+                100,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].id, "invoice-b");
+        assert_eq!(page.summary.confirmed, 2);
+        assert_eq!(page.summary_counts.total, 2);
+        assert_eq!(page.summary_counts.succeeded, 1);
+        assert_eq!(page.summary_counts.failed, 1);
     }
 
     #[tokio::test]
@@ -1476,6 +1678,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1529,6 +1732,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1572,6 +1776,7 @@ mod tests {
                         page_size: None,
                         search: None,
                         status: None,
+                        summary_status: None,
                     },
                     10,
                     100,
@@ -1616,6 +1821,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1656,6 +1862,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: Some("suggested".into()),
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1757,6 +1964,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1793,6 +2001,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1829,6 +2038,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1865,6 +2075,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1903,6 +2114,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1941,6 +2153,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,
@@ -1979,6 +2192,7 @@ mod tests {
                     page_size: None,
                     search: None,
                     status: None,
+                    summary_status: None,
                 },
                 10,
                 100,

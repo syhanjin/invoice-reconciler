@@ -96,8 +96,20 @@ impl Database {
         connection
             .execute(Statement::from_string(
                 DbBackend::Sqlite,
-                "UPDATE invoice_matches SET summary_status = 'pending', summary_error = NULL \
+                "UPDATE match_summary_attempts SET status = 'interrupted', error_message = '应用在摘要生成完成前退出', completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'processing'",
+            ))
+            .await?;
+        connection
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "UPDATE invoice_matches SET summary_status = 'pending', summary_trigger = COALESCE(summary_trigger, 'interrupted'), summary_error = NULL \
                  WHERE summary_status = 'processing'",
+            ))
+            .await?;
+        connection
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "DELETE FROM match_summary_attempts WHERE datetime(started_at) < datetime('now', '-180 days')",
             ))
             .await?;
         let database = Self { connection };
@@ -703,6 +715,8 @@ fn settings_from_model(model: app_setting::Model) -> AppSettings {
         openai_api_key_configured: false,
         order_recognition_max_concurrency: u8::try_from(model.max_concurrency)
             .unwrap_or(DEFAULT_MAX_CONCURRENCY),
+        summary_generation_mode: crate::models::SummaryGenerationMode::Automatic,
+        summary_generation_max_concurrency: crate::models::DEFAULT_SUMMARY_GENERATION_CONCURRENCY,
         tencent_secret_id_masked: None,
         tencent_credentials_configured: false,
         invoice_ocr_concurrency: crate::models::DEFAULT_INVOICE_OCR_CONCURRENCY,

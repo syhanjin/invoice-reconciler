@@ -8,18 +8,20 @@ use tokio::sync::RwLock;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     DEFAULT_INVOICE_OCR_CONCURRENCY, DEFAULT_MATCH_MAX_CANDIDATES, DEFAULT_MATCH_MAX_ORDERS,
-    DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, LlmProvider, MAX_MATCH_MAX_CANDIDATES,
-    MAX_MATCH_MAX_ORDERS, MIN_MATCH_MAX_CANDIDATES, MIN_MATCH_MAX_ORDERS, PrivateAppSettings,
-    UpdateSettingsRequest,
+    DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_SUMMARY_GENERATION_CONCURRENCY,
+    LlmProvider, MAX_MATCH_MAX_CANDIDATES, MAX_MATCH_MAX_ORDERS, MIN_MATCH_MAX_CANDIDATES,
+    MIN_MATCH_MAX_ORDERS, PrivateAppSettings, SummaryGenerationMode, UpdateSettingsRequest,
 };
 
-const SETTINGS_VERSION: u32 = 4;
+const SETTINGS_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SettingsFile {
     version: u32,
     llm: LlmFile,
     order_recognition: OrderRecognitionFile,
+    #[serde(default)]
+    summary_generation: SummaryGenerationSettings,
     tencent_cloud: TencentSettings,
     #[serde(default)]
     matching: MatchingSettings,
@@ -95,6 +97,21 @@ struct LegacyAliyunBatchEndpoint {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct OrderRecognitionFile {
     max_concurrency: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct SummaryGenerationSettings {
+    mode: SummaryGenerationMode,
+    max_concurrency: u8,
+}
+
+impl Default for SummaryGenerationSettings {
+    fn default() -> Self {
+        Self {
+            mode: SummaryGenerationMode::Automatic,
+            max_concurrency: DEFAULT_SUMMARY_GENERATION_CONCURRENCY,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -193,6 +210,14 @@ impl SettingsStore {
                     write_file(&path, &upgraded).await?;
                     upgraded
                 }
+                4 => {
+                    let mut upgraded: SettingsFile = toml::from_str(&content).map_err(|_| {
+                        AppError::Settings("设置格式无效，请检查 settings.toml 的字段和版本".into())
+                    })?;
+                    upgraded.version = SETTINGS_VERSION;
+                    write_file(&path, &upgraded).await?;
+                    upgraded
+                }
                 value if value == i64::from(SETTINGS_VERSION) => {
                     toml::from_str(&content).map_err(|_| {
                         AppError::Settings("设置格式无效，请检查 settings.toml 的字段和版本".into())
@@ -217,6 +242,10 @@ impl SettingsStore {
                 },
                 order_recognition: OrderRecognitionFile {
                     max_concurrency: legacy.order_recognition_max_concurrency,
+                },
+                summary_generation: SummaryGenerationSettings {
+                    mode: legacy.summary_generation_mode,
+                    max_concurrency: legacy.summary_generation_max_concurrency,
                 },
                 tencent_cloud: TencentSettings {
                     secret_id: String::new(),
@@ -301,6 +330,10 @@ impl SettingsStore {
             order_recognition: OrderRecognitionFile {
                 max_concurrency: validated.order_recognition_max_concurrency,
             },
+            summary_generation: SummaryGenerationSettings {
+                mode: validated.summary_generation_mode,
+                max_concurrency: validated.summary_generation_max_concurrency,
+            },
             tencent_cloud: TencentSettings {
                 secret_id,
                 secret_key,
@@ -332,6 +365,8 @@ fn to_private(file: SettingsFile, path: &Path, warning: Option<String>) -> Priva
         openai_model: file.llm.openai.model,
         openai_api_key: file.llm.openai.api_key,
         order_recognition_max_concurrency: file.order_recognition.max_concurrency.clamp(1, 8),
+        summary_generation_mode: file.summary_generation.mode,
+        summary_generation_max_concurrency: file.summary_generation.max_concurrency.clamp(1, 8),
         tencent_secret_id: file.tencent_cloud.secret_id,
         tencent_secret_key: file.tencent_cloud.secret_key,
         invoice_ocr_concurrency: file.tencent_cloud.invoice_ocr_concurrency.clamp(1, 5),
@@ -378,6 +413,7 @@ fn from_legacy_file(legacy: LegacySettingsFile) -> SettingsFile {
         order_recognition: OrderRecognitionFile {
             max_concurrency: legacy.ollama.max_concurrency,
         },
+        summary_generation: SummaryGenerationSettings::default(),
         tencent_cloud: legacy.tencent_cloud,
         matching: legacy.matching,
     }
@@ -404,6 +440,7 @@ fn from_provider_file(legacy: LegacyProviderSettingsFile) -> SettingsFile {
         order_recognition: OrderRecognitionFile {
             max_concurrency: legacy.order_recognition.max_concurrency,
         },
+        summary_generation: SummaryGenerationSettings::default(),
         tencent_cloud: legacy.tencent_cloud,
         matching: legacy.matching,
     }
@@ -421,6 +458,7 @@ fn from_version_three_file(legacy: VersionThreeSettingsFile) -> SettingsFile {
         order_recognition: OrderRecognitionFile {
             max_concurrency: legacy.order_recognition.max_concurrency,
         },
+        summary_generation: SummaryGenerationSettings::default(),
         tencent_cloud: legacy.tencent_cloud,
         matching: legacy.matching,
     }
@@ -541,6 +579,8 @@ mod tests {
             openai_api_key_masked: None,
             openai_api_key_configured: false,
             order_recognition_max_concurrency: 3,
+            summary_generation_mode: SummaryGenerationMode::Automatic,
+            summary_generation_max_concurrency: 1,
             tencent_secret_id_masked: None,
             tencent_credentials_configured: false,
             invoice_ocr_concurrency: 3,
@@ -567,6 +607,8 @@ mod tests {
                 openai_api_key: Some("openai-private".into()),
                 clear_openai_api_key: false,
                 order_recognition_max_concurrency: 2,
+                summary_generation_mode: SummaryGenerationMode::Manual,
+                summary_generation_max_concurrency: 4,
                 tencent_secret_id: Some("AKID1234567890".into()),
                 tencent_secret_key: Some("private-value".into()),
                 clear_tencent_credentials: false,
@@ -639,7 +681,8 @@ mod tests {
         let upgraded = tokio::fs::read_to_string(directory.path().join("settings.toml"))
             .await
             .unwrap();
-        assert!(upgraded.contains("version = 4"));
+        assert!(upgraded.contains("version = 5"));
+        assert!(upgraded.contains("[summary_generation]"));
         assert!(upgraded.contains("[llm]"));
         assert!(upgraded.contains("provider = \"ollama\""));
     }
@@ -686,7 +729,7 @@ invoice_ocr_concurrency = 3
         let upgraded = tokio::fs::read_to_string(directory.path().join("settings.toml"))
             .await
             .unwrap();
-        assert!(upgraded.contains("version = 4"));
+        assert!(upgraded.contains("version = 5"));
         assert!(!upgraded.contains("aliyun"));
         assert!(!upgraded.contains("ALIYUN-SENSITIVE-SENTINEL"));
     }
@@ -730,10 +773,61 @@ invoice_ocr_concurrency = 3
         let upgraded = tokio::fs::read_to_string(directory.path().join("settings.toml"))
             .await
             .unwrap();
-        assert!(upgraded.contains("version = 4"));
+        assert!(upgraded.contains("version = 5"));
         assert!(upgraded.contains("[llm.openai]"));
         assert!(upgraded.contains("SENSITIVE-OPENAI-KEY"));
         assert!(upgraded.contains("[order_recognition]"));
         assert!(!upgraded.contains("[order_recognition.openai]"));
+    }
+
+    #[tokio::test]
+    async fn version_four_settings_add_summary_generation_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            directory.path().join("settings.toml"),
+            r#"version = 4
+
+[llm]
+provider = "ollama"
+
+[llm.ollama]
+base_url = "http://localhost:11434"
+model = "qwen"
+
+[llm.openai]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key = ""
+
+[order_recognition]
+max_concurrency = 3
+
+[tencent_cloud]
+secret_id = ""
+secret_key = ""
+invoice_ocr_concurrency = 3
+
+[matching]
+max_orders_per_candidate = 10
+max_candidates_per_invoice = 100
+"#,
+        )
+        .await
+        .unwrap();
+
+        let store = SettingsStore::load_or_migrate(directory.path(), legacy())
+            .await
+            .unwrap();
+        let public = store.public().await;
+        assert_eq!(
+            public.summary_generation_mode,
+            SummaryGenerationMode::Automatic
+        );
+        assert_eq!(public.summary_generation_max_concurrency, 1);
+        let upgraded = tokio::fs::read_to_string(directory.path().join("settings.toml"))
+            .await
+            .unwrap();
+        assert!(upgraded.contains("version = 5"));
+        assert!(upgraded.contains("[summary_generation]"));
     }
 }
