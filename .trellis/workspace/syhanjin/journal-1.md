@@ -425,3 +425,38 @@ Renamed internal project identifiers to invoice-reconciler while preserving the 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: Project management and export packages
+
+**Date**: 2026-08-13
+**Task**: Project management and export packages
+**Branch**: `main`
+
+### Summary
+
+Added ordered project membership, strict export eligibility, XLSX/material/PDF ZIP generation, project and invoice membership workflows, regression coverage, and executable contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0b75b8d` | (see git log) |
+| `30fd9c2` | (see git log) |
+| `6fd7fac` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
