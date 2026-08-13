@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 11
+- **Total Sessions**: 12
 - **Last Active**: 2026-08-13
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~394 | Active |
+| `journal-1.md` | ~427 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 12 | 2026-08-13 | Invoice Reconciler release workflow | `35c9f65` | `master` |
 | 11 | 2026-08-13 | Remove Aliyun Batch API | `9b819e9` | `main` |
 | 10 | 2026-08-13 | Unified order recognition pool and Aliyun batch recovery | `b80255a`, `d3aaff1` | `main` |
 | 9 | 2026-08-13 | Preserve order import history on delete | `710deb2` | `main` |

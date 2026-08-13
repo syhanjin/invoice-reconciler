@@ -392,3 +392,36 @@ Removed Aliyun Bailian File/Batch order recognition across Rust and React, migra
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: Invoice Reconciler release workflow
+
+**Date**: 2026-08-13
+**Task**: Invoice Reconciler release workflow
+**Branch**: `master`
+
+### Summary
+
+Renamed internal project identifiers to invoice-reconciler while preserving the 票据助手 UI, changed the database to db.sqlite3, and added tag-driven Linux/Windows installer plus standalone executable releases.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `35c9f65` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
