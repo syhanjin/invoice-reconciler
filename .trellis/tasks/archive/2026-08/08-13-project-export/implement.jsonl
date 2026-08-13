@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/project-export-contract.md","reason":"Backend membership, eligibility, money, archive, XLSX, and PDF contracts"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"SeaORM migration, transaction, cascade, and position-compaction conventions"}
+{"file":".trellis/spec/backend/invoice-import-contract.md","reason":"Invoice ledger project projection/filter and delete cascade behavior"}
+{"file":".trellis/spec/frontend/project-workspace-contract.md","reason":"Project workspace, ledger membership, ordering, and overwrite UX contract"}
+{"file":".trellis/spec/frontend/invoice-workspace-contract.md","reason":"Invoice-ledger project membership controls and query state"}
