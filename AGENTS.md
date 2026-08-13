@@ -35,6 +35,11 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - GitHub releases are created only from pushed `v*.*.*` tags. Preserve the
   Linux/Windows x86_64 matrix and publish both the native installer and the
   standalone executable for each platform.
+- Pushes to `main` prebuild the same Linux/Windows release targets used by tag
+  publishing. Keep Cargo package, full target-directory, and sccache layers
+  aligned between build-check and publish workflows; only successful `main`
+  builds may save shared caches, and retain the two newest target/sccache
+  snapshots per platform.
 - Initialize and add shadcn/ui components through `bunx shadcn@latest`; do not
   hand-copy shadcn component implementations.
 - Prefer well-maintained existing dependencies over custom implementations on
@@ -43,6 +48,9 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - Linux launches default `WEBKIT_DISABLE_DMABUF_RENDERER` to `1` in the Rust
   executable entry point before Tauri starts. Preserve an explicitly supplied
   launch-environment value.
+- Windows release executables use the GUI subsystem so launching the packaged
+  application does not open a console window. Keep the CI PE-subsystem check;
+  debug builds retain their console for diagnostics.
 - Runtime settings live in a versioned application-data `settings.toml`, not
   SQLite. Keep the public settings response credential-free, preserve atomic
   replacement, and enforce `0600` on Unix or a current-user ACL on Windows.
