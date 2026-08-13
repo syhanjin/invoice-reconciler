@@ -460,3 +460,36 @@ Added ordered project membership, strict export eligibility, XLSX/material/PDF Z
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: Repurchase automatic matching
+
+**Date**: 2026-08-13
+**Task**: Repurchase automatic matching
+**Branch**: `main`
+
+### Summary
+
+Chronologically resolved isolated repurchase candidate groups, added dedicated suspected-repurchase conflict reasons, and excluded confirmed orders from custom selection.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `40fb430` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
