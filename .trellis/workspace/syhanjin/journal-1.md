@@ -635,3 +635,36 @@ Allowed complete repeated order and invoice dates in suspected-repurchase matchi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 19: 全局 LLM 与匹配商品摘要
+
+**Date**: 2026-08-13
+**Task**: 全局 LLM 与匹配商品摘要
+**Branch**: `main`
+
+### Summary
+
+将订单识别模型提升为全局 LLM 配置；为确认组合增加可恢复的异步商品摘要、确定性降级、匹配/项目展示和 XLSX/ZIP 导出；补齐迁移、协议、并发、编辑失效与前端重试测试。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e95d90c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
