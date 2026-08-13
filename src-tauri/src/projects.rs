@@ -1,0 +1,1119 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait,
+    FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
+    TransactionTrait,
+};
+use tauri::State;
+use uuid::Uuid;
+
+use crate::AppState;
+use crate::db::{Database, now};
+use crate::entities::{invoice, project, project_invoice};
+use crate::error::{AppError, AppResult, CommandResult};
+use crate::files::resolve_managed_path;
+use crate::invoice_files::resolve_invoice_path;
+use crate::models::{
+    AssignInvoicesResult, AssignInvoicesToProjectRequest, IdRequest, InvoiceIdsRequest,
+    InvoiceProjectConflict, ProjectDetail, ProjectInvoiceMember, ProjectNameRequest,
+    ProjectOrderSummary, ProjectSummary, ProjectsPage, ProjectsQuery, RenameProjectRequest,
+    ReorderProjectInvoicesRequest,
+};
+
+#[derive(Clone, Debug, FromQueryResult)]
+struct ProjectMemberRow {
+    id: String,
+    position: i32,
+    type_description: String,
+    invoice_code: Option<String>,
+    invoice_number: Option<String>,
+    invoice_date: Option<String>,
+    buyer_name: Option<String>,
+    buyer_tax_id: Option<String>,
+    seller_name: Option<String>,
+    seller_tax_id: Option<String>,
+    amount_fen: Option<i64>,
+    tax_fen: Option<i64>,
+    total_fen: Option<i64>,
+    currency: String,
+    preview_path: String,
+    confirmed_source: Option<String>,
+}
+
+#[derive(Clone, Debug, FromQueryResult)]
+struct ProjectOrderRow {
+    id: String,
+    external_order_number: Option<String>,
+    paid_amount_fen: Option<i64>,
+    managed_image_path: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectExportOrder {
+    pub id: String,
+    pub external_order_number: Option<String>,
+    pub product_names: Vec<String>,
+    pub image_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectExportInvoice {
+    pub member: ProjectInvoiceMember,
+    pub preview_path: PathBuf,
+    pub orders: Vec<ProjectExportOrder>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectExportSnapshot {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub invoices: Vec<ProjectExportInvoice>,
+}
+
+impl ProjectExportSnapshot {
+    fn into_detail(self) -> ProjectDetail {
+        let invoices = self
+            .invoices
+            .into_iter()
+            .map(|invoice| invoice.member)
+            .collect::<Vec<_>>();
+        detail_from_members(
+            self.id,
+            self.name,
+            self.created_at,
+            self.updated_at,
+            invoices,
+        )
+    }
+}
+
+impl Database {
+    pub async fn projects_page(
+        &self,
+        query: ProjectsQuery,
+        app_data: &Path,
+    ) -> AppResult<ProjectsPage> {
+        let page = query.page.unwrap_or(1).max(1);
+        let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
+        let search = query
+            .search
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let mut finder = project::Entity::find();
+        if let Some(search) = &search {
+            finder = finder.filter(project::Column::Name.contains(search));
+        }
+        let total = finder.clone().count(&self.connection).await? as i64;
+        let projects = finder
+            .order_by_desc(project::Column::UpdatedAt)
+            .order_by_desc(project::Column::Id)
+            .offset(u64::from((page - 1) * page_size))
+            .limit(u64::from(page_size))
+            .all(&self.connection)
+            .await?;
+        let mut items = Vec::with_capacity(projects.len());
+        for value in projects {
+            let detail = self.project_snapshot(value, app_data).await?.into_detail();
+            items.push(summary_from_detail(detail));
+        }
+        Ok(ProjectsPage {
+            items,
+            total,
+            page,
+            page_size,
+        })
+    }
+
+    pub async fn project_detail(&self, id: &str, app_data: &Path) -> AppResult<ProjectDetail> {
+        let value = project::Entity::find_by_id(id)
+            .one(&self.connection)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("项目 {id}")))?;
+        Ok(self.project_snapshot(value, app_data).await?.into_detail())
+    }
+
+    pub(crate) async fn project_export_snapshot(
+        &self,
+        id: &str,
+        app_data: &Path,
+    ) -> AppResult<ProjectExportSnapshot> {
+        let value = project::Entity::find_by_id(id)
+            .one(&self.connection)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("项目 {id}")))?;
+        self.project_snapshot(value, app_data).await
+    }
+
+    async fn project_snapshot(
+        &self,
+        project_value: project::Model,
+        app_data: &Path,
+    ) -> AppResult<ProjectExportSnapshot> {
+        let rows = ProjectMemberRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT i.id,pi.position,i.type_description,i.invoice_code,i.invoice_number,i.invoice_date,\
+             i.buyer_name,i.buyer_tax_id,i.seller_name,i.seller_tax_id,i.amount_fen,i.tax_fen,\
+             i.total_fen,i.currency,i.preview_path,m.source confirmed_source \
+             FROM project_invoices pi JOIN invoices i ON i.id=pi.invoice_id \
+             LEFT JOIN invoice_matches m ON m.invoice_id=i.id \
+             WHERE pi.project_id=? ORDER BY pi.position,i.id",
+            [project_value.id.clone().into()],
+        ))
+        .all(&self.connection)
+        .await?;
+
+        let mut invoices = Vec::with_capacity(rows.len());
+        for row in rows {
+            let order_rows = ProjectOrderRow::find_by_statement(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT o.id,o.external_order_number,o.paid_amount_fen,o.managed_image_path \
+                 FROM invoice_match_orders mo JOIN orders o ON o.id=mo.order_id \
+                 WHERE mo.invoice_id=? ORDER BY mo.position,o.id",
+                [row.id.clone().into()],
+            ))
+            .all(&self.connection)
+            .await?;
+            let mut public_orders = Vec::with_capacity(order_rows.len());
+            let mut export_orders = Vec::with_capacity(order_rows.len());
+            let mut order_files_available = true;
+            for order_row in order_rows {
+                let product_names = order_product_names(&self.connection, &order_row.id).await?;
+                let image_path = order_row
+                    .managed_image_path
+                    .as_deref()
+                    .and_then(|value| resolve_managed_path(app_data, value).ok());
+                let image_available = image_path.as_ref().is_some_and(|path| path.is_file());
+                order_files_available &= image_available;
+                public_orders.push(ProjectOrderSummary {
+                    id: order_row.id.clone(),
+                    external_order_number: order_row.external_order_number.clone(),
+                    paid_amount_fen: order_row.paid_amount_fen,
+                    product_names: product_names.clone(),
+                });
+                if order_row.paid_amount_fen.is_some()
+                    && let Some(image_path) = image_path
+                {
+                    export_orders.push(ProjectExportOrder {
+                        id: order_row.id,
+                        external_order_number: order_row.external_order_number,
+                        product_names,
+                        image_path,
+                    });
+                }
+            }
+            let preview_path = resolve_invoice_path(app_data, &row.preview_path).ok();
+            let preview_available = preview_path.as_ref().is_some_and(|path| path.is_file());
+            let confirmed = row.confirmed_source.is_some();
+            let order_amount_fen = confirmed
+                .then(|| {
+                    public_orders
+                        .iter()
+                        .map(|order| order.paid_amount_fen)
+                        .collect::<Option<Vec<_>>>()
+                        .and_then(|amounts| {
+                            amounts
+                                .into_iter()
+                                .try_fold(0_i64, |total, amount| total.checked_add(amount))
+                        })
+                })
+                .flatten();
+            let invoice_amount_fen = row.total_fen;
+            let actual_amount_fen = actual_amount(invoice_amount_fen, order_amount_fen);
+            let blocking_reason = member_blocking_reason(
+                confirmed,
+                &row.currency,
+                invoice_amount_fen,
+                order_amount_fen,
+                &public_orders,
+                preview_available,
+                order_files_available,
+            );
+            let file_available = preview_available && order_files_available;
+            let member = ProjectInvoiceMember {
+                id: row.id,
+                position: row.position,
+                type_description: row.type_description,
+                invoice_code: row.invoice_code,
+                invoice_number: row.invoice_number,
+                invoice_date: row.invoice_date,
+                buyer_name: row.buyer_name,
+                buyer_tax_id: row.buyer_tax_id,
+                seller_name: row.seller_name,
+                seller_tax_id: row.seller_tax_id,
+                amount_fen: row.amount_fen,
+                tax_fen: row.tax_fen,
+                invoice_amount_fen,
+                order_amount_fen,
+                actual_amount_fen,
+                currency: row.currency,
+                confirmed,
+                file_available,
+                blocking_reason,
+                orders: public_orders,
+            };
+            invoices.push(ProjectExportInvoice {
+                member,
+                preview_path: preview_path.unwrap_or_default(),
+                orders: export_orders,
+            });
+        }
+        Ok(ProjectExportSnapshot {
+            id: project_value.id,
+            name: project_value.name,
+            created_at: project_value.created_at,
+            updated_at: project_value.updated_at,
+            invoices,
+        })
+    }
+
+    pub async fn create_project(&self, name: String, app_data: &Path) -> AppResult<ProjectDetail> {
+        let name = validate_project_name(&name)?;
+        if project::Entity::find()
+            .filter(project::Column::Name.eq(&name))
+            .one(&self.connection)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::InvalidInput("项目名称已存在".into()));
+        }
+        let id = Uuid::now_v7().to_string();
+        let timestamp = now();
+        project::ActiveModel {
+            id: Set(id.clone()),
+            name: Set(name),
+            created_at: Set(timestamp.clone()),
+            updated_at: Set(timestamp),
+        }
+        .insert(&self.connection)
+        .await
+        .map_err(map_project_write_error)?;
+        self.project_detail(&id, app_data).await
+    }
+
+    pub async fn rename_project(
+        &self,
+        id: &str,
+        name: String,
+        app_data: &Path,
+    ) -> AppResult<ProjectDetail> {
+        let name = validate_project_name(&name)?;
+        if project::Entity::find()
+            .filter(project::Column::Name.eq(&name))
+            .filter(project::Column::Id.ne(id))
+            .one(&self.connection)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::InvalidInput("项目名称已存在".into()));
+        }
+        let value = project::Entity::find_by_id(id)
+            .one(&self.connection)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("项目 {id}")))?;
+        let mut active: project::ActiveModel = value.into();
+        active.name = Set(name);
+        active.updated_at = Set(now());
+        active
+            .update(&self.connection)
+            .await
+            .map_err(map_project_write_error)?;
+        self.project_detail(id, app_data).await
+    }
+
+    pub async fn delete_project(&self, id: &str) -> AppResult<()> {
+        let result = project::Entity::delete_by_id(id)
+            .exec(&self.connection)
+            .await?;
+        if result.rows_affected == 0 {
+            return Err(AppError::NotFound(format!("项目 {id}")));
+        }
+        Ok(())
+    }
+
+    pub async fn assign_invoices_to_project(
+        &self,
+        request: AssignInvoicesToProjectRequest,
+    ) -> AppResult<AssignInvoicesResult> {
+        let invoice_ids = validate_invoice_ids(request.invoice_ids)?;
+        let transaction = self.connection.begin().await?;
+        ensure_project_exists(&transaction, &request.project_id).await?;
+        let found = invoice::Entity::find()
+            .filter(invoice::Column::Id.is_in(invoice_ids.clone()))
+            .count(&transaction)
+            .await?;
+        if found != invoice_ids.len() as u64 {
+            return Err(AppError::InvalidInput(
+                "部分发票已不存在，请刷新后重试".into(),
+            ));
+        }
+        let conflicts =
+            current_project_conflicts(&transaction, &invoice_ids, &request.project_id).await?;
+        if !conflicts.is_empty() && !request.accept_reassignment {
+            transaction.rollback().await?;
+            return Ok(AssignInvoicesResult {
+                assigned: false,
+                conflicts,
+            });
+        }
+
+        let source_projects = conflicts
+            .iter()
+            .map(|conflict| conflict.source_project_id.clone())
+            .collect::<HashSet<_>>();
+        let existing_target = project_invoice::Entity::find()
+            .filter(project_invoice::Column::ProjectId.eq(&request.project_id))
+            .filter(project_invoice::Column::InvoiceId.is_in(invoice_ids.clone()))
+            .all(&transaction)
+            .await?
+            .into_iter()
+            .map(|membership| membership.invoice_id)
+            .collect::<HashSet<_>>();
+        project_invoice::Entity::delete_many()
+            .filter(project_invoice::Column::InvoiceId.is_in(invoice_ids.clone()))
+            .filter(project_invoice::Column::ProjectId.ne(&request.project_id))
+            .exec(&transaction)
+            .await?;
+        for project_id in source_projects {
+            compact_project(&transaction, &project_id).await?;
+            touch_project(&transaction, &project_id).await?;
+        }
+        compact_project(&transaction, &request.project_id).await?;
+        let mut next_position = project_invoice::Entity::find()
+            .filter(project_invoice::Column::ProjectId.eq(&request.project_id))
+            .count(&transaction)
+            .await? as i32;
+        for invoice_id in invoice_ids {
+            if existing_target.contains(&invoice_id) {
+                continue;
+            }
+            project_invoice::ActiveModel {
+                project_id: Set(request.project_id.clone()),
+                invoice_id: Set(invoice_id),
+                position: Set(next_position),
+            }
+            .insert(&transaction)
+            .await?;
+            next_position += 1;
+        }
+        touch_project(&transaction, &request.project_id).await?;
+        transaction.commit().await?;
+        Ok(AssignInvoicesResult {
+            assigned: true,
+            conflicts: Vec::new(),
+        })
+    }
+
+    pub async fn remove_invoices_from_projects(&self, ids: Vec<String>) -> AppResult<()> {
+        let invoice_ids = validate_invoice_ids(ids)?;
+        let transaction = self.connection.begin().await?;
+        let memberships = project_invoice::Entity::find()
+            .filter(project_invoice::Column::InvoiceId.is_in(invoice_ids.clone()))
+            .all(&transaction)
+            .await?;
+        let project_ids = memberships
+            .iter()
+            .map(|membership| membership.project_id.clone())
+            .collect::<HashSet<_>>();
+        project_invoice::Entity::delete_many()
+            .filter(project_invoice::Column::InvoiceId.is_in(invoice_ids))
+            .exec(&transaction)
+            .await?;
+        for project_id in project_ids {
+            compact_project(&transaction, &project_id).await?;
+            touch_project(&transaction, &project_id).await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn reorder_project_invoices(
+        &self,
+        request: ReorderProjectInvoicesRequest,
+        app_data: &Path,
+    ) -> AppResult<ProjectDetail> {
+        let invoice_ids = validate_invoice_ids_allow_empty(request.invoice_ids)?;
+        let transaction = self.connection.begin().await?;
+        ensure_project_exists(&transaction, &request.project_id).await?;
+        let existing = project_invoice::Entity::find()
+            .filter(project_invoice::Column::ProjectId.eq(&request.project_id))
+            .order_by_asc(project_invoice::Column::Position)
+            .all(&transaction)
+            .await?
+            .into_iter()
+            .map(|membership| membership.invoice_id)
+            .collect::<Vec<_>>();
+        if existing.len() != invoice_ids.len()
+            || existing.iter().cloned().collect::<HashSet<_>>()
+                != invoice_ids.iter().cloned().collect::<HashSet<_>>()
+        {
+            return Err(AppError::InvalidInput(
+                "项目成员已变化，请刷新后重新排序".into(),
+            ));
+        }
+        replace_project_order(&transaction, &request.project_id, &invoice_ids).await?;
+        touch_project(&transaction, &request.project_id).await?;
+        transaction.commit().await?;
+        self.project_detail(&request.project_id, app_data).await
+    }
+}
+
+fn detail_from_members(
+    id: String,
+    name: String,
+    created_at: String,
+    updated_at: String,
+    invoices: Vec<ProjectInvoiceMember>,
+) -> ProjectDetail {
+    let invoice_count = invoices.len() as i64;
+    let confirmed_count = invoices.iter().filter(|invoice| invoice.confirmed).count() as i64;
+    let unconfirmed_count = invoice_count - confirmed_count;
+    let actual_amount_fen = invoices
+        .iter()
+        .filter(|invoice| invoice.blocking_reason.is_none())
+        .filter_map(|invoice| invoice.actual_amount_fen)
+        .try_fold(0_i64, |total, amount| total.checked_add(amount));
+    let blocking_reason = if invoices.is_empty() {
+        Some("项目暂无发票".into())
+    } else {
+        invoices
+            .iter()
+            .find_map(|invoice| invoice.blocking_reason.clone())
+            .or_else(|| {
+                actual_amount_fen
+                    .is_none()
+                    .then(|| "项目实际金额超出支持范围".into())
+            })
+    };
+    ProjectDetail {
+        id,
+        name,
+        invoice_count,
+        confirmed_count,
+        unconfirmed_count,
+        actual_amount_fen: actual_amount_fen.unwrap_or_default(),
+        exportable: blocking_reason.is_none(),
+        blocking_reason,
+        created_at,
+        updated_at,
+        invoices,
+    }
+}
+
+fn summary_from_detail(detail: ProjectDetail) -> ProjectSummary {
+    ProjectSummary {
+        id: detail.id,
+        name: detail.name,
+        invoice_count: detail.invoice_count,
+        confirmed_count: detail.confirmed_count,
+        unconfirmed_count: detail.unconfirmed_count,
+        actual_amount_fen: detail.actual_amount_fen,
+        exportable: detail.exportable,
+        blocking_reason: detail.blocking_reason,
+        created_at: detail.created_at,
+        updated_at: detail.updated_at,
+    }
+}
+
+fn member_blocking_reason(
+    confirmed: bool,
+    currency: &str,
+    invoice_amount_fen: Option<i64>,
+    order_amount_fen: Option<i64>,
+    orders: &[ProjectOrderSummary],
+    preview_available: bool,
+    order_files_available: bool,
+) -> Option<String> {
+    if !confirmed {
+        return Some("发票尚未确认订单匹配".into());
+    }
+    if invoice_amount_fen.is_none() {
+        return Some("发票金额缺失".into());
+    }
+    if invoice_amount_fen.is_some_and(|value| value < 0) {
+        return Some("发票金额无效".into());
+    }
+    if !currency.eq_ignore_ascii_case("CNY") {
+        return Some("仅人民币发票可导出".into());
+    }
+    if orders.is_empty() {
+        return Some("确认关系中没有订单".into());
+    }
+    if orders
+        .iter()
+        .any(|order| order.paid_amount_fen.is_none_or(|value| value < 0))
+    {
+        return Some("订单金额缺失或无效".into());
+    }
+    if order_amount_fen.is_none() {
+        return Some("订单金额合计超出支持范围".into());
+    }
+    if !preview_available {
+        return Some("发票独立材料缺失".into());
+    }
+    if !order_files_available {
+        return Some("订单原文件缺失".into());
+    }
+    None
+}
+
+fn actual_amount(invoice_amount_fen: Option<i64>, order_amount_fen: Option<i64>) -> Option<i64> {
+    invoice_amount_fen
+        .zip(order_amount_fen)
+        .map(|(invoice, orders)| invoice.min(orders))
+}
+
+async fn order_product_names<C: ConnectionTrait>(
+    connection: &C,
+    id: &str,
+) -> AppResult<Vec<String>> {
+    #[derive(FromQueryResult)]
+    struct ProductRow {
+        product_name: String,
+    }
+    Ok(
+        ProductRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT product_name FROM order_items WHERE order_id=? ORDER BY position,id",
+            [id.into()],
+        ))
+        .all(connection)
+        .await?
+        .into_iter()
+        .map(|row| row.product_name)
+        .collect(),
+    )
+}
+
+fn validate_project_name(value: &str) -> AppResult<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 100 {
+        return Err(AppError::InvalidInput(
+            "项目名称长度必须为 1 到 100 个字符".into(),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_invoice_ids(ids: Vec<String>) -> AppResult<Vec<String>> {
+    if ids.is_empty() || ids.len() > 500 {
+        return Err(AppError::InvalidInput("请选择 1 到 500 张发票".into()));
+    }
+    validate_invoice_ids_allow_empty(ids)
+}
+
+fn validate_invoice_ids_allow_empty(ids: Vec<String>) -> AppResult<Vec<String>> {
+    let mut seen = HashSet::new();
+    if ids
+        .iter()
+        .any(|id| id.is_empty() || !seen.insert(id.clone()))
+    {
+        return Err(AppError::InvalidInput("发票列表包含空值或重复项".into()));
+    }
+    Ok(ids)
+}
+
+fn map_project_write_error(error: sea_orm::DbErr) -> AppError {
+    if error
+        .to_string()
+        .contains("UNIQUE constraint failed: projects.name")
+    {
+        AppError::InvalidInput("项目名称已存在".into())
+    } else {
+        error.into()
+    }
+}
+
+async fn ensure_project_exists(transaction: &DatabaseTransaction, id: &str) -> AppResult<()> {
+    if project::Entity::find_by_id(id)
+        .one(transaction)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::NotFound(format!("项目 {id}")));
+    }
+    Ok(())
+}
+
+async fn current_project_conflicts(
+    transaction: &DatabaseTransaction,
+    invoice_ids: &[String],
+    target_project_id: &str,
+) -> AppResult<Vec<InvoiceProjectConflict>> {
+    #[derive(FromQueryResult)]
+    struct ConflictRow {
+        invoice_id: String,
+        source_project_id: String,
+        source_project_name: String,
+    }
+    Ok(
+        ConflictRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            format!(
+                "SELECT pi.invoice_id,pi.project_id source_project_id,p.name source_project_name \
+             FROM project_invoices pi JOIN projects p ON p.id=pi.project_id \
+             WHERE pi.project_id<>? AND pi.invoice_id IN ({}) ORDER BY pi.invoice_id",
+                std::iter::repeat_n("?", invoice_ids.len())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            std::iter::once(target_project_id.into())
+                .chain(invoice_ids.iter().cloned().map(Into::into))
+                .collect::<Vec<sea_orm::Value>>(),
+        ))
+        .all(transaction)
+        .await?
+        .into_iter()
+        .map(|row| InvoiceProjectConflict {
+            invoice_id: row.invoice_id,
+            source_project_id: row.source_project_id,
+            source_project_name: row.source_project_name,
+        })
+        .collect(),
+    )
+}
+
+pub(crate) async fn compact_project(
+    transaction: &DatabaseTransaction,
+    project_id: &str,
+) -> AppResult<()> {
+    let invoice_ids = project_invoice::Entity::find()
+        .filter(project_invoice::Column::ProjectId.eq(project_id))
+        .order_by_asc(project_invoice::Column::Position)
+        .all(transaction)
+        .await?
+        .into_iter()
+        .map(|membership| membership.invoice_id)
+        .collect::<Vec<_>>();
+    replace_project_order(transaction, project_id, &invoice_ids).await
+}
+
+async fn replace_project_order(
+    transaction: &DatabaseTransaction,
+    project_id: &str,
+    invoice_ids: &[String],
+) -> AppResult<()> {
+    project_invoice::Entity::delete_many()
+        .filter(project_invoice::Column::ProjectId.eq(project_id))
+        .exec(transaction)
+        .await?;
+    for (position, invoice_id) in invoice_ids.iter().enumerate() {
+        project_invoice::ActiveModel {
+            project_id: Set(project_id.to_owned()),
+            invoice_id: Set(invoice_id.clone()),
+            position: Set(i32::try_from(position).unwrap_or(i32::MAX)),
+        }
+        .insert(transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn touch_project(transaction: &DatabaseTransaction, id: &str) -> AppResult<()> {
+    project::Entity::update_many()
+        .col_expr(
+            project::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now()),
+        )
+        .filter(project::Column::Id.eq(id))
+        .exec(transaction)
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_projects(
+    state: State<'_, AppState>,
+    query: ProjectsQuery,
+) -> CommandResult<ProjectsPage> {
+    state
+        .database
+        .projects_page(query, &state.app_data_dir)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_project(
+    state: State<'_, AppState>,
+    request: IdRequest,
+) -> CommandResult<ProjectDetail> {
+    state
+        .database
+        .project_detail(&request.id, &state.app_data_dir)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn create_project(
+    state: State<'_, AppState>,
+    request: ProjectNameRequest,
+) -> CommandResult<ProjectDetail> {
+    state
+        .database
+        .create_project(request.name, &state.app_data_dir)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn rename_project(
+    state: State<'_, AppState>,
+    request: RenameProjectRequest,
+) -> CommandResult<ProjectDetail> {
+    state
+        .database
+        .rename_project(&request.id, request.name, &state.app_data_dir)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn delete_project(state: State<'_, AppState>, request: IdRequest) -> CommandResult<()> {
+    state
+        .database
+        .delete_project(&request.id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn assign_invoices_to_project(
+    state: State<'_, AppState>,
+    request: AssignInvoicesToProjectRequest,
+) -> CommandResult<AssignInvoicesResult> {
+    state
+        .database
+        .assign_invoices_to_project(request)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn remove_invoices_from_projects(
+    state: State<'_, AppState>,
+    request: InvoiceIdsRequest,
+) -> CommandResult<()> {
+    state
+        .database
+        .remove_invoices_from_projects(request.invoice_ids)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn reorder_project_invoices(
+    state: State<'_, AppState>,
+    request: ReorderProjectInvoicesRequest,
+) -> CommandResult<ProjectDetail> {
+    state
+        .database
+        .reorder_project_invoices(request, &state.app_data_dir)
+        .await
+        .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn seed(database: &Database) {
+        database.execute_test_statement(
+            "INSERT INTO invoice_batches (id,status,created_at) VALUES ('ib','completed','2026-08-13T00:00:00Z');
+             INSERT INTO invoice_tasks (id,batch_id,original_file_name,source_sha256,media_type,status,retry_count,created_at) VALUES ('it','ib','invoice.pdf','ih','application/pdf','succeeded',0,'2026-08-13T00:00:00Z');
+             INSERT INTO invoices (id,task_id,type,subtype,type_description,subtype_description,total_fen,currency,preview_path,raw_invoice_json,created_at,updated_at) VALUES
+               ('invoice-a','it',3,'VatInvoice','增值税发票','增值税发票',1000,'CNY','invoices/previews/a.pdf','{}','2026-08-13T00:00:00Z','2026-08-13T00:00:00Z'),
+               ('invoice-b','it',3,'VatInvoice','增值税发票','增值税发票',2000,'CNY','invoices/previews/b.pdf','{}','2026-08-13T00:00:00Z','2026-08-13T00:00:00Z');"
+        ).await.unwrap();
+    }
+
+    #[test]
+    fn actual_amount_uses_the_lower_invoice_or_order_total() {
+        assert_eq!(actual_amount(Some(1_000), Some(1_300)), Some(1_000));
+        assert_eq!(actual_amount(Some(1_500), Some(1_300)), Some(1_300));
+        assert_eq!(actual_amount(Some(1_300), Some(1_300)), Some(1_300));
+        assert_eq!(actual_amount(None, Some(1_300)), None);
+    }
+
+    #[test]
+    fn export_eligibility_reports_each_blocking_category() {
+        let order = ProjectOrderSummary {
+            id: "order".into(),
+            external_order_number: None,
+            paid_amount_fen: Some(1_000),
+            product_names: Vec::new(),
+        };
+        assert_eq!(
+            member_blocking_reason(
+                false,
+                "CNY",
+                Some(1_000),
+                Some(1_000),
+                std::slice::from_ref(&order),
+                true,
+                true
+            ),
+            Some("发票尚未确认订单匹配".into())
+        );
+        assert_eq!(
+            member_blocking_reason(
+                true,
+                "CNY",
+                None,
+                Some(1_000),
+                std::slice::from_ref(&order),
+                true,
+                true,
+            ),
+            Some("发票金额缺失".into())
+        );
+        assert_eq!(
+            member_blocking_reason(
+                true,
+                "CNY",
+                Some(-1),
+                Some(1_000),
+                std::slice::from_ref(&order),
+                true,
+                true
+            ),
+            Some("发票金额无效".into())
+        );
+        assert_eq!(
+            member_blocking_reason(
+                true,
+                "USD",
+                Some(1_000),
+                Some(1_000),
+                std::slice::from_ref(&order),
+                true,
+                true
+            ),
+            Some("仅人民币发票可导出".into())
+        );
+        assert_eq!(
+            member_blocking_reason(true, "CNY", Some(1_000), Some(0), &[], true, true),
+            Some("确认关系中没有订单".into())
+        );
+        let mut missing_money = order.clone();
+        missing_money.paid_amount_fen = None;
+        assert_eq!(
+            member_blocking_reason(true, "CNY", Some(1_000), None, &[missing_money], true, true),
+            Some("订单金额缺失或无效".into())
+        );
+        assert_eq!(
+            member_blocking_reason(
+                true,
+                "CNY",
+                Some(1_000),
+                Some(1_000),
+                std::slice::from_ref(&order),
+                false,
+                true
+            ),
+            Some("发票独立材料缺失".into())
+        );
+        assert_eq!(
+            member_blocking_reason(
+                true,
+                "CNY",
+                Some(1_000),
+                Some(1_000),
+                std::slice::from_ref(&order),
+                true,
+                false
+            ),
+            Some("订单原文件缺失".into())
+        );
+        assert_eq!(
+            member_blocking_reason(true, "CNY", Some(1_000), Some(1_000), &[order], true, true),
+            None
+        );
+        assert_eq!(
+            member_blocking_reason(
+                true,
+                "CNY",
+                Some(1_000),
+                None,
+                &[ProjectOrderSummary {
+                    id: "order".into(),
+                    external_order_number: None,
+                    paid_amount_fen: Some(i64::MAX),
+                    product_names: Vec::new(),
+                }],
+                true,
+                true
+            ),
+            Some("订单金额合计超出支持范围".into())
+        );
+        assert_eq!(
+            detail_from_members(
+                "id".into(),
+                "空项目".into(),
+                "now".into(),
+                "now".into(),
+                vec![]
+            )
+            .blocking_reason,
+            Some("项目暂无发票".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn project_names_are_trimmed_and_unique() {
+        let database = Database::in_memory().await.unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let project = database
+            .create_project("  唯一项目  ".into(), app_data.path())
+            .await
+            .unwrap();
+        assert_eq!(project.name, "唯一项目");
+        assert!(
+            database
+                .create_project("唯一项目".into(), app_data.path())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn assignment_previews_then_atomically_reassigns_members() {
+        let database = Database::in_memory().await.unwrap();
+        seed(&database).await;
+        let app_data = tempfile::tempdir().unwrap();
+        let first = database
+            .create_project("项目 A".into(), app_data.path())
+            .await
+            .unwrap();
+        let second = database
+            .create_project("项目 B".into(), app_data.path())
+            .await
+            .unwrap();
+        database
+            .assign_invoices_to_project(AssignInvoicesToProjectRequest {
+                invoice_ids: vec!["invoice-a".into(), "invoice-b".into()],
+                project_id: first.id.clone(),
+                accept_reassignment: false,
+            })
+            .await
+            .unwrap();
+        let preview = database
+            .assign_invoices_to_project(AssignInvoicesToProjectRequest {
+                invoice_ids: vec!["invoice-a".into()],
+                project_id: second.id.clone(),
+                accept_reassignment: false,
+            })
+            .await
+            .unwrap();
+        assert!(!preview.assigned);
+        assert_eq!(preview.conflicts.len(), 1);
+        database
+            .assign_invoices_to_project(AssignInvoicesToProjectRequest {
+                invoice_ids: vec!["invoice-a".into()],
+                project_id: second.id.clone(),
+                accept_reassignment: true,
+            })
+            .await
+            .unwrap();
+        let first_detail = database
+            .project_detail(&first.id, app_data.path())
+            .await
+            .unwrap();
+        let second_detail = database
+            .project_detail(&second.id, app_data.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            first_detail
+                .invoices
+                .iter()
+                .map(|value| value.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["invoice-b"]
+        );
+        assert_eq!(first_detail.invoices[0].position, 0);
+        assert_eq!(second_detail.invoices[0].id, "invoice-a");
+    }
+
+    #[tokio::test]
+    async fn reorder_requires_the_current_complete_member_set() {
+        let database = Database::in_memory().await.unwrap();
+        seed(&database).await;
+        let app_data = tempfile::tempdir().unwrap();
+        let project = database
+            .create_project("排序项目".into(), app_data.path())
+            .await
+            .unwrap();
+        database
+            .assign_invoices_to_project(AssignInvoicesToProjectRequest {
+                invoice_ids: vec!["invoice-a".into(), "invoice-b".into()],
+                project_id: project.id.clone(),
+                accept_reassignment: false,
+            })
+            .await
+            .unwrap();
+        let reordered = database
+            .reorder_project_invoices(
+                ReorderProjectInvoicesRequest {
+                    project_id: project.id.clone(),
+                    invoice_ids: vec!["invoice-b".into(), "invoice-a".into()],
+                },
+                app_data.path(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reordered
+                .invoices
+                .iter()
+                .map(|value| value.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["invoice-b", "invoice-a"]
+        );
+        assert!(
+            database
+                .reorder_project_invoices(
+                    ReorderProjectInvoicesRequest {
+                        project_id: project.id,
+                        invoice_ids: vec!["invoice-a".into()]
+                    },
+                    app_data.path()
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn invoice_deletion_compacts_the_remaining_project_members() {
+        let database = Database::in_memory().await.unwrap();
+        seed(&database).await;
+        let app_data = tempfile::tempdir().unwrap();
+        let project = database
+            .create_project("删除项目成员".into(), app_data.path())
+            .await
+            .unwrap();
+        database
+            .assign_invoices_to_project(AssignInvoicesToProjectRequest {
+                invoice_ids: vec!["invoice-a".into(), "invoice-b".into()],
+                project_id: project.id.clone(),
+                accept_reassignment: false,
+            })
+            .await
+            .unwrap();
+
+        database.delete_invoice_record("invoice-a").await.unwrap();
+
+        let detail = database
+            .project_detail(&project.id, app_data.path())
+            .await
+            .unwrap();
+        assert_eq!(detail.invoices.len(), 1);
+        assert_eq!(detail.invoices[0].id, "invoice-b");
+        assert_eq!(detail.invoices[0].position, 0);
+    }
+}

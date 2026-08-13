@@ -22,8 +22,10 @@ infer = "0.19"
 imagesize = "0.14"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lopdf = "0.36"
+printpdf = { version = "0.12", default-features = false, features = ["bmp", "gif", "png", "jpeg", "tiff", "webp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rust_decimal = "1"
+rust_xlsxwriter = "0.96"
 sea-orm = { version = "1.1", features = ["macros", "runtime-tokio-rustls", "sqlx-sqlite", "with-chrono", "with-uuid"] }
 sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
 serde = { version = "1", features = ["derive"] }
@@ -37,6 +39,7 @@ toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

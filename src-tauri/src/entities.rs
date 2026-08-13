@@ -499,3 +499,79 @@ pub mod invoice_match_order {
     pub enum Relation {}
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod project {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "projects")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: String,
+        pub name: String,
+        pub created_at: String,
+        pub updated_at: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(has_many = "super::project_invoice::Entity")]
+        ProjectInvoices,
+    }
+
+    impl Related<super::project_invoice::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::ProjectInvoices.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod project_invoice {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "project_invoices")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub project_id: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub invoice_id: String,
+        pub position: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::project::Entity",
+            from = "Column::ProjectId",
+            to = "super::project::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Project,
+        #[sea_orm(
+            belongs_to = "super::invoice::Entity",
+            from = "Column::InvoiceId",
+            to = "super::invoice::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Invoice,
+    }
+
+    impl Related<super::project::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Project.def()
+        }
+    }
+
+    impl Related<super::invoice::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Invoice.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}

@@ -27,6 +27,8 @@ pub enum AppError {
     NotFound(String),
     #[error("记录已确认匹配：{0}，请先在匹配页撤销确认")]
     MatchingLocked(String),
+    #[error("导出目标已存在：{0}")]
+    DestinationExists(String),
     #[error("内部错误：{0}")]
     Internal(String),
 }
@@ -46,6 +48,7 @@ impl AppError {
             Self::BatchBusy => "batch_busy",
             Self::NotFound(_) => "not_found",
             Self::MatchingLocked(_) => "matching_locked",
+            Self::DestinationExists(_) => "destination_exists",
             Self::Internal(_) => "internal_error",
         }
     }

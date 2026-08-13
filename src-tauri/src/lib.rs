@@ -13,6 +13,8 @@ mod models;
 mod normalize;
 mod ocr;
 mod order_import_db;
+mod project_export;
+mod projects;
 mod queue;
 mod settings;
 mod tencent_ocr;
@@ -152,6 +154,15 @@ pub fn run() {
             matching::confirm_invoice_match,
             matching::confirm_invoice_matches,
             matching::unconfirm_invoice_match,
+            projects::list_projects,
+            projects::get_project,
+            projects::create_project,
+            projects::rename_project,
+            projects::delete_project,
+            projects::assign_invoices_to_project,
+            projects::remove_invoices_from_projects,
+            projects::reorder_project_invoices,
+            project_export::export_project,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Bill");

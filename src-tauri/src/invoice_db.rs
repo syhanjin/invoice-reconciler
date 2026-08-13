@@ -9,8 +9,9 @@ use sea_orm::{
 use crate::db::{Database, now};
 use crate::entities::{
     invoice, invoice_batch, invoice_line_item, invoice_match, invoice_recovery_marker,
-    invoice_source_link, invoice_task,
+    invoice_source_link, invoice_task, project_invoice,
 };
+use crate::projects::{compact_project, touch_project};
 
 #[derive(Debug)]
 pub enum PersistInvoicesOutcome {
@@ -585,26 +586,33 @@ impl Database {
             .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty())
         {
-            filter.push_str(" AND (invoice_code LIKE ? OR invoice_number LIKE ? OR buyer_name LIKE ? OR buyer_tax_id LIKE ? OR seller_name LIKE ? OR seller_tax_id LIKE ?)");
+            filter.push_str(" AND (i.invoice_code LIKE ? OR i.invoice_number LIKE ? OR i.buyer_name LIKE ? OR i.buyer_tax_id LIKE ? OR i.seller_name LIKE ? OR i.seller_tax_id LIKE ?)");
             let p = format!("%{search}%");
             for _ in 0..6 {
                 values.push(p.clone().into());
             }
         }
         if let Some(subtype) = query.subtype.filter(|v| !v.trim().is_empty()) {
-            filter.push_str(" AND subtype = ?");
+            filter.push_str(" AND i.subtype = ?");
             values.push(subtype.into());
         }
         if let Some(from) = query.date_from.filter(|v| !v.trim().is_empty()) {
-            filter.push_str(" AND invoice_date >= ?");
+            filter.push_str(" AND i.invoice_date >= ?");
             values.push(from.into());
         }
         if let Some(to) = query.date_to.filter(|v| !v.trim().is_empty()) {
-            filter.push_str(" AND invoice_date <= ?");
+            filter.push_str(" AND i.invoice_date <= ?");
             values.push(to.into());
         }
         if query.duplicate_only.unwrap_or(false) {
-            filter.push_str(" AND possible_duplicate = 1");
+            filter.push_str(" AND i.possible_duplicate = 1");
+        }
+        if let Some(project_id) = query.project_id.filter(|value| !value.trim().is_empty()) {
+            filter.push_str(" AND pi.project_id = ?");
+            values.push(project_id.into());
+        }
+        if query.unassigned_only.unwrap_or(false) {
+            filter.push_str(" AND pi.invoice_id IS NULL");
         }
         #[derive(FromQueryResult)]
         struct CountRow {
@@ -612,7 +620,7 @@ impl Database {
         }
         let total = CountRow::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Sqlite,
-            format!("SELECT COUNT(*) count FROM invoices WHERE 1=1{filter}"),
+            format!("SELECT COUNT(*) count FROM invoices i LEFT JOIN project_invoices pi ON pi.invoice_id=i.id WHERE 1=1{filter}"),
             values.clone(),
         ))
         .one(&self.connection)
@@ -620,9 +628,9 @@ impl Database {
         .map(|r| r.count)
         .unwrap_or(0);
         let column = match query.sort_by.unwrap_or(InvoiceSort::CreatedAt) {
-            InvoiceSort::InvoiceDate => "invoice_date",
-            InvoiceSort::TotalAmount => "total_fen",
-            InvoiceSort::CreatedAt => "created_at",
+            InvoiceSort::InvoiceDate => "i.invoice_date",
+            InvoiceSort::TotalAmount => "i.total_fen",
+            InvoiceSort::CreatedAt => "i.created_at",
         };
         let direction = match query.sort_direction.unwrap_or(SortDirection::Desc) {
             SortDirection::Asc => "ASC",
@@ -632,7 +640,7 @@ impl Database {
             i64::from(page_size).into(),
             (i64::from(page - 1) * i64::from(page_size)).into(),
         ]);
-        let items=InvoiceListItem::find_by_statement(Statement::from_sql_and_values(DbBackend::Sqlite,format!("SELECT id,type type_id,subtype,subtype_description,invoice_code,invoice_number,invoice_date,buyer_name,seller_name,total_fen,currency,possible_duplicate,created_at FROM invoices WHERE 1=1{filter} ORDER BY {column} {direction},id DESC LIMIT ? OFFSET ?"),values)).all(&self.connection).await?;
+        let items=InvoiceListItem::find_by_statement(Statement::from_sql_and_values(DbBackend::Sqlite,format!("SELECT i.id,i.type type_id,i.subtype,i.subtype_description,i.invoice_code,i.invoice_number,i.invoice_date,i.buyer_name,i.seller_name,i.total_fen,i.currency,i.possible_duplicate,i.created_at,pi.project_id,p.name project_name FROM invoices i LEFT JOIN project_invoices pi ON pi.invoice_id=i.id LEFT JOIN projects p ON p.id=pi.project_id WHERE 1=1{filter} ORDER BY {column} {direction},i.id DESC LIMIT ? OFFSET ?"),values)).all(&self.connection).await?;
         Ok(InvoicesPage {
             items,
             total,
@@ -800,6 +808,11 @@ impl Database {
             .ok_or_else(|| AppError::NotFound(format!("发票任务 {task_id}")))?;
         let old_subtype = value.subtype.clone();
         let old_number = value.invoice_number.clone();
+        let project_id = project_invoice::Entity::find()
+            .filter(project_invoice::Column::InvoiceId.eq(id))
+            .one(&transaction)
+            .await?
+            .map(|membership| membership.project_id);
         if let Some(recovery_identity) = recovery_identity {
             invoice_recovery_marker::ActiveModel {
                 source_sha256: Set(task.source_sha256),
@@ -811,6 +824,10 @@ impl Database {
             .await?;
         }
         invoice::Entity::delete_by_id(id).exec(&transaction).await?;
+        if let Some(project_id) = project_id {
+            compact_project(&transaction, &project_id).await?;
+            touch_project(&transaction, &project_id).await?;
+        }
         refresh_weak_duplicate_group(&transaction, &old_subtype, old_number.as_deref()).await?;
         let remaining = invoice::Entity::find()
             .filter(invoice::Column::TaskId.eq(&task_id))
@@ -1199,6 +1216,8 @@ mod tests {
                 date_from: None,
                 date_to: None,
                 duplicate_only: None,
+                project_id: None,
+                unassigned_only: None,
                 sort_by: Some(InvoiceSort::CreatedAt),
                 sort_direction: Some(SortDirection::Desc),
             })
@@ -1448,6 +1467,8 @@ mod tests {
                 date_from: None,
                 date_to: None,
                 duplicate_only: Some(true),
+                project_id: None,
+                unassigned_only: None,
                 sort_by: None,
                 sort_direction: None,
             })

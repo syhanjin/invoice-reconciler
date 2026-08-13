@@ -13,9 +13,56 @@ impl MigratorTrait for Migrator {
             Box::new(M0004OrderInvoiceMatching),
             Box::new(M0005UnifiedOrderImportPool),
             Box::new(M0006RemoveAliyunBatch),
+            Box::new(M0007Projects),
         ]
     }
 }
+
+pub struct M0007Projects;
+
+#[async_trait::async_trait]
+impl MigrationName for M0007Projects {
+    fn name(&self) -> &str {
+        "m0007_projects"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for M0007Projects {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        for sql in PROJECT_UP_STATEMENTS {
+            manager
+                .get_connection()
+                .execute(Statement::from_string(backend, *sql))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        for sql in PROJECT_DOWN_STATEMENTS {
+            manager
+                .get_connection()
+                .execute(Statement::from_string(backend, *sql))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+const PROJECT_UP_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE CHECK (length(name) BETWEEN 1 AND 100), created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS idx_projects_updated ON projects(updated_at DESC, id DESC)",
+    "CREATE TABLE IF NOT EXISTS project_invoices (project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, invoice_id TEXT NOT NULL UNIQUE REFERENCES invoices(id) ON DELETE CASCADE, position INTEGER NOT NULL CHECK (position >= 0), PRIMARY KEY (project_id, invoice_id), UNIQUE (project_id, position))",
+    "CREATE INDEX IF NOT EXISTS idx_project_invoices_project ON project_invoices(project_id, position, invoice_id)",
+];
+
+const PROJECT_DOWN_STATEMENTS: &[&str] = &[
+    "DROP TABLE IF EXISTS project_invoices",
+    "DROP TABLE IF EXISTS projects",
+];
 
 pub struct M0001Initial;
 
@@ -474,10 +521,10 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching', 'm0005_unified_order_import_pool', 'm0006_remove_aliyun_batch')",
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching', 'm0005_unified_order_import_pool', 'm0006_remove_aliyun_batch', 'm0007_projects')",
             )
             .await,
-            6
+            7
         );
         assert_eq!(
             scalar(
@@ -486,6 +533,14 @@ mod tests {
             )
             .await,
             8
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'project_invoices')",
+            )
+            .await,
+            2
         );
         assert_eq!(
             scalar(
@@ -1017,6 +1072,92 @@ mod tests {
             )
             .await,
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrades_m0006_with_business_data_and_adds_project_constraints() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade-projects.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(6)).await.unwrap();
+        connection.execute_unprepared(
+            "PRAGMA foreign_keys = ON;
+             INSERT INTO invoice_batches (id,status,created_at) VALUES ('ib','completed','2026-08-13T00:00:00Z');
+             INSERT INTO invoice_tasks (id,batch_id,original_file_name,source_sha256,media_type,status,retry_count,created_at) VALUES ('it','ib','invoice.pdf','ih','application/pdf','succeeded',0,'2026-08-13T00:00:00Z');
+             INSERT INTO invoices (id,task_id,type,subtype,type_description,subtype_description,currency,preview_path,raw_invoice_json,created_at,updated_at) VALUES ('invoice-a','it',3,'VatInvoice','发票','发票','CNY','a.pdf','{}','2026-08-13T00:00:00Z','2026-08-13T00:00:00Z');"
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM invoices WHERE id='invoice-a'"
+            )
+            .await,
+            1
+        );
+        database.connection.execute_unprepared(
+            "INSERT INTO projects (id,name,created_at,updated_at) VALUES ('p1','项目一','now','now'),('p2','项目二','now','now');
+             INSERT INTO project_invoices (project_id,invoice_id,position) VALUES ('p1','invoice-a',0);"
+        ).await.unwrap();
+        assert!(database.connection.execute_unprepared("INSERT INTO projects (id,name,created_at,updated_at) VALUES ('p3','项目一','now','now')").await.is_err());
+        assert!(database.connection.execute_unprepared("INSERT INTO project_invoices (project_id,invoice_id,position) VALUES ('p2','invoice-a',0)").await.is_err());
+        database.connection.execute_unprepared(
+            "INSERT INTO invoices (id,task_id,type,subtype,type_description,subtype_description,currency,preview_path,raw_invoice_json,created_at,updated_at) VALUES ('invoice-b','it',3,'VatInvoice','发票','发票','CNY','b.pdf','{}','2026-08-13T00:00:00Z','2026-08-13T00:00:00Z')"
+        ).await.unwrap();
+        assert!(database.connection.execute_unprepared("INSERT INTO project_invoices (project_id,invoice_id,position) VALUES ('p1','invoice-b',0)").await.is_err());
+        database.connection.execute_unprepared("INSERT INTO project_invoices (project_id,invoice_id,position) VALUES ('p1','invoice-b',1)").await.unwrap();
+        database
+            .connection
+            .execute_unprepared("DELETE FROM invoices WHERE id='invoice-b'")
+            .await
+            .unwrap();
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM project_invoices WHERE project_id='p1' AND invoice_id='invoice-a'").await, 1);
+        database
+            .connection
+            .execute_unprepared("DELETE FROM projects WHERE id='p1'")
+            .await
+            .unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM project_invoices"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM invoices WHERE id='invoice-a'"
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn resumes_interrupted_project_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume-projects.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(6)).await.unwrap();
+        connection.execute_unprepared(
+            "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE CHECK (length(name) BETWEEN 1 AND 100), created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(scalar(&database.connection, "SELECT COUNT(*) count FROM sqlite_master WHERE type='table' AND name IN ('projects','project_invoices')").await, 2);
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version='m0007_projects'"
+            )
+            .await,
+            1
         );
     }
 }
