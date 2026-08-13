@@ -493,3 +493,46 @@ Chronologically resolved isolated repurchase candidate groups, added dedicated s
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: Release v0.1.2 and optimize CI caches
+
+**Date**: 2026-08-13
+**Task**: Release v0.1.2 and optimize CI caches
+**Branch**: `main`
+
+### Summary
+
+Fixed the Windows release console window, added dual-platform main prebuilds with layered Rust caches, and published v0.1.2.
+
+### Main Changes
+
+- Added Linux/Windows release prebuilds on `main` with separate Cargo package,
+  Rust target, and sccache snapshots.
+- Retained the two newest target and sccache snapshots per platform and kept
+  pull-request/tag jobs read-only for shared caches.
+- Switched Windows release binaries to the GUI subsystem and added a PE-header
+  regression check to both build-check and publish workflows.
+- Bumped the application to `0.1.2`, pushed `main`, and pushed tag `v0.1.2`.
+- Verified frontend lint/build/tests, Rust formatting/clippy/tests, and a local
+  Linux release/DEB build.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `23ad456` | (see git log) |
+| `9680442` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
