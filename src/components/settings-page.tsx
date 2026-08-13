@@ -31,18 +31,13 @@ const httpUrl = z
   .refine((value) => value.startsWith("http://") || value.startsWith("https://"), "仅支持 HTTP(S) 地址")
 
 const settingsSchema = z.object({
-  orderRecognitionProvider: z.enum(["ollama", "openai", "aliyun_batch"]),
+  orderRecognitionProvider: z.enum(["ollama", "openai"]),
   ollamaBaseUrl: httpUrl,
   ollamaModel: z.string().trim().min(1, "模型名称不能为空").max(200),
   openaiBaseUrl: httpUrl,
   openaiModel: z.string().trim().min(1, "模型名称不能为空").max(200),
   openaiApiKey: z.string().trim().max(500),
   clearOpenaiApiKey: z.boolean(),
-  aliyunBaseUrl: httpUrl,
-  aliyunModel: z.string().trim().min(1, "模型名称不能为空").max(200),
-  aliyunApiKey: z.string().trim().max(500),
-  clearAliyunApiKey: z.boolean(),
-  aliyunEnableThinking: z.boolean(),
   maxConcurrency: z.number().int().min(1).max(8),
   tencentSecretId: z.string().trim().max(200),
   tencentSecretKey: z.string().trim().max(200),
@@ -67,7 +62,6 @@ interface SettingsPageProps {
 const providerNames: Record<OrderRecognitionProvider, string> = {
   ollama: "Ollama",
   openai: "OpenAI 兼容",
-  aliyun_batch: "阿里云百炼批处理",
 }
 
 export default function SettingsPage({ settings, onSettingsChange }: SettingsPageProps) {
@@ -79,7 +73,6 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
   })
   const provider = form.watch("orderRecognitionProvider")
   const clearOpenaiApiKey = form.watch("clearOpenaiApiKey")
-  const clearAliyunApiKey = form.watch("clearAliyunApiKey")
   const clearTencentCredentials = form.watch("clearTencentCredentials")
 
   useEffect(() => form.reset(formValues(settings)), [form, settings])
@@ -99,9 +92,7 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
   const check = async () => {
     const fields = provider === "ollama"
       ? (["ollamaBaseUrl", "ollamaModel"] as const)
-      : provider === "openai"
-        ? (["openaiBaseUrl", "openaiModel"] as const)
-        : (["aliyunBaseUrl", "aliyunModel"] as const)
+      : (["openaiBaseUrl", "openaiModel"] as const)
     if (!await form.trigger(fields)) return
     setChecking(true)
     setStatus(null)
@@ -139,7 +130,7 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
           <CardHeader>
             <div className="flex items-center gap-3">
               <div className="flex size-9 items-center justify-center rounded-md bg-zinc-100"><ScanLine className="size-4" /></div>
-              <div><CardTitle className="text-base">订单识别</CardTitle><CardDescription>实时服务自动排队，阿里云批处理由任务池手动提交</CardDescription></div>
+              <div><CardTitle className="text-base">订单识别</CardTitle><CardDescription>实时服务自动处理订单任务池</CardDescription></div>
             </div>
           </CardHeader>
           <CardContent className="space-y-5">
@@ -155,7 +146,6 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
                 <SelectContent>
                   <SelectItem value="ollama">Ollama</SelectItem>
                   <SelectItem value="openai">OpenAI 兼容</SelectItem>
-                  <SelectItem value="aliyun_batch">阿里云百炼批处理</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
@@ -192,39 +182,9 @@ export default function SettingsPage({ settings, onSettingsChange }: SettingsPag
               </>
             )}
 
-            {provider === "aliyun_batch" && (
-              <>
-                <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px]">
-                  <Field label="API 地址" error={form.formState.errors.aliyunBaseUrl?.message}>
-                    <Input {...form.register("aliyunBaseUrl")} />
-                  </Field>
-                  <Field label="视觉模型" error={form.formState.errors.aliyunModel?.message}>
-                    <Input {...form.register("aliyunModel")} />
-                  </Field>
-                </div>
-                <CredentialField
-                  label="API Key"
-                  configured={settings.aliyunApiKeyConfigured}
-                  masked={settings.aliyunApiKeyMasked}
-                  clear={clearAliyunApiKey}
-                  onClearChange={(checked) => form.setValue("clearAliyunApiKey", checked, { shouldDirty: true })}
-                  inputProps={form.register("aliyunApiKey")}
-                />
-                <label className="flex w-fit cursor-pointer items-center gap-2 text-sm">
-                  <Checkbox
-                    checked={form.watch("aliyunEnableThinking")}
-                    onCheckedChange={(checked) => form.setValue("aliyunEnableThinking", checked === true, { shouldDirty: true })}
-                  />
-                  启用模型思考模式
-                </label>
-              </>
-            )}
-
-            {provider !== "aliyun_batch" && (
-              <Field label="最大同时请求数" error={form.formState.errors.maxConcurrency?.message}>
-                <Input type="number" min={1} max={8} className="w-28" {...form.register("maxConcurrency", { valueAsNumber: true })} />
-              </Field>
-            )}
+            <Field label="最大同时请求数" error={form.formState.errors.maxConcurrency?.message}>
+              <Input type="number" min={1} max={8} className="w-28" {...form.register("maxConcurrency", { valueAsNumber: true })} />
+            </Field>
             <Button type="button" variant="outline" disabled={checking} onClick={check}>
               {checking ? <LoaderCircle className="animate-spin" /> : <PlugZap />}测试连接
             </Button>
@@ -314,11 +274,6 @@ function requestFrom(values: SettingsForm): SaveSettingsRequest {
     openaiModel: values.openaiModel,
     openaiApiKey: values.openaiApiKey || null,
     clearOpenaiApiKey: values.clearOpenaiApiKey,
-    aliyunBaseUrl: values.aliyunBaseUrl,
-    aliyunModel: values.aliyunModel,
-    aliyunApiKey: values.aliyunApiKey || null,
-    clearAliyunApiKey: values.clearAliyunApiKey,
-    aliyunEnableThinking: values.aliyunEnableThinking,
     maxConcurrency: values.maxConcurrency,
     tencentSecretId: values.tencentSecretId || null,
     tencentSecretKey: values.tencentSecretKey || null,
@@ -338,11 +293,6 @@ function formValues(settings: AppSettings): SettingsForm {
     openaiModel: settings.openaiModel,
     openaiApiKey: "",
     clearOpenaiApiKey: false,
-    aliyunBaseUrl: settings.aliyunBaseUrl,
-    aliyunModel: settings.aliyunModel,
-    aliyunApiKey: "",
-    clearAliyunApiKey: false,
-    aliyunEnableThinking: settings.aliyunEnableThinking,
     maxConcurrency: settings.maxConcurrency,
     tencentSecretId: "",
     tencentSecretKey: "",

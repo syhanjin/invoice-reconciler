@@ -61,10 +61,6 @@ impl QueueManager {
         let mut in_flight = FuturesUnordered::new();
         loop {
             let settings = self.settings.private().await.order_recognition();
-            if !settings.provider.is_realtime() {
-                while in_flight.next().await.is_some() {}
-                return;
-            }
             let concurrency = usize::from(settings.max_concurrency.max(1));
             while in_flight.len() < concurrency {
                 match self.database.claim_next_realtime_task().await {
@@ -86,7 +82,7 @@ impl QueueManager {
     }
 
     async fn process(&self, app: &AppHandle, task_id: String, settings: OrderRecognitionSettings) {
-        emit_update(app, "task_processing", Some(&task_id), None, None);
+        emit_update(app, "task_processing", Some(&task_id), None);
         let result = async {
             let task = self.database.pool_task(&task_id).await?;
             let image_path = resolve_managed_path(&self.app_data_dir, &task.managed_image_path)?;
@@ -97,8 +93,6 @@ impl QueueManager {
                     &normalized,
                     settings.provider.as_str(),
                     &settings.model,
-                    None,
-                    None,
                 )
                 .await
                 .map(|_| ())
@@ -106,14 +100,14 @@ impl QueueManager {
         .await;
 
         match result {
-            Ok(()) => emit_update(app, "task_completed", Some(&task_id), Some(&task_id), None),
+            Ok(()) => emit_update(app, "task_completed", Some(&task_id), Some(&task_id)),
             Err(error) => {
                 tracing::warn!(task_id, code = error.code(), error = %error, "order recognition task failed");
                 let _ = self
                     .database
                     .fail_pool_task(&task_id, error.code(), &error.to_string())
                     .await;
-                emit_update(app, "task_failed", Some(&task_id), None, None);
+                emit_update(app, "task_failed", Some(&task_id), None);
             }
         }
     }
@@ -124,7 +118,6 @@ pub(crate) fn emit_update<R: Runtime>(
     kind: &str,
     task_id: Option<&str>,
     order_id: Option<&str>,
-    recognition_batch_id: Option<&str>,
 ) {
     let _ = app.emit(
         "order-import-updated",
@@ -132,7 +125,6 @@ pub(crate) fn emit_update<R: Runtime>(
             kind: kind.to_owned(),
             task_id: task_id.map(str::to_owned),
             order_id: order_id.map(str::to_owned),
-            recognition_batch_id: recognition_batch_id.map(str::to_owned),
         },
     );
 }

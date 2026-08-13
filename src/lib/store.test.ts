@@ -17,7 +17,6 @@ describe("order import pool events", () => {
       kind: "task_completed",
       taskId: "task-1",
       orderId: "order-1",
-      recognitionBatchId: null,
     })
 
     expect(store.get(orderImportRefreshAtom)).toBe(1)
@@ -30,7 +29,6 @@ describe("order import pool events", () => {
       kind: "task_failed",
       taskId: "task-1",
       orderId: null,
-      recognitionBatchId: null,
     })
 
     expect(store.get(orderImportRefreshAtom)).toBe(1)

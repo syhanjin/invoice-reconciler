@@ -8,11 +8,6 @@ export interface AppSettings {
   openaiModel: string
   openaiApiKeyMasked: string | null
   openaiApiKeyConfigured: boolean
-  aliyunBaseUrl: string
-  aliyunModel: string
-  aliyunApiKeyMasked: string | null
-  aliyunApiKeyConfigured: boolean
-  aliyunEnableThinking: boolean
   maxConcurrency: number
   tencentSecretIdMasked: string | null
   tencentCredentialsConfigured: boolean
@@ -31,11 +26,6 @@ export interface SaveSettingsRequest {
   openaiModel: string
   openaiApiKey: string | null
   clearOpenaiApiKey: boolean
-  aliyunBaseUrl: string
-  aliyunModel: string
-  aliyunApiKey: string | null
-  clearAliyunApiKey: boolean
-  aliyunEnableThinking: boolean
   maxConcurrency: number
   tencentSecretId: string | null
   tencentSecretKey: string | null
@@ -45,20 +35,17 @@ export interface SaveSettingsRequest {
   matchMaxCandidates: number
 }
 
-export type OrderRecognitionProvider = "ollama" | "openai" | "aliyun_batch"
+export type OrderRecognitionProvider = "ollama" | "openai"
 
 export type OrderImportTaskStatus =
   | "pending"
   | "processing"
-  | "batch_submitting"
-  | "batch_locked"
   | "failed"
 
 export interface OrderImportTask {
   id: string
   originalFileName: string
   status: OrderImportTaskStatus
-  batchShortNumber: string | null
   errorCode: string | null
   errorMessage: string | null
   retryCount: number
@@ -66,20 +53,8 @@ export interface OrderImportTask {
   startedAt: string | null
 }
 
-export interface OrderRecognitionBatch {
-  id: string
-  shortNumber: string
-  status: "uploading" | "submitted" | "validating" | "in_progress" | "finalizing" | "canceling"
-  model: string
-  taskCount: number
-  errorMessage: string | null
-  createdAt: string
-  completedAt: string | null
-}
-
 export interface OrderImportPool {
   tasks: OrderImportTask[]
-  batches: OrderRecognitionBatch[]
   pending: number
   processing: number
   failed: number
@@ -96,7 +71,6 @@ export interface OrderImportLog {
   originalFileName: string
   provider: string
   model: string
-  batchShortNumber: string | null
   warningMessage: string | null
   completedAt: string
 }
@@ -117,7 +91,6 @@ export interface OrderImportUpdateEvent {
   kind: string
   taskId: string | null
   orderId: string | null
-  recognitionBatchId: string | null
 }
 
 export interface RecognizerStatus {

@@ -12,6 +12,7 @@ impl MigratorTrait for Migrator {
             Box::new(M0003InvoiceRecovery),
             Box::new(M0004OrderInvoiceMatching),
             Box::new(M0005UnifiedOrderImportPool),
+            Box::new(M0006RemoveAliyunBatch),
         ]
     }
 }
@@ -305,6 +306,142 @@ const ORDER_POOL_DOWN_STATEMENTS: &[&str] = &[
     "DROP TABLE IF EXISTS order_recognition_batches",
 ];
 
+pub struct M0006RemoveAliyunBatch;
+
+#[async_trait::async_trait]
+impl MigrationName for M0006RemoveAliyunBatch {
+    fn name(&self) -> &str {
+        "m0006_remove_aliyun_batch"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for M0006RemoveAliyunBatch {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        let connection = manager.get_connection();
+        let pool_exists = manager.has_table("order_import_pool").await?;
+        let pool_needs_rebuild = pool_exists
+            && manager
+                .has_column("order_import_pool", "recognition_batch_id")
+                .await?;
+        let pool_backup_exists = manager.has_table("order_import_pool_m0006_old").await?;
+        if pool_needs_rebuild {
+            connection
+                .execute(Statement::from_string(
+                    backend,
+                    "DROP TABLE IF EXISTS order_import_pool_m0006_old",
+                ))
+                .await?;
+            connection
+                .execute(Statement::from_string(
+                    backend,
+                    "ALTER TABLE order_import_pool RENAME TO order_import_pool_m0006_old",
+                ))
+                .await?;
+        }
+        connection
+            .execute(Statement::from_string(
+                backend,
+                "CREATE TABLE IF NOT EXISTS order_import_pool (id TEXT PRIMARY KEY, original_file_name TEXT NOT NULL, managed_image_path TEXT NOT NULL, image_sha256 TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'failed')), error_code TEXT, error_message TEXT, retry_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, started_at TEXT)",
+            ))
+            .await?;
+        if pool_needs_rebuild || pool_backup_exists {
+            connection
+                .execute(Statement::from_string(
+                    backend,
+                    "INSERT OR IGNORE INTO order_import_pool (id, original_file_name, managed_image_path, image_sha256, status, error_code, error_message, retry_count, created_at, started_at) SELECT id, original_file_name, managed_image_path, image_sha256, CASE WHEN status IN ('batch_submitting', 'batch_locked') THEN 'failed' ELSE status END, CASE WHEN status IN ('batch_submitting', 'batch_locked') THEN 'batch_api_removed' ELSE error_code END, CASE WHEN status IN ('batch_submitting', 'batch_locked') THEN '阿里云 Batch 功能已移除，请配置实时识别服务后手动重试' ELSE error_message END, retry_count, created_at, started_at FROM order_import_pool_m0006_old",
+                ))
+                .await?;
+            connection
+                .execute(Statement::from_string(
+                    backend,
+                    "DROP TABLE order_import_pool_m0006_old",
+                ))
+                .await?;
+        }
+
+        let logs_exists = manager.has_table("order_import_logs").await?;
+        let logs_need_rebuild = logs_exists
+            && manager
+                .has_column("order_import_logs", "batch_short_number")
+                .await?;
+        let logs_backup_exists = manager.has_table("order_import_logs_m0006_old").await?;
+        if logs_need_rebuild {
+            connection
+                .execute(Statement::from_string(
+                    backend,
+                    "DROP TABLE IF EXISTS order_import_logs_m0006_old",
+                ))
+                .await?;
+            connection
+                .execute(Statement::from_string(
+                    backend,
+                    "ALTER TABLE order_import_logs RENAME TO order_import_logs_m0006_old",
+                ))
+                .await?;
+        }
+        connection
+            .execute(Statement::from_string(
+                backend,
+                "CREATE TABLE IF NOT EXISTS order_import_logs (task_id TEXT PRIMARY KEY, order_id TEXT NOT NULL, original_file_name TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, warning_message TEXT, completed_at TEXT NOT NULL)",
+            ))
+            .await?;
+        if logs_need_rebuild || logs_backup_exists {
+            connection
+                .execute(Statement::from_string(
+                    backend,
+                    "INSERT OR IGNORE INTO order_import_logs (task_id, order_id, original_file_name, provider, model, warning_message, completed_at) SELECT task_id, order_id, original_file_name, provider, model, warning_message, completed_at FROM order_import_logs_m0006_old",
+                ))
+                .await?;
+            connection
+                .execute(Statement::from_string(
+                    backend,
+                    "DROP TABLE order_import_logs_m0006_old",
+                ))
+                .await?;
+        }
+
+        for sql in [
+            "DROP TABLE IF EXISTS order_recognition_batches",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_order_import_pool_hash ON order_import_pool(image_sha256)",
+            "CREATE INDEX IF NOT EXISTS idx_order_import_pool_status ON order_import_pool(status, created_at, id)",
+            "CREATE INDEX IF NOT EXISTS idx_order_import_logs_completed ON order_import_logs(completed_at DESC, task_id DESC)",
+        ] {
+            connection
+                .execute(Statement::from_string(backend, sql))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let backend = manager.get_database_backend();
+        let connection = manager.get_connection();
+        for sql in [
+            ORDER_POOL_UP_STATEMENTS[0],
+            "CREATE TABLE IF NOT EXISTS order_import_pool_m0006_down (id TEXT PRIMARY KEY, original_file_name TEXT NOT NULL, managed_image_path TEXT NOT NULL, image_sha256 TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'batch_submitting', 'batch_locked', 'failed')), recognition_batch_id TEXT REFERENCES order_recognition_batches(id) ON DELETE SET NULL, error_code TEXT, error_message TEXT, retry_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, started_at TEXT)",
+            "INSERT OR IGNORE INTO order_import_pool_m0006_down (id, original_file_name, managed_image_path, image_sha256, status, error_code, error_message, retry_count, created_at, started_at) SELECT id, original_file_name, managed_image_path, image_sha256, status, error_code, error_message, retry_count, created_at, started_at FROM order_import_pool",
+            "DROP TABLE order_import_pool",
+            "ALTER TABLE order_import_pool_m0006_down RENAME TO order_import_pool",
+            "CREATE TABLE IF NOT EXISTS order_import_logs_m0006_down (task_id TEXT PRIMARY KEY, order_id TEXT NOT NULL, original_file_name TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, batch_short_number TEXT, warning_message TEXT, completed_at TEXT NOT NULL)",
+            "INSERT OR IGNORE INTO order_import_logs_m0006_down (task_id, order_id, original_file_name, provider, model, warning_message, completed_at) SELECT task_id, order_id, original_file_name, provider, model, warning_message, completed_at FROM order_import_logs",
+            "DROP TABLE order_import_logs",
+            "ALTER TABLE order_import_logs_m0006_down RENAME TO order_import_logs",
+            ORDER_POOL_UP_STATEMENTS[1],
+            ORDER_POOL_UP_STATEMENTS[3],
+            ORDER_POOL_UP_STATEMENTS[4],
+            ORDER_POOL_UP_STATEMENTS[5],
+            ORDER_POOL_UP_STATEMENTS[7],
+        ] {
+            connection
+                .execute(Statement::from_string(backend, sql))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectOptions, ConnectionTrait, DbBackend, Statement, TryGetable};
@@ -337,10 +474,10 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching', 'm0005_unified_order_import_pool')",
+                "SELECT COUNT(*) count FROM seaql_migrations WHERE version IN ('m0001_initial', 'm0002_invoices', 'm0003_invoice_recovery', 'm0004_order_invoice_matching', 'm0005_unified_order_import_pool', 'm0006_remove_aliyun_batch')",
             )
             .await,
-            5
+            6
         );
         assert_eq!(
             scalar(
@@ -361,10 +498,18 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name IN ('order_import_pool', 'order_import_logs', 'order_recognition_batches')",
+                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name IN ('order_import_pool', 'order_import_logs')",
             )
             .await,
-            3
+            2
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name = 'order_recognition_batches'",
+            )
+            .await,
+            0
         );
     }
 
@@ -488,10 +633,10 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name IN ('order_import_pool', 'order_import_logs', 'order_recognition_batches')",
+                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name IN ('order_import_pool', 'order_import_logs')",
             )
             .await,
-            3
+            2
         );
         assert_eq!(
             scalar(
@@ -635,11 +780,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_releases_realtime_order_work_but_preserves_remote_batch_locks() {
+    async fn upgrade_releases_removed_batch_work_as_failed_tasks() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("restart-orders.sqlite3");
         let connection = connect_raw(&path).await;
-        Migrator::up(&connection, None).await.unwrap();
+        Migrator::up(&connection, Some(5)).await.unwrap();
         connection.execute_unprepared(
             "INSERT INTO order_recognition_batches (id, short_number, provider, base_url, model, status, remote_batch_id, created_at) VALUES ('batch', 'B000001', 'aliyun_batch', 'https://example.com/v1', 'qwen', 'in_progress', 'remote-batch', '2026-08-13T00:00:00Z');
              INSERT INTO order_import_pool (id, original_file_name, managed_image_path, image_sha256, status, retry_count, created_at) VALUES ('realtime', 'realtime.png', 'images/realtime.png', 'realtime-hash', 'processing', 0, '2026-08-13T00:00:00Z');
@@ -651,7 +796,7 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM order_import_pool WHERE id = 'realtime' AND status = 'failed' AND error_code = 'app_interrupted' AND recognition_batch_id IS NULL",
+                "SELECT COUNT(*) count FROM order_import_pool WHERE id = 'realtime' AND status = 'failed' AND error_code = 'app_interrupted'",
             )
             .await,
             1
@@ -659,10 +804,101 @@ mod tests {
         assert_eq!(
             scalar(
                 &database.connection,
-                "SELECT COUNT(*) count FROM order_import_pool WHERE id = 'remote' AND status = 'batch_locked' AND recognition_batch_id = 'batch'",
+                "SELECT COUNT(*) count FROM order_import_pool WHERE id = 'remote' AND status = 'failed' AND error_code = 'batch_api_removed' AND error_message LIKE '%手动重试%'",
             )
             .await,
             1
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name = 'order_recognition_batches'",
+            )
+            .await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrade_preserves_historical_aliyun_orders_and_audit_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("historical-aliyun.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(5)).await.unwrap();
+        connection.execute_unprepared(
+            "INSERT INTO import_batches (id, platform, status, created_at, completed_at) VALUES ('legacy-pool', 'taobao', 'completed', '2026-08-13T00:00:00Z', '2026-08-13T00:01:00Z');
+             INSERT INTO import_tasks (id, batch_id, original_file_name, image_sha256, status, retry_count, created_at, completed_at) VALUES ('order-a', 'legacy-pool', 'order.png', 'order-hash', 'succeeded', 0, '2026-08-13T00:00:00Z', '2026-08-13T00:01:00Z');
+             INSERT INTO orders (id, platform, external_order_number, raw_ocr_json, possible_duplicate, created_at, updated_at, original_file_name, managed_image_path, image_sha256) VALUES ('order-a', 'taobao', 'ORDER-A', '{}', 0, '2026-08-13T00:01:00Z', '2026-08-13T00:01:00Z', 'order.png', 'images/order-a.png', 'order-hash');
+             INSERT INTO order_import_logs (task_id, order_id, original_file_name, provider, model, batch_short_number, completed_at) VALUES ('order-a', 'order-a', 'order.png', 'aliyun_batch', 'qwen3-vl-flash', 'B000001', '2026-08-13T00:01:00Z');"
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM orders WHERE id = 'order-a' AND image_sha256 = 'order-hash'",
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM order_import_logs WHERE task_id = 'order-a' AND provider = 'aliyun_batch' AND model = 'qwen3-vl-flash'",
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM pragma_table_info('order_import_logs') WHERE name = 'batch_short_number'",
+            )
+            .await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn resumes_interrupted_batch_removal_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume-remove-batch.sqlite3");
+        let connection = connect_raw(&path).await;
+        Migrator::up(&connection, Some(5)).await.unwrap();
+        connection.execute_unprepared(
+            "INSERT INTO order_import_pool (id, original_file_name, managed_image_path, image_sha256, status, retry_count, created_at) VALUES ('pending', 'pending.png', 'images/pending.png', 'pending-hash', 'pending', 0, '2026-08-13T00:00:00Z');
+             INSERT INTO order_import_pool (id, original_file_name, managed_image_path, image_sha256, status, retry_count, created_at) VALUES ('locked', 'locked.png', 'images/locked.png', 'locked-hash', 'batch_locked', 1, '2026-08-13T00:01:00Z');
+             ALTER TABLE order_import_pool RENAME TO order_import_pool_m0006_old;
+             CREATE TABLE order_import_pool (id TEXT PRIMARY KEY, original_file_name TEXT NOT NULL, managed_image_path TEXT NOT NULL, image_sha256 TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'failed')), error_code TEXT, error_message TEXT, retry_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, started_at TEXT);
+             INSERT INTO order_import_pool (id, original_file_name, managed_image_path, image_sha256, status, retry_count, created_at) VALUES ('pending', 'pending.png', 'images/pending.png', 'pending-hash', 'pending', 0, '2026-08-13T00:00:00Z');"
+        ).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM order_import_pool",
+            )
+            .await,
+            2
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM order_import_pool WHERE id = 'locked' AND status = 'failed' AND error_code = 'batch_api_removed'",
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            scalar(
+                &database.connection,
+                "SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name LIKE '%m0006_old'",
+            )
+            .await,
+            0
         );
     }
 

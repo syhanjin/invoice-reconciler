@@ -11,8 +11,6 @@ pub enum AppError {
     OllamaUnavailable(String),
     #[error("订单识别服务请求失败：{0}")]
     RecognitionService(String),
-    #[error("阿里云百炼 Batch 请求失败：{0}")]
-    AliyunBatch(String),
     #[error("Ollama 中未安装模型：{0}")]
     ModelMissing(String),
     #[error("OCR 返回的数据无效：{0}")]
@@ -40,7 +38,6 @@ impl AppError {
             Self::File(_) => "file_error",
             Self::OllamaUnavailable(_) => "ollama_unavailable",
             Self::RecognitionService(_) => "recognition_service_error",
-            Self::AliyunBatch(_) => "aliyun_batch_error",
             Self::ModelMissing(_) => "model_missing",
             Self::InvalidOcr(_) => "invalid_ocr",
             Self::TencentOcr(_) => "tencent_ocr_error",

@@ -52,10 +52,6 @@ export const api = {
     invoke<number>("retry_failed_order_import_tasks"),
   deleteOrderImportTask: (id: string) =>
     invoke<void>("delete_order_import_task", { request: { id } }),
-  submitOrderRecognitionBatch: () =>
-    invoke<string>("submit_order_recognition_batch"),
-  cancelOrderRecognitionBatch: (id: string) =>
-    invoke<void>("cancel_order_recognition_batch", { request: { id } }),
   listOrders: (query: OrdersQuery) => invoke<OrdersPage>("list_orders", { query }),
   getOrder: (id: string) => invoke<OrderDetail>("get_order", { request: { id } }),
   updateOrder: (request: UpdateOrderRequest) =>

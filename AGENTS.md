@@ -43,11 +43,10 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
   invoice queue. Preserve local preflight/confirmation, the global 5 QPS limit,
   durable raw-response auditing, and the separate `invoice-task-updated` event.
 - Order OCR uses one durable import pool. Ollama and generic OpenAI-compatible
-  providers consume it through the dynamic realtime queue; Aliyun Bailian uses
-  manually submitted, concurrently supervised File/Batch jobs with persisted
-  input/remote IDs. Preserve restart recovery, idempotent result reconciliation,
-  immutable completion logs, and terminal cancel reconciliation that releases
-  remaining task/image locks without requiring another restart.
+  providers consume it through the dynamic realtime queue. Do not reintroduce
+  Aliyun File/Batch submission, remote supervision, or order-side batch UI/API.
+  Preserve restart recovery, atomic completion, immutable completion logs, and
+  historical provider/model audit text for orders previously recognized by Aliyun.
 - Order/invoice matching computes ephemeral candidates and persists only explicit
   confirmations. Preserve exact-fen/CNY rules, missing-date comparison semantics,
   global order uniqueness, atomic batch confirmation, and matched edit/delete guards.

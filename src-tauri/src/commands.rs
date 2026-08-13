@@ -42,7 +42,6 @@ pub async fn get_settings(state: State<'_, AppState>) -> CommandResult<AppSettin
 
 #[tauri::command]
 pub async fn save_settings(
-    app: AppHandle,
     state: State<'_, AppState>,
     request: UpdateSettingsRequest,
 ) -> CommandResult<AppSettings> {
@@ -51,14 +50,7 @@ pub async fn save_settings(
         .save(request)
         .await
         .map_err(crate::error::CommandError::from)?;
-    state
-        .order_batch
-        .resume(app)
-        .await
-        .map_err(crate::error::CommandError::from)?;
-    if settings.order_recognition_provider.is_realtime() {
-        state.queue.wake();
-    }
+    state.queue.wake();
     Ok(settings)
 }
 
@@ -75,12 +67,10 @@ pub async fn check_order_recognizer(
             base_url: match public.order_recognition_provider {
                 OrderRecognitionProvider::Ollama => public.ollama_base_url,
                 OrderRecognitionProvider::Openai => public.openai_base_url,
-                OrderRecognitionProvider::AliyunBatch => public.aliyun_base_url,
             },
             model: match public.order_recognition_provider {
                 OrderRecognitionProvider::Ollama => public.ollama_model,
                 OrderRecognitionProvider::Openai => public.openai_model,
-                OrderRecognitionProvider::AliyunBatch => public.aliyun_model,
             },
             api_key: match public.order_recognition_provider {
                 OrderRecognitionProvider::Ollama => String::new(),
@@ -91,27 +81,9 @@ pub async fn check_order_recognizer(
                     .filter(|value| !value.is_empty())
                     .map(str::to_owned)
                     .unwrap_or(current.openai_api_key),
-                OrderRecognitionProvider::AliyunBatch => request
-                    .aliyun_api_key
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .unwrap_or(current.aliyun_api_key),
             },
             max_concurrency: public.max_concurrency,
-            enable_thinking: request.aliyun_enable_thinking,
         };
-        if matches!(settings.provider, OrderRecognitionProvider::AliyunBatch) {
-            state.aliyun_batch.check(&settings).await?;
-            return Ok(RecognizerStatus {
-                provider: settings.provider,
-                reachable: true,
-                model_available: true,
-                version: None,
-                message: "阿里云百炼 Batch 服务可用".into(),
-            });
-        }
         state.ollama.check(&settings).await
     }
     .await
@@ -199,16 +171,8 @@ async fn import_order_images_inner(
         }
         return Err(error);
     }
-    emit_update(app, "tasks_imported", None, None, None);
-    if state
-        .settings
-        .private()
-        .await
-        .order_recognition_provider
-        .is_realtime()
-    {
-        state.queue.wake();
-    }
+    emit_update(app, "tasks_imported", None, None);
+    state.queue.wake();
     Ok(ImportOrderImagesResult { imported, skipped })
 }
 
@@ -241,7 +205,7 @@ pub async fn retry_order_import_task(
         .await
         .map_err(crate::error::CommandError::from)?;
     if retried {
-        emit_update(&app, "task_retried", Some(&request.id), None, None);
+        emit_update(&app, "task_retried", Some(&request.id), None);
         state.queue.wake();
     }
     Ok(retried)
@@ -258,7 +222,7 @@ pub async fn retry_failed_order_import_tasks(
         .await
         .map_err(crate::error::CommandError::from)?;
     if affected > 0 {
-        emit_update(&app, "tasks_retried", None, None, None);
+        emit_update(&app, "tasks_retried", None, None);
         state.queue.wake();
     }
     Ok(affected)
@@ -273,29 +237,8 @@ pub async fn delete_order_import_task(
     delete_order_import_task_inner(&state, &request.id)
         .await
         .map_err(crate::error::CommandError::from)?;
-    emit_update(&app, "task_deleted", Some(&request.id), None, None);
+    emit_update(&app, "task_deleted", Some(&request.id), None);
     Ok(())
-}
-
-#[tauri::command]
-pub async fn submit_order_recognition_batch(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> CommandResult<String> {
-    state.order_batch.submit(app).await.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn cancel_order_recognition_batch(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    request: IdRequest,
-) -> CommandResult<()> {
-    state
-        .order_batch
-        .cancel(app, &request.id)
-        .await
-        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -501,8 +444,6 @@ mod tests {
                 },
                 "ollama",
                 "test-model",
-                None,
-                None,
             )
             .await
             .unwrap();

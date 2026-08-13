@@ -1,4 +1,3 @@
-mod aliyun_batch;
 mod commands;
 mod db;
 mod entities;
@@ -13,7 +12,6 @@ mod migration;
 mod models;
 mod normalize;
 mod ocr;
-mod order_batch;
 mod order_import_db;
 mod queue;
 mod settings;
@@ -31,8 +29,6 @@ use tauri::Manager;
 pub struct AppState {
     database: Database,
     ollama: OllamaClient,
-    aliyun_batch: aliyun_batch::AliyunBatchClient,
-    order_batch: order_batch::OrderBatchManager,
     queue: QueueManager,
     invoice_queue: invoice_queue::InvoiceQueueManager,
     invoice_preflights: invoice_commands::InvoicePreflightStore,
@@ -49,16 +45,9 @@ impl AppState {
         let settings = SettingsStore::load_or_migrate(&app_data_dir, legacy)
             .await
             .unwrap();
-        let aliyun_batch = aliyun_batch::AliyunBatchClient::new().unwrap();
         let queue = QueueManager::new(
             database.clone(),
             ollama.clone(),
-            settings.clone(),
-            app_data_dir.clone(),
-        );
-        let order_batch = order_batch::OrderBatchManager::new(
-            database.clone(),
-            aliyun_batch.clone(),
             settings.clone(),
             app_data_dir.clone(),
         );
@@ -70,8 +59,6 @@ impl AppState {
         Self {
             database,
             ollama,
-            aliyun_batch,
-            order_batch,
             queue,
             invoice_queue,
             invoice_preflights: invoice_commands::InvoicePreflightStore::default(),
@@ -98,7 +85,6 @@ pub fn run() {
             let database_path = app_data_dir.join("bill.sqlite3");
             let images_dir = app_data_dir.join("images");
             let ollama = OllamaClient::new().map_err(to_boxed_error)?;
-            let aliyun_batch = aliyun_batch::AliyunBatchClient::new().map_err(to_boxed_error)?;
             let database = tauri::async_runtime::block_on(Database::connect(&database_path))
                 .map_err(to_boxed_error)?;
             let legacy_settings =
@@ -114,12 +100,6 @@ pub fn run() {
                 settings.clone(),
                 app_data_dir.clone(),
             );
-            let order_batch = order_batch::OrderBatchManager::new(
-                database.clone(),
-                aliyun_batch.clone(),
-                settings.clone(),
-                app_data_dir.clone(),
-            );
             let tencent = tencent_ocr::TencentOcrClient::new().map_err(to_boxed_error)?;
             let invoice_queue = invoice_queue::InvoiceQueueManager::new(
                 database.clone(),
@@ -127,13 +107,9 @@ pub fn run() {
                 app_data_dir.clone(),
             );
             queue.start(app.handle().clone());
-            tauri::async_runtime::block_on(order_batch.resume(app.handle().clone()))
-                .map_err(to_boxed_error)?;
             app.manage(AppState {
                 database,
                 ollama,
-                aliyun_batch,
-                order_batch,
                 queue,
                 invoice_queue,
                 invoice_preflights: invoice_commands::InvoicePreflightStore::default(),
@@ -154,8 +130,6 @@ pub fn run() {
             commands::retry_order_import_task,
             commands::retry_failed_order_import_tasks,
             commands::delete_order_import_task,
-            commands::submit_order_recognition_batch,
-            commands::cancel_order_recognition_batch,
             commands::list_orders,
             commands::get_order,
             commands::update_order,

@@ -215,11 +215,7 @@ impl OllamaClient {
             .map(|kind| kind.mime_type())
             .unwrap_or("image/png");
         let image = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let request = openai_request(
-            &settings.model,
-            &format!("data:{mime};base64,{image}"),
-            false,
-        );
+        let request = openai_request(&settings.model, &format!("data:{mime};base64,{image}"));
         let mut call = self
             .ocr_client
             .post(format!(
@@ -271,12 +267,8 @@ struct OpenAiMessage {
     content: Option<String>,
 }
 
-pub(crate) fn openai_request(
-    model: &str,
-    image_url: &str,
-    enable_thinking: bool,
-) -> serde_json::Value {
-    let mut request = json!({
+pub(crate) fn openai_request(model: &str, image_url: &str) -> serde_json::Value {
+    json!({
         "model": model,
         "messages": [{
             "role": "user",
@@ -290,11 +282,7 @@ pub(crate) fn openai_request(
             "type": "json_schema",
             "json_schema": {"name": "taobao_order", "strict": true, "schema": order_schema()}
         }
-    });
-    if enable_thinking {
-        request["enable_thinking"] = json!(true);
-    }
-    request
+    })
 }
 
 pub(crate) fn normalize_content(content: &str) -> AppResult<crate::models::NormalizedOrder> {
@@ -374,7 +362,6 @@ mod tests {
             model: "vision:test".into(),
             api_key: String::new(),
             max_concurrency: 3,
-            enable_thinking: false,
         };
         let result = OllamaClient::new()
             .unwrap()
@@ -431,7 +418,6 @@ mod tests {
             model: "compatible-vision".into(),
             api_key: "secret-key".into(),
             max_concurrency: 2,
-            enable_thinking: false,
         };
         let result = OllamaClient::new()
             .unwrap()

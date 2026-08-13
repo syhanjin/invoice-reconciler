@@ -19,8 +19,7 @@ Do not add a second application-facing database library. SeaORM may use SQLx int
 | `app_settings` | fixed integer `1` | legacy settings row; runtime provider settings live in `settings.toml` |
 | `import_batches` | UUIDv7 text | legacy order import history; no longer exposed by the order UI/API |
 | `import_tasks` | UUIDv7 text | legacy compatibility/audit skeleton for the original orders FK |
-| `order_recognition_batches` | UUIDv7 text | unique short number and remote ID; Aliyun snapshot/checkpoints/status |
-| `order_import_pool` | UUIDv7 text | unique managed-image hash; optional remote batch FK with `SET NULL` |
+| `order_import_pool` | UUIDv7 text | unique managed-image hash; status is `pending`, `processing`, or `failed` |
 | `order_import_logs` | task UUIDv7 text | immutable successful-import metadata; intentionally does not own image/hash |
 | `orders` | task UUIDv7 text | owns successful import image/hash; external order number is not unique |
 | `order_items` | integer | `(order_id, position)` is unique and cascades from order |
@@ -43,8 +42,7 @@ Money is stored as integer fen. Date/time values are normalized strings in `YYYY
 - Wrap order edits, product replacement, and duplicate-flag recalculation in one transaction.
 - Treat `order_import_pool` as work ownership, `orders` as successful image ownership, and `order_import_logs` as immutable audit history. Successful recognition inserts the order/items/log and removes the pool row in one transaction.
 - Business deletion of an order deletes the order and cascading items, releases its image hash, and leaves `order_import_logs` unchanged. The log must not have an ownership foreign key that cascades from orders.
-- Allocate an Aliyun batch and move only the current `pending` rows to `batch_submitting` in one transaction. Persist `input_file_id` before create, `remote_batch_id` immediately after create/recovery, and output/error file IDs before result reconciliation.
-- Remote result reconciliation must be idempotent per pool task. A repeated success sees the existing immutable log/order and is treated as already complete rather than inserting duplicates.
+- Realtime result persistence must be idempotent per pool task. A repeated success sees the existing immutable log/order and is treated as already complete rather than inserting duplicates.
 - Write invoice recovery markers in the same transaction as invoice deletion. Claim all unclaimed markers for one source hash in the same transaction that creates its recovery task; consume matched markers and release unmatched markers in the persistence transaction.
 - External order numbers may repeat. After inserting, editing, or deleting an order, recalculate `possible_duplicate` for every affected non-empty order-number group.
 - Treat SQLite as the source of truth. In-memory queue and Jotai state are projections, not durable state.
@@ -58,6 +56,7 @@ Add a new `MigrationTrait` implementation and append it to `Migrator::migrations
 - SQLite migration DDL is not wrapped in one transaction by `sea-orm-migration`. New table and index statements must therefore be safely repeatable with `IF NOT EXISTS`, so a process interruption can resume instead of failing on a partially created schema.
 - Migration tests must use real temporary SQLite files for both a fresh install and an upgrade from the immediately previous migration. Seed existing domain data before upgrading and assert it survives.
 - Also simulate a partial prior migration, reconnect through the production `Database::connect` path, and assert the missing schema plus migration ledger entry are completed.
+- For a SQLite table rebuild, rename the old table to a migration-specific backup, create the final table, copy with `INSERT OR IGNORE`, then drop the backup. A rerun must detect and finish copying an existing backup without losing rows.
 - Verify constraints behavior after migration: foreign-key cascades, partial unique indexes, check constraints, and required query indexes must be exercised through actual writes or schema inspection.
 
 ## File Compensation
@@ -76,8 +75,7 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Do not store decimal currency in floating-point columns.
 - Do not delete the managed image before arranging a recoverable compensation path.
 - Do not update or delete an `order_import_logs` row as a side effect of editing/deleting its business order.
-- Do not unlock remote batch tasks merely because the cancel endpoint accepted a request; wait for a terminal remote state and reconcile output first.
-- Do not reset `batch_submitting` or `batch_locked` during generic startup recovery. Only realtime `processing` is failed immediately; the remote supervisor owns batch recovery.
+- Do not reintroduce `order_recognition_batches`, `recognition_batch_id`, or Batch-only pool states. Aliyun identifiers may appear only in legacy migration inputs and immutable historical provider text.
 - Do not modify duplicate flags outside the same transaction as the associated order change.
 - Do not use ad hoc schema creation outside `sea-orm-migration`.
 - Do not run restart-recovery SQL for new tables before `Migrator::up`.
@@ -90,10 +88,9 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Foreign-key cascade and reliable-identity unique-index enforcement after invoice migration.
 - Duplicate order-number group creation, edit between groups, and delete recalculation.
 - Unique SHA-256 behavior across pool rows and image-owning orders; skipped duplicates create no pool/log row.
-- Unified-pool atomic/idempotent completion and concurrent remote-batch allocation.
-- Aliyun checkpoint restart recovery, including input-file rebind and terminal cancellation release without a second restart.
+- Unified-pool atomic/idempotent realtime completion and explicit retry transitions.
 - Invoice source-hash behavior for source-less audit tasks, partial-delete recovery, no-match release, and hash re-blocking after recovery completes.
 - Transaction rollback for failed order/item mutations.
 - Bulk-delete partial-result coverage, preserved immutable import log, duplicate-group recalculation after successful items, and a fault-injection test proving the order, hash claim, and managed image are restored when database deletion fails.
-- Startup conversion of realtime pool `processing` to `failed`, while `batch_submitting`/`batch_locked` and their recognition-batch checkpoints remain resumable.
+- Startup conversion of realtime pool `processing` to `failed`; m0006 conversion of legacy Batch-locked tasks to `failed/batch_api_removed`, preserving images, hashes, orders, matches, and provider/model log history.
 - Matching fresh-file/m0003-upgrade/interrupted-migration coverage, unique order occupancy, cascade cleanup, and atomic batch rollback.

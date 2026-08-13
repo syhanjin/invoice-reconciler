@@ -66,7 +66,7 @@ impl Database {
         connection
             .execute(Statement::from_string(
                 DbBackend::Sqlite,
-                "UPDATE order_import_pool SET status = 'failed', recognition_batch_id = NULL, \
+                "UPDATE order_import_pool SET status = 'failed', \
                  error_code = 'app_interrupted', error_message = '应用在实时识别完成前退出，可手动重试' \
                  WHERE status = 'processing'",
             ))
@@ -591,11 +591,6 @@ fn settings_from_model(model: app_setting::Model) -> AppSettings {
         openai_model: crate::models::DEFAULT_OPENAI_MODEL.into(),
         openai_api_key_masked: None,
         openai_api_key_configured: false,
-        aliyun_base_url: crate::models::DEFAULT_ALIYUN_BASE_URL.into(),
-        aliyun_model: crate::models::DEFAULT_ALIYUN_MODEL.into(),
-        aliyun_api_key_masked: None,
-        aliyun_api_key_configured: false,
-        aliyun_enable_thinking: false,
         max_concurrency: u8::try_from(model.max_concurrency).unwrap_or(DEFAULT_MAX_CONCURRENCY),
         tencent_secret_id_masked: None,
         tencent_credentials_configured: false,

@@ -1,11 +1,9 @@
 import {
   AlertCircle,
-  Ban,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Clock3,
-  CloudUpload,
   FileClock,
   LoaderCircle,
   RefreshCw,
@@ -16,7 +14,6 @@ import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 
 import { InvoiceTasksTab } from "@/components/invoice-tasks-tab"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -32,7 +29,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { api, errorMessage } from "@/lib/api"
 import { formatDateTime } from "@/lib/format"
 import type {
-  AppSettings,
   InvoiceBatchDetail,
   OrderImportLog,
   OrderImportLogsPage,
@@ -42,7 +38,6 @@ import type {
 import { cn } from "@/lib/utils"
 
 interface ImportTasksPageProps {
-  settings: AppSettings
   orderRefreshToken: number
   activeInvoiceBatch: InvoiceBatchDetail | null
   selectedInvoiceBatchId: string | null
@@ -50,20 +45,17 @@ interface ImportTasksPageProps {
   onInvoiceBatchChange: (batch: InvoiceBatchDetail) => void
 }
 
-const emptyPool: OrderImportPool = { tasks: [], batches: [], pending: 0, processing: 0, failed: 0 }
+const emptyPool: OrderImportPool = { tasks: [], pending: 0, processing: 0, failed: 0 }
 const emptyLogs: OrderImportLogsPage = { items: [], total: 0, page: 1, pageSize: 20 }
 const pageSizes = [20, 50, 100]
 
 const taskStatus = {
   pending: { label: "待处理", icon: Clock3, className: "text-zinc-600" },
   processing: { label: "识别中", icon: LoaderCircle, className: "text-blue-600" },
-  batch_submitting: { label: "提交中", icon: CloudUpload, className: "text-blue-600" },
-  batch_locked: { label: "批次处理中", icon: LoaderCircle, className: "text-blue-600" },
   failed: { label: "等待重试", icon: AlertCircle, className: "text-red-600" },
 } as const
 
 export default function ImportTasksPage({
-  settings,
   orderRefreshToken,
   activeInvoiceBatch,
   selectedInvoiceBatchId,
@@ -86,7 +78,7 @@ export default function ImportTasksPage({
           </TabsList>
         </div>
         <TabsContent value="orders" className="min-h-0 bg-zinc-100">
-          <OrderPoolWorkspace settings={settings} refreshToken={orderRefreshToken} />
+          <OrderPoolWorkspace refreshToken={orderRefreshToken} />
         </TabsContent>
         <TabsContent value="invoices" className="min-h-0 bg-zinc-100">
           <InvoiceTasksTab
@@ -101,7 +93,7 @@ export default function ImportTasksPage({
   )
 }
 
-function OrderPoolWorkspace({ settings, refreshToken }: { settings: AppSettings; refreshToken: number }) {
+function OrderPoolWorkspace({ refreshToken }: { refreshToken: number }) {
   const [pool, setPool] = useState<OrderImportPool>(emptyPool)
   const [logs, setLogs] = useState<OrderImportLogsPage>(emptyLogs)
   const [page, setPage] = useState(1)
@@ -153,14 +145,11 @@ function OrderPoolWorkspace({ settings, refreshToken }: { settings: AppSettings;
   const poolPanel = (
     <PoolPanel
       pool={pool}
-      provider={settings.orderRecognitionProvider}
       disabled={pending !== null}
       pendingKey={pending}
       onRetry={(id) => run(id, () => api.retryOrderImportTask(id), "任务已重新排队")}
       onDelete={(id) => setDeleteTarget(pool.tasks.find((task) => task.id === id) ?? null)}
       onRetryAll={() => run("retry-all", () => api.retryFailedOrderImportTasks(), "失败任务已重新排队")}
-      onSubmit={() => run("submit", () => api.submitOrderRecognitionBatch(), "批次正在提交")}
-      onCancelBatch={(id) => run(`cancel:${id}`, () => api.cancelOrderRecognitionBatch(id), "已请求取消批次")}
     />
   )
   const logsPanel = (
@@ -219,16 +208,13 @@ function OrderPoolWorkspace({ settings, refreshToken }: { settings: AppSettings;
   )
 }
 
-function PoolPanel({ pool, provider, disabled, pendingKey, onRetry, onDelete, onRetryAll, onSubmit, onCancelBatch }: {
+function PoolPanel({ pool, disabled, pendingKey, onRetry, onDelete, onRetryAll }: {
   pool: OrderImportPool
-  provider: AppSettings["orderRecognitionProvider"]
   disabled: boolean
   pendingKey: string | null
   onRetry: (id: string) => void
   onDelete: (id: string) => void
   onRetryAll: () => void
-  onSubmit: () => void
-  onCancelBatch: (id: string) => void
 }) {
   return (
     <section className="flex min-h-0 flex-col bg-white" aria-label="订单识别任务池">
@@ -244,36 +230,7 @@ function PoolPanel({ pool, provider, disabled, pendingKey, onRetry, onDelete, on
             <RefreshCw className={cn(pendingKey === "retry-all" && "animate-spin")} />重试全部
           </Button>
         )}
-        {provider === "aliyun_batch" && (
-          <Button size="sm" disabled={disabled || pool.pending === 0} onClick={onSubmit}>
-            <CloudUpload className={cn(pendingKey === "submit" && "animate-pulse")} />提交批次
-          </Button>
-        )}
       </div>
-      {pool.batches.length > 0 && (
-        <div className="shrink-0 border-b bg-zinc-50 px-5 py-3">
-          <p className="mb-2 text-xs font-medium text-muted-foreground">运行批次</p>
-          <div className="flex flex-wrap gap-2">
-            {pool.batches.map((batch) => (
-              <div key={batch.id} className="flex h-9 items-center gap-2 rounded-md border bg-white px-3 text-xs">
-                <Badge variant="outline">{batch.shortNumber}</Badge>
-                <LoaderCircle className="size-3.5 animate-spin text-blue-600" />
-                <span>{batch.taskCount} 项</span>
-                <span className="max-w-32 truncate text-muted-foreground">{batch.model}</span>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  title={`取消批次 ${batch.shortNumber}`}
-                  disabled={disabled || batch.status === "canceling"}
-                  onClick={() => onCancelBatch(batch.id)}
-                >
-                  <Ban />
-                </Button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
       <div className="grid h-10 shrink-0 grid-cols-[minmax(0,1fr)_120px_96px] items-center gap-3 border-b px-5 text-xs font-medium text-muted-foreground">
         <span>图片</span><span>状态</span><span className="text-right">操作</span>
       </div>
@@ -313,11 +270,11 @@ function TaskRow({ task, disabled, pending, onRetry, onDelete }: {
       <div className="min-w-0">
         <p className="truncate text-sm font-medium">{task.originalFileName}</p>
         <p className={cn("truncate text-xs", task.errorMessage ? "text-red-600" : "text-muted-foreground")}>
-          {task.errorMessage ?? (task.batchShortNumber ? `批次 ${task.batchShortNumber}` : formatDateTime(task.createdAt))}
+          {task.errorMessage ?? formatDateTime(task.createdAt)}
         </p>
       </div>
       <div className={cn("flex items-center gap-2 text-xs", meta.className)}>
-        <Icon className={cn("size-3.5", ["processing", "batch_locked"].includes(task.status) && "animate-spin")} />{meta.label}
+        <Icon className={cn("size-3.5", task.status === "processing" && "animate-spin")} />{meta.label}
       </div>
       <div className="flex justify-end gap-1">
         {task.status === "failed" && (
@@ -382,7 +339,6 @@ function LogRow({ log }: { log: OrderImportLog }) {
         <div className="flex min-w-0 items-center gap-2">
           <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
           <p className="truncate text-sm font-medium">{log.originalFileName}</p>
-          {log.batchShortNumber && <Badge variant="outline">{log.batchShortNumber}</Badge>}
         </div>
         <p className="mt-1 truncate text-xs text-muted-foreground">{providerLabel(log.provider)} · {log.model}{log.warningMessage ? ` · ${log.warningMessage}` : ""}</p>
       </div>
@@ -394,6 +350,6 @@ function LogRow({ log }: { log: OrderImportLog }) {
 function providerLabel(provider: string) {
   if (provider === "ollama") return "Ollama"
   if (provider === "openai") return "OpenAI 兼容"
-  if (provider === "aliyun_batch") return "阿里云百炼批量"
+  if (provider === "aliyun_batch") return "阿里云百炼（历史）"
   return provider
 }

@@ -13,8 +13,6 @@ pub const MIN_MATCH_MAX_CANDIDATES: u16 = 10;
 pub const MAX_MATCH_MAX_CANDIDATES: u16 = 500;
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
-pub const DEFAULT_ALIYUN_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
-pub const DEFAULT_ALIYUN_MODEL: &str = "qwen3-vl-flash";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -22,7 +20,6 @@ pub enum OrderRecognitionProvider {
     #[default]
     Ollama,
     Openai,
-    AliyunBatch,
 }
 
 impl OrderRecognitionProvider {
@@ -30,12 +27,7 @@ impl OrderRecognitionProvider {
         match self {
             Self::Ollama => "ollama",
             Self::Openai => "openai",
-            Self::AliyunBatch => "aliyun_batch",
         }
-    }
-
-    pub fn is_realtime(self) -> bool {
-        !matches!(self, Self::AliyunBatch)
     }
 }
 
@@ -49,11 +41,6 @@ pub struct AppSettings {
     pub openai_model: String,
     pub openai_api_key_masked: Option<String>,
     pub openai_api_key_configured: bool,
-    pub aliyun_base_url: String,
-    pub aliyun_model: String,
-    pub aliyun_api_key_masked: Option<String>,
-    pub aliyun_api_key_configured: bool,
-    pub aliyun_enable_thinking: bool,
     pub max_concurrency: u8,
     pub tencent_secret_id_masked: Option<String>,
     pub tencent_credentials_configured: bool,
@@ -74,11 +61,6 @@ pub struct UpdateSettingsRequest {
     pub openai_model: String,
     pub openai_api_key: Option<String>,
     pub clear_openai_api_key: bool,
-    pub aliyun_base_url: String,
-    pub aliyun_model: String,
-    pub aliyun_api_key: Option<String>,
-    pub clear_aliyun_api_key: bool,
-    pub aliyun_enable_thinking: bool,
     pub max_concurrency: u8,
     pub tencent_secret_id: Option<String>,
     pub tencent_secret_key: Option<String>,
@@ -92,10 +74,8 @@ impl UpdateSettingsRequest {
     pub fn validate(self) -> crate::error::AppResult<AppSettings> {
         let ollama_base_url = validate_url("Ollama 地址", &self.ollama_base_url)?;
         let openai_base_url = validate_url("OpenAI 兼容地址", &self.openai_base_url)?;
-        let aliyun_base_url = validate_url("阿里云百炼地址", &self.aliyun_base_url)?;
         let ollama_model = validate_model("Ollama 模型", &self.ollama_model)?;
         let openai_model = validate_model("OpenAI 兼容模型", &self.openai_model)?;
-        let aliyun_model = validate_model("阿里云百炼模型", &self.aliyun_model)?;
         if !(MIN_CONCURRENCY..=MAX_CONCURRENCY).contains(&self.max_concurrency) {
             return Err(crate::error::AppError::InvalidInput(
                 "最大并发数必须在 1 到 8 之间".into(),
@@ -127,11 +107,6 @@ impl UpdateSettingsRequest {
             openai_model,
             openai_api_key_masked: None,
             openai_api_key_configured: false,
-            aliyun_base_url,
-            aliyun_model,
-            aliyun_api_key_masked: None,
-            aliyun_api_key_configured: false,
-            aliyun_enable_thinking: self.aliyun_enable_thinking,
             max_concurrency: self.max_concurrency,
             tencent_secret_id_masked: None,
             tencent_credentials_configured: false,
@@ -152,10 +127,6 @@ pub struct PrivateAppSettings {
     pub openai_base_url: String,
     pub openai_model: String,
     pub openai_api_key: String,
-    pub aliyun_base_url: String,
-    pub aliyun_model: String,
-    pub aliyun_api_key: String,
-    pub aliyun_enable_thinking: bool,
     pub max_concurrency: u8,
     pub tencent_secret_id: String,
     pub tencent_secret_key: String,
@@ -176,11 +147,6 @@ impl PrivateAppSettings {
             openai_model: self.openai_model.clone(),
             openai_api_key_masked: mask_secret_id(&self.openai_api_key),
             openai_api_key_configured: !self.openai_api_key.is_empty(),
-            aliyun_base_url: self.aliyun_base_url.clone(),
-            aliyun_model: self.aliyun_model.clone(),
-            aliyun_api_key_masked: mask_secret_id(&self.aliyun_api_key),
-            aliyun_api_key_configured: !self.aliyun_api_key.is_empty(),
-            aliyun_enable_thinking: self.aliyun_enable_thinking,
             max_concurrency: self.max_concurrency,
             tencent_secret_id_masked: mask_secret_id(&self.tencent_secret_id),
             tencent_credentials_configured: !self.tencent_secret_id.is_empty()
@@ -199,20 +165,16 @@ impl PrivateAppSettings {
             base_url: match self.order_recognition_provider {
                 OrderRecognitionProvider::Ollama => self.ollama_base_url.clone(),
                 OrderRecognitionProvider::Openai => self.openai_base_url.clone(),
-                OrderRecognitionProvider::AliyunBatch => self.aliyun_base_url.clone(),
             },
             model: match self.order_recognition_provider {
                 OrderRecognitionProvider::Ollama => self.ollama_model.clone(),
                 OrderRecognitionProvider::Openai => self.openai_model.clone(),
-                OrderRecognitionProvider::AliyunBatch => self.aliyun_model.clone(),
             },
             api_key: match self.order_recognition_provider {
                 OrderRecognitionProvider::Ollama => String::new(),
                 OrderRecognitionProvider::Openai => self.openai_api_key.clone(),
-                OrderRecognitionProvider::AliyunBatch => self.aliyun_api_key.clone(),
             },
             max_concurrency: self.max_concurrency,
-            enable_thinking: self.aliyun_enable_thinking,
         }
     }
 }
@@ -224,7 +186,6 @@ pub struct OrderRecognitionSettings {
     pub model: String,
     pub api_key: String,
     pub max_concurrency: u8,
-    pub enable_thinking: bool,
 }
 
 fn validate_url(label: &str, value: &str) -> crate::error::AppResult<String> {
@@ -374,7 +335,6 @@ pub struct OrderImportTask {
     pub id: String,
     pub original_file_name: String,
     pub status: String,
-    pub batch_short_number: Option<String>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub retry_count: i64,
@@ -384,22 +344,8 @@ pub struct OrderImportTask {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OrderRecognitionBatch {
-    pub id: String,
-    pub short_number: String,
-    pub status: String,
-    pub model: String,
-    pub task_count: i64,
-    pub error_message: Option<String>,
-    pub created_at: String,
-    pub completed_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct OrderImportPool {
     pub tasks: Vec<OrderImportTask>,
-    pub batches: Vec<OrderRecognitionBatch>,
     pub pending: i64,
     pub processing: i64,
     pub failed: i64,
@@ -427,7 +373,6 @@ pub struct OrderImportLog {
     pub original_file_name: String,
     pub provider: String,
     pub model: String,
-    pub batch_short_number: Option<String>,
     pub warning_message: Option<String>,
     pub completed_at: String,
 }
@@ -447,7 +392,6 @@ pub struct OrderImportUpdateEvent {
     pub kind: String,
     pub task_id: Option<String>,
     pub order_id: Option<String>,
-    pub recognition_batch_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

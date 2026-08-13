@@ -121,7 +121,6 @@ export function App() {
           {view === "importTasks" && settings && (
             <Suspense fallback={<Initializing />}>
               <ImportTasksPage
-                settings={settings}
                 orderRefreshToken={orderImportRefreshToken}
                 activeInvoiceBatch={activeInvoiceBatch}
                 selectedInvoiceBatchId={selectedInvoiceBatchId}

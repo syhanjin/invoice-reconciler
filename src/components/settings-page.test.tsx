@@ -24,11 +24,6 @@ const settings: AppSettings = {
   openaiModel: "vision-model",
   openaiApiKeyMasked: "sk-****1234",
   openaiApiKeyConfigured: true,
-  aliyunBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  aliyunModel: "qwen-vl-max",
-  aliyunApiKeyMasked: "sk-****7890",
-  aliyunApiKeyConfigured: true,
-  aliyunEnableThinking: false,
   maxConcurrency: 3,
   tencentSecretIdMasked: "AKID****7890",
   tencentCredentialsConfigured: true,
@@ -96,5 +91,16 @@ describe("SettingsPage", () => {
     render(<SettingsPage settings={{ ...settings, permissionWarning: "无法将设置文件权限设为 0600" }} onSettingsChange={vi.fn()} />)
     expect(screen.getByText("设置文件权限未能收紧")).toBeInTheDocument()
     expect(screen.getByText("无法将设置文件权限设为 0600")).toBeInTheDocument()
+  })
+
+  it("offers only realtime order recognition providers", async () => {
+    const user = userEvent.setup()
+    render(<SettingsPage settings={settings} onSettingsChange={vi.fn()} />)
+
+    await user.click(screen.getAllByRole("combobox")[0])
+
+    expect(screen.getByRole("option", { name: "Ollama" })).toBeInTheDocument()
+    expect(screen.getByRole("option", { name: "OpenAI 兼容" })).toBeInTheDocument()
+    expect(screen.queryByText(/阿里云百炼/)).not.toBeInTheDocument()
   })
 })
