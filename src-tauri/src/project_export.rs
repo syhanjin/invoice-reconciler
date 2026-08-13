@@ -4,7 +4,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use lopdf::{Document, Object, dictionary};
-use printpdf::{Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, Pt, RawImage, XObjectTransform};
+use printpdf::{
+    ImageCompression, ImageOptimizationOptions, Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, Pt,
+    RawImage, XObjectTransform,
+};
 use rust_xlsxwriter::{Color, Format, FormatBorder, Workbook};
 use tauri::State;
 use uuid::Uuid;
@@ -145,13 +148,13 @@ fn generate_archive(snapshot: &ProjectExportSnapshot, destination: &Path) -> App
     let combined_pdf = generate_combined_pdf(snapshot)?;
     let file = File::create(destination)?;
     let mut archive = ZipWriter::new(file);
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    write_bytes(&mut archive, EXCEL_NAME, &excel, options)?;
-    write_bytes(&mut archive, COMBINED_PDF_NAME, &combined_pdf, options)?;
+    let compressed = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    write_bytes(&mut archive, EXCEL_NAME, &excel, compressed)?;
+    write_bytes(&mut archive, COMBINED_PDF_NAME, &combined_pdf, compressed)?;
 
     for (index, invoice) in snapshot.invoices.iter().enumerate() {
         let folder = material_folder_name(index, invoice);
-        let invoice_extension = required_extension(&invoice.preview_path, "发票独立材料")?;
+        let invoice_extension = required_extension(&invoice.material_path, "发票独立材料")?;
         let invoice_label = invoice
             .member
             .invoice_number
@@ -162,7 +165,12 @@ fn generate_archive(snapshot: &ProjectExportSnapshot, destination: &Path) -> App
             safe_component(invoice_label, "发票", 80),
             invoice_extension
         );
-        write_file(&mut archive, &invoice_name, &invoice.preview_path, options)?;
+        write_file(
+            &mut archive,
+            &invoice_name,
+            &invoice.material_path,
+            material_file_options(&invoice.material_path),
+        )?;
 
         for (order_index, order) in invoice.orders.iter().enumerate() {
             let extension = required_extension(&order.image_path, "订单原文件")?;
@@ -173,7 +181,12 @@ fn generate_archive(snapshot: &ProjectExportSnapshot, destination: &Path) -> App
                 safe_component(label, "订单", 80),
                 extension
             );
-            write_file(&mut archive, &order_name, &order.image_path, options)?;
+            write_file(
+                &mut archive,
+                &order_name,
+                &order.image_path,
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )?;
         }
     }
     archive
@@ -264,15 +277,15 @@ fn generate_combined_pdf(snapshot: &ProjectExportSnapshot) -> AppResult<Vec<u8>>
         for order in &invoice.orders {
             let bytes = std::fs::read(&order.image_path)?;
             let document = image_document(&bytes, "订单", &mut warnings)?;
-            let bytes = document.save(&PdfSaveOptions::default(), &mut warnings);
+            let bytes = document.save(&lossless_image_save_options(), &mut warnings);
             documents.push(
                 Document::load_mem(&bytes)
                     .map_err(|error| AppError::File(format!("订单单页 PDF 无法解析：{error}")))?,
             );
         }
-        let bytes = std::fs::read(&invoice.preview_path)?;
+        let bytes = std::fs::read(&invoice.material_path)?;
         if invoice
-            .preview_path
+            .material_path
             .extension()
             .and_then(|value| value.to_str())
             .is_some_and(|value| value.eq_ignore_ascii_case("pdf"))
@@ -283,7 +296,7 @@ fn generate_combined_pdf(snapshot: &ProjectExportSnapshot) -> AppResult<Vec<u8>>
             );
         } else {
             let document = image_document(&bytes, "发票", &mut warnings)?;
-            let bytes = document.save(&PdfSaveOptions::default(), &mut warnings);
+            let bytes = document.save(&lossless_image_save_options(), &mut warnings);
             documents.push(
                 Document::load_mem(&bytes)
                     .map_err(|error| AppError::File(format!("发票单页 PDF 无法解析：{error}")))?,
@@ -291,6 +304,37 @@ fn generate_combined_pdf(snapshot: &ProjectExportSnapshot) -> AppResult<Vec<u8>>
         }
     }
     merge_pdf_documents(documents)
+}
+
+fn lossless_image_save_options() -> PdfSaveOptions {
+    PdfSaveOptions {
+        image_optimization: Some(ImageOptimizationOptions {
+            quality: None,
+            max_image_size: None,
+            dither_greyscale: None,
+            convert_to_greyscale: Some(false),
+            auto_optimize: Some(false),
+            format: Some(ImageCompression::Flate),
+        }),
+        ..PdfSaveOptions::default()
+    }
+}
+
+fn material_file_options(path: &Path) -> SimpleFileOptions {
+    let image = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "bmp" | "gif" | "jpeg" | "jpg" | "png" | "tif" | "tiff" | "webp"
+            )
+        });
+    SimpleFileOptions::default().compression_method(if image {
+        CompressionMethod::Stored
+    } else {
+        CompressionMethod::Deflated
+    })
 }
 
 fn merge_pdf_documents(mut documents: Vec<Document>) -> AppResult<Vec<u8>> {
@@ -684,15 +728,21 @@ mod tests {
     #[tokio::test]
     async fn archive_contains_ordered_materials_and_combined_pages() {
         let directory = tempfile::tempdir().unwrap();
-        let order_a = directory.path().join("order-a.png");
+        let order_a = directory.path().join("order-a.jpg");
         let order_b = directory.path().join("order-b.png");
         let invoice = directory.path().join("invoice.pdf");
-        image::RgbImage::from_pixel(320, 180, image::Rgb([220, 20, 60]))
-            .save(&order_a)
-            .unwrap();
+        let mut order_a_image = image::RgbImage::new(320, 180);
+        for (x, y, pixel) in order_a_image.enumerate_pixels_mut() {
+            *pixel = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
+        }
+        order_a_image.save(&order_a).unwrap();
         image::RgbImage::from_pixel(180, 320, image::Rgb([30, 144, 255]))
             .save(&order_b)
             .unwrap();
+        let order_a_bytes = std::fs::read(&order_a).unwrap();
+        let order_b_bytes = std::fs::read(&order_b).unwrap();
+        let order_a_pixels = image::open(&order_a).unwrap().into_rgb8().into_raw();
+        let order_b_pixels = image::open(&order_b).unwrap().into_rgb8().into_raw();
         write_pdf(&invoice, 2);
         let public_orders = vec![
             ProjectOrderSummary {
@@ -736,7 +786,7 @@ mod tests {
                     blocking_reason: None,
                     orders: public_orders,
                 },
-                preview_path: invoice,
+                material_path: invoice,
                 orders: vec![
                     ProjectExportOrder {
                         id: "order-a".into(),
@@ -824,6 +874,8 @@ mod tests {
         assert!(first_order.0 > first_order.1);
         assert!(second_order.0 < second_order.1);
         assert_eq!(first_invoice, (595.0, 842.0));
+        assert_lossless_page_image(&combined, 1, 320, 180, &order_a_pixels);
+        assert_lossless_page_image(&combined, 2, 180, 320, &order_b_pixels);
         let folder = "001_办公_用品、墨盒_10.00";
         let mut invoice_pdf = Vec::new();
         archive
@@ -838,16 +890,21 @@ mod tests {
                 .len(),
             2
         );
-        assert!(
-            archive
-                .by_name(&format!("{folder}/订单_01_A_1.png"))
-                .is_ok()
-        );
-        assert!(
-            archive
-                .by_name(&format!("{folder}/订单_02_B-2.png"))
-                .is_ok()
-        );
+        let mut archived_order_a = Vec::new();
+        let mut order_entry = archive
+            .by_name(&format!("{folder}/订单_01_A_1.jpg"))
+            .unwrap();
+        assert_eq!(order_entry.compression(), CompressionMethod::Stored);
+        order_entry.read_to_end(&mut archived_order_a).unwrap();
+        drop(order_entry);
+        assert_eq!(archived_order_a, order_a_bytes);
+        let mut archived_order_b = Vec::new();
+        let mut order_entry = archive
+            .by_name(&format!("{folder}/订单_02_B-2.png"))
+            .unwrap();
+        assert_eq!(order_entry.compression(), CompressionMethod::Stored);
+        order_entry.read_to_end(&mut archived_order_b).unwrap();
+        assert_eq!(archived_order_b, order_b_bytes);
     }
 
     #[tokio::test]
@@ -883,7 +940,7 @@ mod tests {
                     blocking_reason: None,
                     orders: Vec::new(),
                 },
-                preview_path: directory.path().join("missing.pdf"),
+                material_path: directory.path().join("missing.pdf"),
                 orders: Vec::new(),
             }],
         };
@@ -930,5 +987,46 @@ mod tests {
             number(&media_box[2]) - number(&media_box[0]),
             number(&media_box[3]) - number(&media_box[1]),
         )
+    }
+
+    fn assert_lossless_page_image(
+        document: &Document,
+        page: u32,
+        expected_width: i64,
+        expected_height: i64,
+        expected_pixels: &[u8],
+    ) {
+        let page_id = document.get_pages()[&page];
+        let page = document.get_dictionary(page_id).unwrap();
+        let resources = document
+            .dereference(page.get(b"Resources").unwrap())
+            .unwrap()
+            .1
+            .as_dict()
+            .unwrap();
+        let xobjects = document
+            .dereference(resources.get(b"XObject").unwrap())
+            .unwrap()
+            .1
+            .as_dict()
+            .unwrap();
+        let image_id = xobjects
+            .iter()
+            .find_map(|(_, value)| value.as_reference().ok())
+            .unwrap();
+        let stream = document.get_object(image_id).unwrap().as_stream().unwrap();
+        assert_eq!(
+            stream.dict.get(b"Width").unwrap().as_i64().unwrap(),
+            expected_width
+        );
+        assert_eq!(
+            stream.dict.get(b"Height").unwrap().as_i64().unwrap(),
+            expected_height
+        );
+        assert_eq!(
+            stream.dict.get(b"Filter").unwrap().as_name().unwrap(),
+            b"FlateDecode"
+        );
+        assert_eq!(stream.decompressed_content().unwrap(), expected_pixels);
     }
 }

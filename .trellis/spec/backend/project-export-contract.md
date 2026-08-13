@@ -33,8 +33,9 @@ projects 1 -- * project_invoices * -- 1 invoices
 - For each member, `invoiceAmountFen = invoices.total_fen`, `orderAmountFen = sum(confirmed orders.paid_amount_fen)`, and `actualAmountFen = min(invoiceAmountFen, orderAmountFen)`. Project actual amount is the sum of currently valid member actual amounts. Money remains integer fen until XLSX/UI/file-name presentation.
 - Export requires a non-empty project. Every member must have a persisted confirmed match containing at least one order, CNY/non-negative invoice money, non-negative order money, a readable independent invoice preview, and readable matched-order managed images. Backend revalidates current SQLite and filesystem state before generating anything.
 - The output name is `{safe project name}_{actual yuan to two decimals}.zip`. The ZIP root contains `发票明细.xlsx`, `组合材料.pdf`, and one `NNN_{product summary}_{actual amount}` folder per member.
-- Each member folder contains the independent invoice preview and every matched order image. It must not include the original uploaded invoice source because that source may contain other invoices.
-- The XLSX sheet has one ordered row per member and numeric yuan cells for invoice, order, and actual amounts. The combined PDF appends every matched order as one fitted A4 image page, then every page of the independent invoice preview. Use `lopdf` object merging for existing PDF pages; do not parse and redraw them.
+- Each member folder contains one independent invoice material and every matched order image. Prefer the managed original invoice source only when its complete successful OCR response belongs to that one invoice, no source page contains multiple recognized items, and a PDF invoice spans the complete source PDF. Otherwise use the independent preview: keep partial PDFs as extracted PDF pages, and use an image only when same-page invoices require an OCR cut or local crop. Never export a source that may contain another invoice.
+- Preserve independent order and invoice image bytes in the ZIP and store image entries without ZIP recompression. The XLSX sheet has one ordered row per member and numeric yuan cells for invoice, order, and actual amounts.
+- The combined PDF appends every matched order as one fitted A4 image page, then every page of the selected independent invoice material. Image pages retain their original pixel dimensions, are never downsampled, and use only lossless PDF image encoding. Use `lopdf` object merging for existing PDF pages; do not rasterize, parse, or redraw them.
 - Generate to a same-directory temporary file. A new same-name target that appears during generation still requires overwrite acceptance. Confirmed replacement uses backup/restore; any generation or replacement failure cleans temporary output and preserves the prior archive whenever restoration succeeds.
 
 ## 4. Validation & Error Matrix
@@ -52,17 +53,19 @@ projects 1 -- * project_invoices * -- 1 invoices
 
 ## 5. Good/Base/Bad Cases
 
-- Good: a two-order confirmed invoice uses the order sum, chooses the lower invoice/order amount, stores both order images, and emits two order pages before all invoice pages.
+- Good: a two-order confirmed invoice uses the order sum, chooses the lower invoice/order amount, stores both order images byte-for-byte, and emits two lossless order pages before all invoice pages.
+- Good: a complete single-invoice PDF is merged from the managed source; a partial multi-invoice PDF uses extracted PDF pages; same-page invoices use their independent cut or cropped images.
 - Good: deleting the first invoice from a project compacts the second member from position `1` to `0`, so a later append cannot violate the unique position constraint.
 - Base: an invoice can be organized before matching; the project remains editable but export stays disabled until confirmation and file checks pass.
-- Bad: trusting frontend `exportable`, storing yuan as float, exporting the original multi-invoice upload, silently overwriting a ZIP, or leaving position gaps after a cascade violates this contract.
+- Bad: trusting frontend `exportable`, storing yuan as float, exporting an unproven multi-invoice source, rasterizing a PDF, downsampling or JPEG-reencoding an image, silently overwriting a ZIP, or leaving position gaps after a cascade violates this contract.
 
 ## 6. Tests Required
 
 - Migration tests: fresh database, seeded m0006 upgrade, interrupted m0007 recovery, one-project-per-invoice uniqueness, project-position uniqueness, and both cascade directions.
 - Repository tests: unique names, assignment preview/acceptance, transactional reassignment, removal and invoice-deletion compaction, complete-set reorder rejection, and the less/equal/greater actual-amount cases.
 - Eligibility tests: empty project, unconfirmed member, missing/negative invoice or order money, non-CNY, empty match, missing invoice preview, and missing order image.
-- Archive tests must reopen the ZIP/XLSX/PDF and assert fixed root names, safe folder/file names, all 16 XLSX headers, numeric money cells, original invoice-preview preservation, order-first page sequence/count, and multi-page invoice retention.
+- Archive tests must reopen the ZIP/XLSX/PDF and assert fixed root names, safe folder/file names, all 16 XLSX headers, numeric money cells, byte-for-byte independent image preservation, order-first page sequence/count, original image dimensions with lossless PDF filters, and multi-page invoice retention without rasterization.
+- Material-selection tests must cover complete single-invoice images/PDFs, partial PDF ranges, same-page multi-invoice sources, malformed or partial OCR audits, and missing source fallback.
 - Failure tests must prove an existing ZIP survives generation failure and temporary files are removed. Test `destination_exists` and confirmed overwrite behavior at the command/service boundary.
 - Run Rust formatting, Clippy with warnings denied, and the complete Rust test suite.
 
@@ -81,4 +84,26 @@ Correct:
 let actual_fen = invoice_fen.min(order_fen);
 generate_archive(&snapshot, &temporary)?;
 // Install only after generation succeeds; backup and restore a confirmed overwrite.
+```
+
+Wrong:
+
+```rust
+document.save(&PdfSaveOptions::default(), &mut warnings);
+// The default image optimization may downsize and JPEG-reencode color images.
+```
+
+Correct:
+
+```rust
+let options = PdfSaveOptions {
+    image_optimization: Some(ImageOptimizationOptions {
+        max_image_size: None,
+        auto_optimize: Some(false),
+        format: Some(ImageCompression::Flate),
+        ..Default::default()
+    }),
+    ..Default::default()
+};
+document.save(&options, &mut warnings);
 ```

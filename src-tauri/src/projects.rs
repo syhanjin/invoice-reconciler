@@ -39,6 +39,12 @@ struct ProjectMemberRow {
     total_fen: Option<i64>,
     currency: String,
     preview_path: String,
+    page_start: i32,
+    page_end: i32,
+    raw_invoice_json: String,
+    source_path: Option<String>,
+    media_type: String,
+    raw_response_json: Option<String>,
     confirmed_source: Option<String>,
 }
 
@@ -61,7 +67,7 @@ pub(crate) struct ProjectExportOrder {
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectExportInvoice {
     pub member: ProjectInvoiceMember,
-    pub preview_path: PathBuf,
+    pub material_path: PathBuf,
     pub orders: Vec<ProjectExportOrder>,
 }
 
@@ -157,8 +163,10 @@ impl Database {
             DbBackend::Sqlite,
             "SELECT i.id,pi.position,i.type_description,i.invoice_code,i.invoice_number,i.invoice_date,\
              i.buyer_name,i.buyer_tax_id,i.seller_name,i.seller_tax_id,i.amount_fen,i.tax_fen,\
-             i.total_fen,i.currency,i.preview_path,m.source confirmed_source \
+             i.total_fen,i.currency,i.preview_path,i.page_start,i.page_end,i.raw_invoice_json,\
+             t.source_path,t.media_type,t.raw_response_json,m.source confirmed_source \
              FROM project_invoices pi JOIN invoices i ON i.id=pi.invoice_id \
+             JOIN invoice_tasks t ON t.id=i.task_id \
              LEFT JOIN invoice_matches m ON m.invoice_id=i.id \
              WHERE pi.project_id=? ORDER BY pi.position,i.id",
             [project_value.id.clone().into()],
@@ -206,7 +214,11 @@ impl Database {
                 }
             }
             let preview_path = resolve_invoice_path(app_data, &row.preview_path).ok();
-            let preview_available = preview_path.as_ref().is_some_and(|path| path.is_file());
+            let material_path = preview_path
+                .as_ref()
+                .and_then(|_| preferred_invoice_source(app_data, &row))
+                .or_else(|| preview_path.clone());
+            let material_available = material_path.as_ref().is_some_and(|path| path.is_file());
             let confirmed = row.confirmed_source.is_some();
             let order_amount_fen = confirmed
                 .then(|| {
@@ -229,10 +241,10 @@ impl Database {
                 invoice_amount_fen,
                 order_amount_fen,
                 &public_orders,
-                preview_available,
+                material_available,
                 order_files_available,
             );
-            let file_available = preview_available && order_files_available;
+            let file_available = material_available && order_files_available;
             let member = ProjectInvoiceMember {
                 id: row.id,
                 position: row.position,
@@ -257,7 +269,7 @@ impl Database {
             };
             invoices.push(ProjectExportInvoice {
                 member,
-                preview_path: preview_path.unwrap_or_default(),
+                material_path: material_path.unwrap_or_default(),
                 orders: export_orders,
             });
         }
@@ -459,6 +471,79 @@ impl Database {
         transaction.commit().await?;
         self.project_detail(&request.project_id, app_data).await
     }
+}
+
+fn preferred_invoice_source(app_data: &Path, row: &ProjectMemberRow) -> Option<PathBuf> {
+    if !task_response_belongs_only_to_invoice(
+        row.raw_response_json.as_deref()?,
+        &row.raw_invoice_json,
+    ) {
+        return None;
+    }
+    let source = resolve_invoice_path(app_data, row.source_path.as_deref()?).ok()?;
+    if !source.is_file() {
+        return None;
+    }
+    if row.media_type != "application/pdf" {
+        return Some(source);
+    }
+    if row.page_start != 1 {
+        return None;
+    }
+    let page_count = lopdf::Document::load(&source).ok()?.get_pages().len();
+    (usize::try_from(row.page_end).ok()? == page_count).then_some(source)
+}
+
+fn task_response_belongs_only_to_invoice(task_response: &str, invoice_raw: &str) -> bool {
+    let Ok(task_response) = serde_json::from_str::<serde_json::Value>(task_response) else {
+        return false;
+    };
+    let Some(response_items) = task_response
+        .pointer("/Response/MixedInvoiceItems")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    if response_items.is_empty()
+        || response_items.iter().any(|item| {
+            item.get("Code")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|code| code != "OK")
+        })
+    {
+        return false;
+    }
+    let mut pages = HashSet::new();
+    if response_items.iter().any(|item| {
+        item.get("Page")
+            .and_then(serde_json::Value::as_i64)
+            .is_none_or(|page| !pages.insert(page))
+    }) {
+        return false;
+    }
+    let Ok(invoice_raw) = serde_json::from_str::<serde_json::Value>(invoice_raw) else {
+        return false;
+    };
+    let invoice_items = match &invoice_raw {
+        serde_json::Value::Array(items) => items.iter().collect::<Vec<_>>(),
+        serde_json::Value::Object(_) => vec![&invoice_raw],
+        _ => return false,
+    };
+    if invoice_items.len() != response_items.len() {
+        return false;
+    }
+    let mut matched = vec![false; response_items.len()];
+    invoice_items.into_iter().all(|invoice_item| {
+        let Some(index) = response_items
+            .iter()
+            .enumerate()
+            .position(|(index, response_item)| !matched[index] && response_item == invoice_item)
+        else {
+            return false;
+        };
+        matched[index] = true;
+        true
+    })
 }
 
 fn detail_from_members(
@@ -820,6 +905,73 @@ pub async fn reorder_project_invoices(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lopdf::dictionary;
+
+    fn member_row(
+        source_path: Option<String>,
+        media_type: &str,
+        page_start: i32,
+        page_end: i32,
+        raw_invoice_json: serde_json::Value,
+        raw_response_json: serde_json::Value,
+    ) -> ProjectMemberRow {
+        ProjectMemberRow {
+            id: "invoice".into(),
+            position: 0,
+            type_description: "发票".into(),
+            invoice_code: None,
+            invoice_number: None,
+            invoice_date: None,
+            buyer_name: None,
+            buyer_tax_id: None,
+            seller_name: None,
+            seller_tax_id: None,
+            amount_fen: None,
+            tax_fen: None,
+            total_fen: Some(100),
+            currency: "CNY".into(),
+            preview_path: "invoices/previews/invoice.png".into(),
+            page_start,
+            page_end,
+            raw_invoice_json: raw_invoice_json.to_string(),
+            source_path,
+            media_type: media_type.into(),
+            raw_response_json: Some(raw_response_json.to_string()),
+            confirmed_source: None,
+        }
+    }
+
+    fn response(items: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({"Response": {"MixedInvoiceItems": items}})
+    }
+
+    fn write_test_pdf(path: &Path, page_count: usize) {
+        let mut document = lopdf::Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let page_ids = (0..page_count)
+            .map(|_| {
+                document.add_object(dictionary! {
+                    "Type" => "Page",
+                    "Parent" => pages_id,
+                    "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+                })
+            })
+            .collect::<Vec<_>>();
+        document.objects.insert(
+            pages_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids.iter().copied().map(lopdf::Object::Reference).collect::<Vec<_>>(),
+                "Count" => page_count as i64,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+        document.save(path).unwrap();
+    }
 
     async fn seed(database: &Database) {
         database.execute_test_statement(
@@ -837,6 +989,84 @@ mod tests {
         assert_eq!(actual_amount(Some(1_500), Some(1_300)), Some(1_300));
         assert_eq!(actual_amount(Some(1_300), Some(1_300)), Some(1_300));
         assert_eq!(actual_amount(None, Some(1_300)), None);
+    }
+
+    #[test]
+    fn complete_single_invoice_sources_are_preferred_without_rasterizing_pdfs() {
+        let app_data = tempfile::tempdir().unwrap();
+        let sources = app_data.path().join("invoices/sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let image_source = sources.join("invoice.png");
+        std::fs::write(&image_source, b"original image").unwrap();
+        let one_item = serde_json::json!({"Code": "OK", "Page": 1, "SubType": "VatInvoice"});
+        let image_row = member_row(
+            Some("invoices/sources/invoice.png".into()),
+            "image/png",
+            1,
+            1,
+            one_item.clone(),
+            response(vec![one_item]),
+        );
+        assert_eq!(
+            preferred_invoice_source(app_data.path(), &image_row),
+            Some(image_source)
+        );
+
+        let pdf_source = sources.join("invoice.pdf");
+        write_test_pdf(&pdf_source, 2);
+        let first = serde_json::json!({"Code": "OK", "Page": 1, "SubType": "VatInvoice"});
+        let second = serde_json::json!({"Code": "OK", "Page": 2, "SubType": "VatInvoice"});
+        let pdf_row = member_row(
+            Some("invoices/sources/invoice.pdf".into()),
+            "application/pdf",
+            1,
+            2,
+            serde_json::json!([first.clone(), second.clone()]),
+            response(vec![first, second]),
+        );
+        assert_eq!(
+            preferred_invoice_source(app_data.path(), &pdf_row),
+            Some(pdf_source)
+        );
+    }
+
+    #[test]
+    fn partial_or_mixed_invoice_sources_fall_back_to_independent_previews() {
+        let app_data = tempfile::tempdir().unwrap();
+        let sources = app_data.path().join("invoices/sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let pdf_source = sources.join("invoice.pdf");
+        write_test_pdf(&pdf_source, 3);
+        let only_item = serde_json::json!({"Code": "OK", "Page": 2, "SubType": "VatInvoice"});
+        let partial_pdf = member_row(
+            Some("invoices/sources/invoice.pdf".into()),
+            "application/pdf",
+            2,
+            2,
+            only_item.clone(),
+            response(vec![only_item]),
+        );
+        assert_eq!(
+            preferred_invoice_source(app_data.path(), &partial_pdf),
+            None
+        );
+
+        let image_source = sources.join("mixed.png");
+        std::fs::write(image_source, b"mixed image").unwrap();
+        let first = serde_json::json!({"Code": "OK", "Page": 1, "SubType": "VatInvoice"});
+        let second = serde_json::json!({"Code": "OK", "Page": 1, "SubType": "TrainTicket"});
+        let mixed_image = member_row(
+            Some("invoices/sources/mixed.png".into()),
+            "image/png",
+            1,
+            1,
+            first.clone(),
+            response(vec![first, second]),
+        );
+        assert_eq!(
+            preferred_invoice_source(app_data.path(), &mixed_image),
+            None
+        );
     }
 
     #[test]

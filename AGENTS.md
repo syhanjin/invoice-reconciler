@@ -76,7 +76,11 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
   every member has a valid confirmed match, CNY/non-negative amounts, and readable
   independent invoice/order files. Keep money in integer fen, compute actual amount as
   `min(invoice total, confirmed order sum)`, preserve project order across XLSX/folders/PDF,
-  and use temporary generation plus recoverable overwrite for the final ZIP.
+  and use temporary generation plus recoverable overwrite for the final ZIP. Prefer an
+  original invoice source only when it is proven to contain exactly that invoice; otherwise
+  preserve extracted PDF pages or use a same-page cut/crop. Never rasterize PDF materials,
+  downsample exported images, or use lossy image re-encoding. Preserve independent image
+  bytes in the ZIP and use lossless image streams in the combined PDF.
 - Deleting an imported order must preserve its immutable completion log while
   removing the order-owned managed screenshot to release the hash for reimport.
   Deleting an invoice records a source-hash plus
