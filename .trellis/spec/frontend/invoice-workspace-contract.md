@@ -17,7 +17,7 @@ api.listInvoiceBatches(query): Promise<InvoiceBatchesPage>
 api.getInvoiceBatch(id): Promise<InvoiceBatchDetail>
 api.retryInvoiceTask(id, forcedType): Promise<InvoiceBatchDetail>
 api.confirmInvoiceSplit(taskId, groups): Promise<InvoiceBatchDetail>
-api.listInvoices(query): Promise<InvoicesPage>
+api.listInvoices(query: { ..., projectId?: string, unassignedOnly?: boolean }): Promise<InvoicesPage>
 api.getInvoice(id): Promise<InvoiceDetail>
 api.updateInvoice(request): Promise<InvoiceDetail>
 api.deleteInvoice(id): Promise<void>
@@ -32,6 +32,7 @@ api.listenForInvoiceTaskUpdates(handler): Promise<UnlistenFn>
 - The invoice task tab is enabled and uses separate invoice batch state/events. A retry type is optional and may differ from the original batch type.
 - Review group numbers map every OCR result to one group. Equal values merge, distinct values split, and the dialog states that confirmation does not call OCR again.
 - Ledger query state owns page, page size `20|50|100`, committed search, subtype, date range, possible-duplicate filter, sort field, and direction. Query-changing controls clear selection and reset page one.
+- Ledger query state also owns the all/unassigned/specific-project filter. Rows display nullable membership, and selected rows can assign, explicitly reassign after a conflict preview, or remove project membership without changing invoice/order/match records.
 - Selection is limited to the current server page. Bulk delete sends one request, reports partial results, clears successful IDs, retains failed visible IDs, and refreshes the ledger.
 - Detail fields are editable through React Hook Form/Zod; yuan strings become integer fen. Raw Tencent JSON is read-only.
 - Absolute preview paths come only from `get_invoice`. Images use `convertFileSrc`; PDFs render inside the sheet through `pdfjs-dist` and its bundled worker.

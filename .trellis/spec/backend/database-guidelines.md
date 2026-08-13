@@ -31,6 +31,8 @@ Do not add a second application-facing database library. SeaORM may use SQLx int
 | `invoice_recovery_markers` | `(source_sha256, recovery_identity)` | records deleted subtype/number identities and optionally binds one recovery task |
 | `invoice_matches` | invoice UUIDv7 text | one confirmed relationship per invoice; source is `automatic` or `custom` |
 | `invoice_match_orders` | `(invoice_id, order_id)` | order ID is globally unique and positions are unique within one invoice |
+| `projects` | UUIDv7 text | trimmed project name is unique; deletion owns membership only |
+| `project_invoices` | `(project_id, invoice_id)` | invoice ID and project position are unique; both parents cascade membership cleanup |
 
 Money is stored as integer fen. Date/time values are normalized strings in `YYYY-MM-DD HH:mm` form. Booleans use SQLite integers through SeaORM models. The pool task, order, and managed image basename share the same UUID.
 
@@ -47,6 +49,7 @@ Money is stored as integer fen. Date/time values are normalized strings in `YYYY
 - External order numbers may repeat. After inserting, editing, or deleting an order, recalculate `possible_duplicate` for every affected non-empty order-number group.
 - Treat SQLite as the source of truth. In-memory queue and Jotai state are projections, not durable state.
 - Keep matching candidates ephemeral. Persist only confirmed `invoice_matches` and members; use one transaction for batch confirmation and rely on the unique order index as the final occupancy guard.
+- Keep project membership ordered and transactional. Assignment appends, reassignment/removal compacts source positions, and invoice deletion compacts the affected project after the membership cascade so later appends cannot collide with a position gap.
 
 ## Migrations
 
@@ -94,3 +97,4 @@ Database transactions cannot include filesystem changes. Use explicit compensati
 - Bulk-delete partial-result coverage, preserved immutable import log, duplicate-group recalculation after successful items, and a fault-injection test proving the order, hash claim, and managed image are restored when database deletion fails.
 - Startup conversion of realtime pool `processing` to `failed`; m0006 conversion of legacy Batch-locked tasks to `failed/batch_api_removed`, preserving images, hashes, orders, matches, and provider/model log history.
 - Matching fresh-file/m0003-upgrade/interrupted-migration coverage, unique order occupancy, cascade cleanup, and atomic batch rollback.
+- Project fresh-file/m0006-upgrade/interrupted-migration coverage, unique name/invoice/position enforcement, cascade cleanup, reassignment rollback, and position compaction after membership or invoice deletion.

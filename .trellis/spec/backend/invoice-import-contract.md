@@ -22,7 +22,7 @@ cancel_invoice_task(request: { id: string }) -> boolean
 retry_invoice_task(request: { id: string, forcedType: number | null }) -> InvoiceBatchDetail
 confirm_invoice_split(request: { taskId: string, groups: number[][] }) -> InvoiceBatchDetail
 
-list_invoices(query: InvoicesQuery) -> InvoicesPage
+list_invoices(query: { ..., projectId?: string, unassignedOnly?: boolean }) -> InvoicesPage
 get_invoice(request: { id: string }) -> InvoiceDetail
 update_invoice(request: UpdateInvoiceRequest) -> InvoiceDetail
 delete_invoice(request: { id: string }) -> void
@@ -56,6 +56,7 @@ invoice_batches 1 -- * invoice_tasks 1 -- * invoices 1 -- * invoice_items
 - If one mixed response contains both successful and failed invoice items, persist the successful records and keep every failed item code in `warning_message`; never silently treat the source as fully recognized.
 - Reliable identity collision is a hard duplicate: no invoice row is committed, the task keeps RequestId/raw response/existing ID, previews are removed, and the duplicate source copy is deleted when possible. Weak number collisions remain in the ledger with `possibleDuplicate` on the full affected group.
 - Invoice edit recomputes reliable identity and both old/new weak duplicate groups transactionally. Delete uses file trash/restore compensation and removes the source only when deleting the final invoice for the task.
+- Invoice ledger rows include nullable project identity/name and support server-side project/unassigned filters. Deleting a project member relies on the membership cascade, then compacts and touches that project inside the invoice deletion transaction.
 - Invoice delete stores a recovery marker keyed by source SHA-256 plus normalized subtype/invoice number in the same transaction. Any unclaimed marker lets that source pass preflight and atomically binds to one recovery task. Recovery OCR persists only marked missing identities, skips ledger rows that still exist, ignores unrelated OCR results, and consumes only matched markers. Unmatched markers are released for another attempt. Once every marker is consumed, active managed sources claim the hash again. Tasks whose managed source has been cleared are audit history and never claim the hash.
 - `invoice-task-updated` is separate from the order event and carries the full task and batch detail.
 
