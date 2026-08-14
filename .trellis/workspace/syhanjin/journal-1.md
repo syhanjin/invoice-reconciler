@@ -737,3 +737,36 @@ Allowed complete repeated order and invoice dates in suspected-repurchase matchi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 22: 修复项目批量移除发票
+
+**Date**: 2026-08-15
+**Task**: 修复项目批量移除发票
+**Branch**: `main`
+
+### Summary
+
+在活动项目详情中增加发票全选与批量移除确认，复用现有事务命令，保留归档只读规则，并补充前后端回归测试与工作区规范。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b953bcb` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
