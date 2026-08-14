@@ -340,6 +340,9 @@ fn now() -> String {
 
 #[cfg(test)]
 mod tests {
+    use futures::future::try_join_all;
+    use sea_orm::TryGetable;
+
     use super::*;
     use crate::models::OrderImportLogsQuery;
 
@@ -396,5 +399,153 @@ mod tests {
             .unwrap();
         assert_eq!(logs.total, 1);
         assert_eq!(logs.items[0].task_id, "task-1");
+    }
+
+    #[tokio::test]
+    async fn concurrent_completions_import_and_reads_do_not_lock_or_lose_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("concurrent-orders.sqlite3");
+        let database = Database::connect(&path).await.unwrap();
+
+        let foreign_keys = database
+            .connection
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA foreign_keys",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(i64::try_get(&foreign_keys, "", "foreign_keys").unwrap(), 1);
+        let busy_timeout = database
+            .connection
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA busy_timeout",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(i64::try_get(&busy_timeout, "", "timeout").unwrap(), 5_000);
+
+        database
+            .create_pool_task(
+                "historical-order",
+                "historical.png",
+                "images/historical.png",
+                "historical-hash",
+            )
+            .await
+            .unwrap();
+        database.claim_next_realtime_task().await.unwrap().unwrap();
+        database
+            .persist_pool_order(
+                "historical-order",
+                &normalized("HISTORICAL"),
+                "ollama",
+                "vision",
+            )
+            .await
+            .unwrap();
+
+        let processing = (0..8)
+            .map(|index| {
+                (
+                    format!("processing-{index}"),
+                    format!("processing-{index}.png"),
+                    format!("images/processing-{index}.png"),
+                    format!("processing-hash-{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        database.create_pool_tasks(&processing).await.unwrap();
+        for _ in 0..processing.len() {
+            database.claim_next_realtime_task().await.unwrap().unwrap();
+        }
+
+        let completions = try_join_all(processing.iter().enumerate().map(|(index, task)| {
+            let database = database.clone();
+            let task_id = task.0.clone();
+            async move {
+                database
+                    .persist_pool_order(
+                        &task_id,
+                        &normalized(&format!("ORDER-{index}")),
+                        "ollama",
+                        "vision",
+                    )
+                    .await
+            }
+        }));
+        let imported = vec![
+            (
+                "new-import-a".to_owned(),
+                "new-a.png".to_owned(),
+                "images/new-a.png".to_owned(),
+                "new-hash-a".to_owned(),
+            ),
+            (
+                "new-import-b".to_owned(),
+                "new-b.png".to_owned(),
+                "images/new-b.png".to_owned(),
+                "new-hash-b".to_owned(),
+            ),
+        ];
+        let import_database = database.clone();
+        let read_orders_database = database.clone();
+        let read_pool_database = database.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+            tokio::try_join!(
+                completions,
+                import_database.create_pool_tasks(&imported),
+                read_orders_database.list_orders(Default::default()),
+                read_pool_database.order_import_pool(),
+            )
+        })
+        .await
+        .expect("concurrent order persistence timed out")
+        .unwrap();
+
+        let orders = database.list_orders(Default::default()).await.unwrap();
+        assert_eq!(orders.total, 9);
+        assert!(
+            orders
+                .items
+                .iter()
+                .any(|order| order.id == "historical-order")
+        );
+        let logs = database
+            .order_import_logs(OrderImportLogsQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(logs.total, 9);
+        let pool = database.order_import_pool().await.unwrap();
+        assert_eq!(pool.pending, 2);
+        assert_eq!(pool.processing, 0);
+        assert_eq!(pool.failed, 0);
+        assert_eq!(pool.tasks.len(), 2);
+
+        database.connection.clone().close().await.unwrap();
+        drop(database);
+        let reopened = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            reopened
+                .list_orders(Default::default())
+                .await
+                .unwrap()
+                .total,
+            9
+        );
+        assert_eq!(
+            reopened
+                .order_import_logs(OrderImportLogsQuery::default())
+                .await
+                .unwrap()
+                .total,
+            9
+        );
+        let reopened_pool = reopened.order_import_pool().await.unwrap();
+        assert_eq!(reopened_pool.pending, 2);
+        assert_eq!(reopened_pool.tasks.len(), 2);
     }
 }

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use chrono::Utc;
 use sea_orm::sea_query::Expr;
@@ -30,6 +31,19 @@ pub struct Database {
     pub(crate) connection: DatabaseConnection,
 }
 
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn sqlite_connect_options(url: String) -> ConnectOptions {
+    let mut options = ConnectOptions::new(url);
+    options
+        .max_connections(1)
+        .sqlx_logging(false)
+        .map_sqlx_sqlite_opts(|options| {
+            options.foreign_keys(true).busy_timeout(SQLITE_BUSY_TIMEOUT)
+        });
+    options
+}
+
 pub(crate) fn normalized_ledger_filter(value: Option<&str>) -> AppResult<Option<&str>> {
     match value
         .map(str::trim)
@@ -57,15 +71,8 @@ impl Database {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let mut options = ConnectOptions::new(format!("sqlite://{}?mode=rwc", path.display()));
-        options.max_connections(5).sqlx_logging(false);
+        let options = sqlite_connect_options(format!("sqlite://{}?mode=rwc", path.display()));
         let connection = sea_orm::Database::connect(options).await?;
-        connection
-            .execute(Statement::from_string(
-                DbBackend::Sqlite,
-                "PRAGMA foreign_keys = ON",
-            ))
-            .await?;
         Migrator::up(&connection, None).await?;
         connection
             .execute(Statement::from_sql_and_values(
@@ -120,15 +127,8 @@ impl Database {
 
     #[cfg(test)]
     pub async fn in_memory() -> AppResult<Self> {
-        let mut options = ConnectOptions::new("sqlite::memory:");
-        options.max_connections(1).sqlx_logging(false);
+        let options = sqlite_connect_options("sqlite::memory:".to_owned());
         let connection = sea_orm::Database::connect(options).await?;
-        connection
-            .execute(Statement::from_string(
-                DbBackend::Sqlite,
-                "PRAGMA foreign_keys = ON",
-            ))
-            .await?;
         Migrator::up(&connection, None).await?;
         Ok(Self { connection })
     }
