@@ -18,6 +18,7 @@ api.deleteProject(id): Promise<void>
 api.archiveProject(id): Promise<void>
 api.unarchiveProject(id): Promise<void>
 api.assignInvoicesToProject(invoiceIds, projectId, acceptReassignment): Promise<AssignInvoicesResult>
+api.removeInvoicesFromProjects(invoiceIds): Promise<void>
 api.reorderProjectInvoices(projectId, invoiceIds): Promise<ProjectDetail>
 api.exportProject(id, outputDirectory, overwrite): Promise<ExportProjectResult>
 api.retryMatchSummary(invoiceId): Promise<void>
@@ -29,7 +30,8 @@ Project summaries/details expose nullable `archivedAt`, aggregate `summaryStatus
 
 - Project is a first-level operational workspace. A segmented active/archived view sends `archived: false|true`; both views support search, paging, detail, current valid actual amount, export status, and delete.
 - Project detail renders backend-provided ordered members, match state, `displayName`, summary state, invoice/order/actual amounts, and the concrete blocking reason. Frontend must not recompute product fallback names, export eligibility, or amounts.
-- Active project detail supports rename, archive, and reorder. Move controls use Lucide icon buttons with tooltips, disable unavailable directions, and send the complete reordered ID list. A failed reorder reloads authoritative detail.
+- Active project detail supports rename, archive, reorder, and bulk member removal. Member checkboxes expose select-all and indeterminate states; a selected-member toolbar opens one confirmation before sending the complete selected invoice ID list. Successful removal clears selection, reloads authoritative project/list projections, invalidates the shared workspaces, and reports one result toast. Failed removal retains selection and confirmation for retry.
+- Move controls use Lucide icon buttons with tooltips, disable unavailable directions, and send the complete reordered ID list. Reorder and removal cannot run concurrently. A failed reorder reloads authoritative detail.
 - Archived detail displays archive state/time and allows only view, export, delete, and unarchive. Rename and reorder controls are hidden or disabled; archive/unarchive refreshes order, invoice, matching, and project projections through the shared invalidation atom.
 - Deleting a project requires confirmation and explains that only membership is removed. It must not imply invoices, orders, matches, or files are deleted.
 - Export is disabled when `exportable` is false and the backend reason stays visible. Eligible export opens a directory picker, never a free-form path field. A `destination_exists` response opens a second explicit overwrite dialog and reuses the selected directory with `overwrite: true`.
@@ -48,6 +50,8 @@ Project summaries/details expose nullable `archivedAt`, aggregate `summaryStatus
 | No projects exist | Keep “新建项目” available in the assignment target Select |
 | Any selected invoice has membership | Disable assignment before opening the dialog |
 | Archived detail is selected | Hide rename; disable reorder; keep export/delete/unarchive available |
+| Active members are selected | Expose one bulk remove action and describe that invoices, orders, matches, summaries, and files remain intact |
+| Member removal rejects | Keep selection and confirmation open; show the backend error |
 | Reorder rejects stale members | Show error and reload project detail |
 | Project is blocked | Disable export and display `blockingReason` |
 | Directory picker canceled | Invoke no export command |
@@ -59,6 +63,7 @@ Project summaries/details expose nullable `archivedAt`, aggregate `summaryStatus
 ## 5. Good/Base/Bad Cases
 
 - Good: select several ledger rows, assign to one project, then view the same membership and order in Project detail.
+- Good: select several active project members, confirm once, and remove their membership without deleting their invoices or confirmed matches.
 - Good: archive a project, continue to inspect/export it in the archived view, then unarchive and recover the same ordered members.
 - Base: an empty or partially matched project remains searchable/editable while export is visibly unavailable.
 - Base: a fully matched project with an offline model remains exportable using product fallback names and shows an informational summary alert.
@@ -66,9 +71,9 @@ Project summaries/details expose nullable `archivedAt`, aggregate `summaryStatus
 
 ## 6. Tests Required
 
-- Project-page tests: active/archived queries, detail selection, create/rename/archive/unarchive/delete confirmation, archived read-only controls, empty/blocked export state, aggregate summary counts/priority, summary fallback/non-blocking export/failed retry, move payload, directory cancel/select, `destination_exists`, and confirmed overwrite.
+- Project-page tests: active/archived queries, detail selection, member select-all/partial selection, successful and failed bulk removal, selection reset, create/rename/archive/unarchive/delete confirmation, archived read-only controls, empty/blocked export state, aggregate summary counts/priority, summary fallback/non-blocking export/failed retry, move payload, directory cancel/select, `destination_exists`, and confirmed overwrite.
 - Invoice-page tests: match/membership display, all/assigned/unassigned/specific query payloads, occupied-selection disablement, new-project atomic assignment, and absence of remove/reassignment controls.
-- API/type checks must cover archive command names, camel-case payloads, nullable `archivedAt`/membership, match status, blocking reason, and `destination_exists` error-code extraction.
+- API/type checks must cover archive and `remove_invoices_from_projects` command names, camel-case `invoiceIds` payloads, nullable `archivedAt`/membership, match status, blocking reason, and `destination_exists` error-code extraction.
 - Run `bun run lint`, `bun run test`, and `bun run build`; inspect the project split view at the Tauri minimum `920x640` and default `1360x840` sizes.
 
 ## 7. Wrong vs Correct
@@ -97,3 +102,7 @@ Correct: increment the shared workspace invalidation token after archive/unarchi
 Wrong: disable project export while a generated summary is pending or failed.
 
 Correct: trust backend `exportable`; summary state is informational because `displayName` always has a deterministic fallback.
+
+Wrong: remove selected members from React's current `detail.invoices` array and assume the project totals, ordering, and other workspaces now agree.
+
+Correct: call `api.removeInvoicesFromProjects(invoiceIds)`, reload project detail/list from the backend, clear selection only after success, and increment the shared workspace invalidation token.

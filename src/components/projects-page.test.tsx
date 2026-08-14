@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   deleteProject: vi.fn(),
   archiveProject: vi.fn(),
   unarchiveProject: vi.fn(),
+  removeInvoicesFromProjects: vi.fn(),
   reorderProjectInvoices: vi.fn(),
   exportProject: vi.fn(),
   retryMatchSummary: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("@/lib/api", () => ({
     deleteProject: mocks.deleteProject,
     archiveProject: mocks.archiveProject,
     unarchiveProject: mocks.unarchiveProject,
+    removeInvoicesFromProjects: mocks.removeInvoicesFromProjects,
     reorderProjectInvoices: mocks.reorderProjectInvoices,
     exportProject: mocks.exportProject,
     retryMatchSummary: mocks.retryMatchSummary,
@@ -52,6 +54,7 @@ describe("ProjectsPage", () => {
     mocks.deleteProject.mockResolvedValue(undefined)
     mocks.archiveProject.mockResolvedValue(undefined)
     mocks.unarchiveProject.mockResolvedValue(undefined)
+    mocks.removeInvoicesFromProjects.mockResolvedValue(undefined)
     mocks.open.mockResolvedValue("/tmp/export")
     mocks.exportProject.mockResolvedValue({ path: "/tmp/export/package.zip", invoiceCount: 2, actualAmountFen: 1800 })
   })
@@ -62,6 +65,65 @@ describe("ProjectsPage", () => {
     await screen.findByText("INV-A")
     await user.click(screen.getByRole("button", { name: "下移 INV-A" }))
     await waitFor(() => expect(mocks.reorderProjectInvoices).toHaveBeenCalledWith("project-a", ["invoice-b", "invoice-a"]))
+  })
+
+  it("bulk removes selected members only after confirmation", async () => {
+    const user = userEvent.setup()
+    render(<ProjectsPage refreshToken={0} />)
+    await screen.findByText("INV-A")
+
+    const selectAll = screen.getByRole("checkbox", { name: "选择当前项目全部发票" })
+    await user.click(selectAll)
+    expect(selectAll).toHaveAttribute("aria-checked", "true")
+    expect(screen.getByText("已选择 2 张")).toBeInTheDocument()
+    await user.click(selectAll)
+    expect(screen.queryByText("已选择 2 张")).not.toBeInTheDocument()
+    await user.click(screen.getByRole("checkbox", { name: "选择发票 INV-A" }))
+    expect(selectAll).toHaveAttribute("aria-checked", "mixed")
+    await user.click(screen.getByRole("checkbox", { name: "选择发票 INV-B" }))
+    expect(selectAll).toHaveAttribute("aria-checked", "true")
+    expect(screen.getByText("已选择 2 张")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "移出项目" }))
+    expect(mocks.removeInvoicesFromProjects).not.toHaveBeenCalled()
+    const dialog = screen.getByRole("dialog")
+    expect(within(dialog).getByText(/匹配关系、商品摘要和原文件都会保留/)).toBeInTheDocument()
+    await user.click(within(dialog).getByRole("button", { name: "确认移出" }))
+
+    await waitFor(() => expect(mocks.removeInvoicesFromProjects).toHaveBeenCalledWith(["invoice-a", "invoice-b"]))
+    await waitFor(() => expect(screen.queryByText("已选择 2 张")).not.toBeInTheDocument())
+    expect(mocks.getProject).toHaveBeenCalledTimes(2)
+    expect(mocks.listProjects).toHaveBeenCalledTimes(2)
+  })
+
+  it("keeps selection and confirmation open when removal fails", async () => {
+    const user = userEvent.setup()
+    mocks.removeInvoicesFromProjects.mockRejectedValueOnce({ message: "归档项目不能修改成员" })
+    render(<ProjectsPage refreshToken={0} />)
+    await user.click(await screen.findByRole("checkbox", { name: "选择发票 INV-A" }))
+    await user.click(screen.getByRole("button", { name: "移出项目" }))
+    await user.click(screen.getByRole("button", { name: "确认移出" }))
+
+    await waitFor(() => expect(mocks.removeInvoicesFromProjects).toHaveBeenCalledWith(["invoice-a"]))
+    expect(screen.getByRole("dialog")).toHaveTextContent("选中的 1 张发票")
+    await user.click(screen.getByRole("button", { name: "取消" }))
+    expect(screen.getByRole("checkbox", { name: "选择发票 INV-A" })).toBeChecked()
+  })
+
+  it("clears member selection when switching projects", async () => {
+    const user = userEvent.setup()
+    const otherSummary = { ...summary, id: "project-b", name: "采购项目", invoiceCount: 1, confirmedCount: 1, summaryCounts: { ...summary.summaryCounts, total: 1, succeeded: 1 } }
+    const otherDetail = { ...detail, ...otherSummary, invoices: [invoice("invoice-c", "INV-C", 0)] }
+    mocks.listProjects.mockResolvedValue({ items: [summary, otherSummary], total: 2, page: 1, pageSize: 20 })
+    mocks.getProject.mockImplementation((id: string) => Promise.resolve(id === "project-b" ? otherDetail : detail))
+    render(<ProjectsPage refreshToken={0} />)
+
+    await user.click(await screen.findByRole("checkbox", { name: "选择发票 INV-A" }))
+    expect(screen.getByText("已选择 1 张")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: /采购项目/ }))
+
+    expect(await screen.findByRole("checkbox", { name: "选择发票 INV-C" })).not.toBeChecked()
+    expect(screen.queryByText("已选择 1 张")).not.toBeInTheDocument()
   })
 
   it("creates a trimmed named project", async () => {
@@ -128,6 +190,8 @@ describe("ProjectsPage", () => {
     await user.click(await screen.findByRole("button", { name: "解除归档" }))
     await waitFor(() => expect(mocks.unarchiveProject).toHaveBeenCalledWith("project-a"))
     expect(screen.queryByRole("button", { name: "重命名项目" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("checkbox", { name: "选择当前项目全部发票" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "移出项目" })).not.toBeInTheDocument()
   })
 
   it("keeps export available with a fallback name and retries a failed summary", async () => {

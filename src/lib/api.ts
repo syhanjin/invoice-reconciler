@@ -133,6 +133,8 @@ export const api = {
   ) => invoke<AssignInvoicesResult>("assign_invoices_to_project", {
     request: { invoiceIds, projectId, acceptReassignment },
   }),
+  removeInvoicesFromProjects: (invoiceIds: string[]) =>
+    invoke<void>("remove_invoices_from_projects", { request: { invoiceIds } }),
   reorderProjectInvoices: (projectId: string, invoiceIds: string[]) =>
     invoke<ProjectDetail>("reorder_project_invoices", { request: { projectId, invoiceIds } }),
   exportProject: (id: string, outputDirectory: string, overwrite: boolean) =>

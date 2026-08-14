@@ -1110,6 +1110,7 @@ pub async fn reorder_project_invoices(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::invoice_match;
     use lopdf::dictionary;
 
     fn member_row(
@@ -1739,6 +1740,74 @@ mod tests {
                 )
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_removal_compacts_members_and_preserves_invoices_and_matches() {
+        let database = Database::in_memory().await.unwrap();
+        seed(&database).await;
+        database.execute_test_statement(
+            "INSERT INTO invoices (id,task_id,type,subtype,type_description,subtype_description,total_fen,currency,preview_path,raw_invoice_json,created_at,updated_at) VALUES
+               ('invoice-c','it',3,'VatInvoice','增值税发票','增值税发票',3000,'CNY','invoices/previews/c.pdf','{}','2026-08-13T00:00:00Z','2026-08-13T00:00:00Z');
+             INSERT INTO import_batches (id,platform,status,created_at) VALUES
+               ('order-batch','taobao','completed','2026-08-13T00:00:00Z');
+             INSERT INTO import_tasks (id,batch_id,original_file_name,image_sha256,status,retry_count,created_at) VALUES
+               ('order-a','order-batch','order-a.png','order-hash-a','succeeded',0,'2026-08-13T00:00:00Z'),
+               ('order-b','order-batch','order-b.png','order-hash-b','succeeded',0,'2026-08-13T00:00:00Z'),
+               ('order-c','order-batch','order-c.png','order-hash-c','succeeded',0,'2026-08-13T00:00:00Z');
+             INSERT INTO orders (id,platform,external_order_number,paid_amount_fen,raw_ocr_json,created_at,updated_at) VALUES
+               ('order-a','taobao','ORDER-A',1000,'{}','2026-08-13T00:00:00Z','2026-08-13T00:00:00Z'),
+               ('order-b','taobao','ORDER-B',2000,'{}','2026-08-13T00:00:00Z','2026-08-13T00:00:00Z'),
+               ('order-c','taobao','ORDER-C',3000,'{}','2026-08-13T00:00:00Z','2026-08-13T00:00:00Z');
+             INSERT INTO invoice_matches (invoice_id,source,confirmed_at) VALUES
+               ('invoice-a','automatic','2026-08-13T00:00:00Z'),
+               ('invoice-b','automatic','2026-08-13T00:00:00Z'),
+               ('invoice-c','automatic','2026-08-13T00:00:00Z');
+             INSERT INTO invoice_match_orders (invoice_id,order_id,position) VALUES
+               ('invoice-a','order-a',0),('invoice-b','order-b',0),('invoice-c','order-c',0);",
+        ).await.unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let project = database
+            .create_project("批量移除成员".into(), app_data.path())
+            .await
+            .unwrap();
+        database
+            .assign_invoices_to_project(AssignInvoicesToProjectRequest {
+                invoice_ids: vec!["invoice-a".into(), "invoice-b".into(), "invoice-c".into()],
+                project_id: project.id.clone(),
+                accept_reassignment: false,
+            })
+            .await
+            .unwrap();
+
+        database
+            .remove_invoices_from_projects(vec!["invoice-a".into(), "invoice-b".into()])
+            .await
+            .unwrap();
+
+        let memberships = project_invoice::Entity::find()
+            .filter(project_invoice::Column::ProjectId.eq(&project.id))
+            .order_by_asc(project_invoice::Column::Position)
+            .all(&database.connection)
+            .await
+            .unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].invoice_id, "invoice-c");
+        assert_eq!(memberships[0].position, 0);
+        assert_eq!(
+            invoice::Entity::find()
+                .count(&database.connection)
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            invoice_match::Entity::find()
+                .count(&database.connection)
+                .await
+                .unwrap(),
+            3
         );
     }
 
