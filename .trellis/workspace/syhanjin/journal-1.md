@@ -703,3 +703,37 @@ Allowed complete repeated order and invoice dates in suspected-repurchase matchi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 21: 修复订单并发导入数据库锁定
+
+**Date**: 2026-08-14
+**Task**: 修复订单并发导入数据库锁定
+**Branch**: `main`
+
+### Summary
+
+将 SQLite 运行时池收敛为单连接，并为底层连接统一启用外键和 busy timeout；新增 8 个并发完成事务、第二批导入、读取与重连的数据完整性回归测试，更新项目与后端持久化规范。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5e5e3fc` | (see git log) |
+| `56dcda0` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
