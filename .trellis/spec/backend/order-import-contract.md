@@ -56,6 +56,8 @@ Logs store provider/model, warning, filename, order ID, and completion time. His
 
 The process-wide queue consumes every pending task. New imports and explicit retries wake it. Each drain re-reads current private settings and respects the current concurrency ceiling. A provider change applies to newly claimed work; already-sent requests may finish.
 
+Recognition concurrency applies to provider requests, not SQLite connections. Keep the shared SQLite pool single-connection so concurrent task completions and a new import serialize their short durable transitions instead of exhausting a pool while competing for SQLite's single writer lock.
+
 Ollama sends `stream: false`, JSON Schema in `format`, `temperature: 0`, and `num_ctx: 16384`. OpenAI-compatible recognition sends a base64 data URL, strict `response_format.type = json_schema`, and bearer auth when configured. Both normalize the same order fields, store money as integer fen, normalize valid local time to `YYYY-MM-DD HH:mm`, and preserve provider JSON in `raw_ocr_json`.
 
 #### Batch-removal migration

@@ -25,6 +25,10 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - The desktop application uses Tauri v2 with a Rust backend.
 - The Rust persistence layer uses SeaORM and `sea-orm-migration` with SQLite.
   Do not introduce SQLx as a separate application-facing persistence layer.
+- Keep the runtime SQLite pool at one connection, with foreign keys and a
+  bounded busy timeout configured on the underlying connection. LLM/OCR work
+  may run concurrently, but its short SQLite transitions remain serialized;
+  do not increase database connections to implement recognition concurrency.
 - The frontend uses React, TypeScript, shadcn/ui, Jotai, Tailwind CSS v4, and Bun.
 - Use Bun for dependency management and frontend scripts. Do not introduce npm,
   pnpm, or Yarn lockfiles.

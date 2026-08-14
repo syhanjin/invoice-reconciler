@@ -55,6 +55,69 @@ Money is stored as integer fen. Date/time values are normalized strings in `YYYY
 - Keep project membership ordered and transactional. Assignment appends, reassignment/removal compacts source positions, and invoice deletion compacts the affected project after the membership cascade so later appends cannot collide with a position gap. Create-and-assign is one transaction; archived source and target projects reject membership mutations.
 - Treat project archive as a visibility flag, not deletion. Daily order/invoice/matching queries exclude the archived graph, but confirmed orders remain occupied and project detail/export keep reading the same membership, matches, and files.
 
+## Scenario: Serialized SQLite Runtime Access
+
+### 1. Scope / Trigger
+
+This contract applies whenever the SQLite connection options, recognition concurrency, a background queue, or a transaction that can run concurrently with another command changes. It prevents concurrent completion transactions from exhausting the pool while competing for SQLite's single writer lock.
+
+### 2. Signatures
+
+```text
+Database::connect(path) -> one-connection file-backed SeaORM pool
+Database::in_memory() -> one-connection test pool
+SqliteConnectOptions -> foreign_keys(true), busy_timeout(5 seconds)
+```
+
+### 3. Contracts
+
+- Keep `max_connections(1)` for the shared runtime database. Configure connection-scoped pragmas through `map_sqlx_sqlite_opts` so replacement connections receive the same settings.
+- LLM/OCR requests may retain their configured network concurrency. They must acquire the one database connection only for short claim, persistence, or failure transitions and must never hold it across a provider request or filesystem operation.
+- A transaction may call helpers that use its `DatabaseTransaction`; it must commit or roll back before calling another `Database` method backed by `self.connection`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Up to eight recognitions finish while another import creates tasks | Serialize database work; preserve every task/order/log without `SQLITE_BUSY` |
+| Orders or pool state are read during completion writes | Complete after the short write transition; never exhaust a multi-connection pool |
+| A connection is recreated | Reapply foreign keys and the five-second busy timeout |
+| Another application process holds the database beyond the timeout | Return the existing structured `database_error`; multi-process sharing is unsupported |
+
+### 5. Good/Base/Bad Cases
+
+- Good: eight provider requests run concurrently, then their completion transactions use SQLite one at a time while UI reads remain bounded.
+- Base: a short external file lock is absorbed by the busy timeout without changing durable state.
+- Bad: increasing SQLite pool size to match recognition concurrency lets deferred read-then-write transactions occupy every connection and compete for the single writer lock.
+
+### 6. Tests Required
+
+- Use a real temporary SQLite file and concurrently run eight order completions, a second task import, an order read, and a pool read under a timeout.
+- Assert the historical order survives, each completion creates exactly one order/log, the new tasks remain visible, and reopening the file returns the same durable projections.
+- Query `PRAGMA foreign_keys` and `PRAGMA busy_timeout` through the production connection path and assert `1` and `5000` respectively.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+// Recognition concurrency must not become SQLite writer concurrency.
+options.max_connections(5);
+connection.execute_unprepared("PRAGMA foreign_keys = ON").await?;
+```
+
+#### Correct
+
+```rust
+options
+    .max_connections(1)
+    .map_sqlx_sqlite_opts(|sqlite| {
+        sqlite
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5))
+    });
+```
+
 ## Migrations
 
 Add a new `MigrationTrait` implementation and append it to `Migrator::migrations()`. Never edit an applied migration merely to evolve an existing installation. Every new constraint or index needs a migration test that creates a fresh database and asserts both the schema behavior and the repository behavior it supports.
