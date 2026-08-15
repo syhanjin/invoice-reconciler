@@ -770,3 +770,36 @@ Allowed complete repeated order and invoice dates in suspected-repurchase matchi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 23: 发布 0.1.5
+
+**Date**: 2026-08-15
+**Task**: 发布 0.1.5
+**Branch**: `main`
+
+### Summary
+
+同步前端、Cargo 与 Tauri 版本到 0.1.5，完成完整发布门禁，创建并推送 v0.1.5 标签触发 GitHub 发布。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b4bd0a2` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

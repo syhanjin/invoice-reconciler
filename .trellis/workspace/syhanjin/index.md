@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 22
+- **Total Sessions**: 23
 - **Last Active**: 2026-08-15
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~772 | Active |
+| `journal-1.md` | ~805 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 23 | 2026-08-15 | 发布 0.1.5 | `b4bd0a2` | `main` |
 | 22 | 2026-08-15 | 修复项目批量移除发票 | `b953bcb` | `main` |
 | 21 | 2026-08-14 | 修复订单并发导入数据库锁定 | `5e5e3fc`, `56dcda0` | `main` |
 | 20 | 2026-08-14 | 摘要生成管理与可视化 | `c93d89b`, `b1e6366`, `ba6dbe1` | `main` |
