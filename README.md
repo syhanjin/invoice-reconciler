@@ -38,6 +38,14 @@ Add shadcn/ui components with the official CLI:
 bunx shadcn@latest add <component>
 ```
 
+## Project Invoice Organization
+
+In an active project, select invoices and use `移到别的项目` to move them to
+another existing active project. The move is atomic and appends invoices in
+their current project order, preserving matched order combinations, product
+summaries, and files. After a successful move, the page stays on the source
+project. Archived projects cannot be used as a source or destination.
+
 ## Quality Checks
 
 ```bash

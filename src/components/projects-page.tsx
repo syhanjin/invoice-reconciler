@@ -10,6 +10,7 @@ import {
   Download,
   FileArchive,
   FolderKanban,
+  FolderInput,
   FolderMinus,
   Info,
   LoaderCircle,
@@ -37,6 +38,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { api, errorCode, errorMessage } from "@/lib/api"
@@ -67,10 +69,20 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<string[]>([])
   const [removeOpen, setRemoveOpen] = useState(false)
   const [removing, setRemoving] = useState(false)
+  const [moveOpen, setMoveOpen] = useState(false)
+  const [moving, setMoving] = useState(false)
+  const [moveProjects, setMoveProjects] = useState<ProjectSummary[]>([])
+  const [moveProjectsLoading, setMoveProjectsLoading] = useState(false)
+  const [moveProjectsError, setMoveProjectsError] = useState<string | null>(null)
+  const [moveError, setMoveError] = useState<string | null>(null)
+  const [moveProjectId, setMoveProjectId] = useState("")
   const [exporting, setExporting] = useState(false)
   const [overwriteDirectory, setOverwriteDirectory] = useState<string | null>(null)
   const listRequest = useRef(0)
   const detailRequest = useRef(0)
+  const moveProjectsRequest = useRef(0)
+  const retainedProjectId = useRef<string | null>(null)
+  const moveSubmitting = useRef(false)
   const refreshWorkspaces = useSetAtom(workspaceRefreshAtom)
 
   const loadProjects = useCallback(async () => {
@@ -78,12 +90,13 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
     setLoading(true)
     try {
       const result = await api.listProjects({ page, pageSize: 20, search: committedSearch || undefined, archived: archivedView })
-      if (request !== listRequest.current) return
+      if (request !== listRequest.current || moveSubmitting.current) return
       const pages = Math.max(1, Math.ceil(result.total / result.pageSize))
       if (page > pages) setPage(pages)
       else {
         setData(result)
         setSelectedId((current) => {
+          if (retainedProjectId.current && current === retainedProjectId.current) return current
           if (current && result.items.some((item) => item.id === current)) return current
           return result.items[0]?.id ?? null
         })
@@ -100,7 +113,7 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
     setDetailLoading(true)
     try {
       const result = await api.getProject(id)
-      if (request === detailRequest.current) {
+      if (request === detailRequest.current && !moveSubmitting.current) {
         setDetail(result)
         const memberIds = new Set(result.invoices.map((invoice) => invoice.id))
         setSelectedInvoiceIds((current) => result.archivedAt ? [] : current.filter((invoiceId) => memberIds.has(invoiceId)))
@@ -115,15 +128,70 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
   useEffect(() => void loadProjects(), [loadProjects, refreshToken])
   useEffect(() => {
     if (selectedId) void loadDetail(selectedId)
-    else setDetail(null)
+    else {
+      detailRequest.current += 1
+      setDetail(null)
+    }
   }, [loadDetail, selectedId, refreshToken])
   useEffect(() => {
     setSelectedInvoiceIds([])
     setRemoveOpen(false)
+    setMoveOpen(false)
+    setMoveProjectId("")
+    moveProjectsRequest.current += 1
+    if (retainedProjectId.current && retainedProjectId.current !== selectedId) retainedProjectId.current = null
   }, [archivedView, selectedId])
+  useEffect(() => {
+    if (!moveOpen || moving) return
+    if (!detail || detail.archivedAt || detail.id !== selectedId || !detail.invoices.some((invoice) => selectedInvoiceIds.includes(invoice.id))) {
+      setMoveOpen(false)
+      setMoveProjectId("")
+      moveProjectsRequest.current += 1
+    }
+  }, [detail, moveOpen, moving, selectedId, selectedInvoiceIds])
+
+  const closeMoveDialog = () => {
+    if (moving) return
+    setMoveOpen(false)
+    setMoveProjectId("")
+    moveProjectsRequest.current += 1
+  }
+
+  const loadMoveProjects = async () => {
+    if (!detail) return
+    const sourceProjectId = detail.id
+    const request = ++moveProjectsRequest.current
+    setMoveProjectsLoading(true)
+    setMoveProjectsError(null)
+    setMoveProjects([])
+    try {
+      const projects = new Map<string, ProjectSummary>()
+      for (let targetPage = 1; ; targetPage += 1) {
+        const result = await api.listProjects({ page: targetPage, pageSize: 100, archived: false })
+        if (request !== moveProjectsRequest.current) return
+        for (const project of result.items) {
+          if (project.id !== sourceProjectId && !project.archivedAt) projects.set(project.id, project)
+        }
+        if (!result.items.length || result.page * result.pageSize >= result.total) break
+      }
+      setMoveProjects([...projects.values()])
+    } catch (error) {
+      if (request === moveProjectsRequest.current) setMoveProjectsError(errorMessage(error))
+    } finally {
+      if (request === moveProjectsRequest.current) setMoveProjectsLoading(false)
+    }
+  }
+
+  const openMoveDialog = async () => {
+    if (!detail || detail.id !== selectedId || detail.archivedAt || !selectedInvoiceIds.length || moving || removing || reordering || detailLoading) return
+    setMoveProjectId("")
+    setMoveError(null)
+    setMoveOpen(true)
+    await loadMoveProjects()
+  }
 
   const saveName = async () => {
-    if (!editing || savingName) return
+    if (!editing || savingName || moving) return
     const name = editing.name.trim()
     if (!name) return
     setSavingName(true)
@@ -132,6 +200,7 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
         ? await api.createProject(name)
         : await api.renameProject(selectedId!, name)
       setEditing(null)
+      if (editing.mode === "create") retainedProjectId.current = null
       setSelectedId(project.id)
       setDetail(project)
       await loadProjects()
@@ -144,11 +213,12 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
   }
 
   const deleteProject = async () => {
-    if (!selectedId || deleting) return
+    if (!selectedId || deleting || moving) return
     setDeleting(true)
     try {
       await api.deleteProject(selectedId)
       setDeleteOpen(false)
+      retainedProjectId.current = null
       setSelectedId(null)
       setDetail(null)
       await loadProjects()
@@ -162,12 +232,13 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
   }
 
   const setArchived = async (archived: boolean) => {
-    if (!selectedId || archiving) return
+    if (!selectedId || archiving || moving) return
     setArchiving(true)
     try {
       if (archived) await api.archiveProject(selectedId)
       else await api.unarchiveProject(selectedId)
       setArchiveOpen(false)
+      retainedProjectId.current = null
       setSelectedId(null)
       setDetail(null)
       await loadProjects()
@@ -181,7 +252,7 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
   }
 
   const moveInvoice = async (index: number, direction: -1 | 1) => {
-    if (!detail || detail.archivedAt || reordering || removing) return
+    if (!detail || detail.archivedAt || reordering || removing || moving) return
     const target = index + direction
     if (target < 0 || target >= detail.invoices.length) return
     const ids = detail.invoices.map((invoice) => invoice.id)
@@ -200,7 +271,7 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
   }
 
   const removeSelectedInvoices = async () => {
-    if (!detail || detail.archivedAt || !selectedInvoiceIds.length || removing) return
+    if (!detail || detail.archivedAt || !selectedInvoiceIds.length || removing || moving) return
     const invoiceIds = [...selectedInvoiceIds]
     setRemoving(true)
     try {
@@ -214,6 +285,36 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
       toast.error(errorMessage(error))
     } finally {
       setRemoving(false)
+    }
+  }
+
+  const moveSelectedInvoices = async () => {
+    if (!detail || detail.id !== selectedId || detail.archivedAt || moving || removing || reordering || moveProjectsLoading || moveProjectsError) return
+    const targetProject = moveProjects.find((project) => project.id === moveProjectId && project.id !== detail.id)
+    if (!targetProject) return
+    const invoiceIds = detail.invoices.filter((invoice) => selectedInvoiceIds.includes(invoice.id)).map((invoice) => invoice.id)
+    if (!invoiceIds.length) return
+    const sourceProjectId = detail.id
+    moveSubmitting.current = true
+    setMoving(true)
+    setMoveError(null)
+    try {
+      const result = await api.assignInvoicesToProject(invoiceIds, targetProject.id, true)
+      if (!result.assigned) throw new Error("移动未完成，请刷新后重试")
+      retainedProjectId.current = sourceProjectId
+      moveSubmitting.current = false
+      setMoveOpen(false)
+      setMoveProjectId("")
+      moveProjectsRequest.current += 1
+      setSelectedInvoiceIds([])
+      await Promise.all([loadDetail(sourceProjectId), loadProjects()])
+      refreshWorkspaces((value) => value + 1)
+      toast.success(`已将 ${invoiceIds.length} 张发票移到项目「${targetProject.name}」`)
+    } catch (error) {
+      setMoveError(errorMessage(error))
+    } finally {
+      moveSubmitting.current = false
+      setMoving(false)
     }
   }
 
@@ -258,41 +359,41 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
     <div className="flex h-screen min-h-0 flex-col bg-white">
       <header className="flex min-h-20 shrink-0 items-center justify-between border-b px-6">
         <div><h1 className="text-lg font-semibold">项目</h1><p className="mt-1 text-xs text-muted-foreground">整理发票并生成报销材料包</p></div>
-        {!archivedView && <Button onClick={() => setEditing({ mode: "create", name: "" })}><Plus />新建项目</Button>}
+        {!archivedView && <Button disabled={moving} onClick={() => setEditing({ mode: "create", name: "" })}><Plus />新建项目</Button>}
       </header>
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
         <aside className="flex min-h-0 flex-col border-r">
           <div className="grid grid-cols-2 border-b p-1">
-            <Button variant={!archivedView ? "secondary" : "ghost"} size="sm" onClick={() => { setArchivedView(false); setPage(1); setSelectedId(null) }}>进行中</Button>
-            <Button variant={archivedView ? "secondary" : "ghost"} size="sm" onClick={() => { setArchivedView(true); setPage(1); setSelectedId(null) }}>已归档</Button>
+            <Button variant={!archivedView ? "secondary" : "ghost"} size="sm" disabled={moving} onClick={() => { retainedProjectId.current = null; setArchivedView(false); setPage(1); setSelectedId(null) }}>进行中</Button>
+            <Button variant={archivedView ? "secondary" : "ghost"} size="sm" disabled={moving} onClick={() => { retainedProjectId.current = null; setArchivedView(true); setPage(1); setSelectedId(null) }}>已归档</Button>
           </div>
-          <form className="relative border-b p-3" onSubmit={(event) => { event.preventDefault(); setPage(1); setCommittedSearch(search.trim()) }}>
+          <form className="relative border-b p-3" onSubmit={(event) => { event.preventDefault(); if (moving) return; retainedProjectId.current = null; setPage(1); setCommittedSearch(search.trim()) }}>
             <Search className="absolute left-6 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-9 pr-9" placeholder="搜索项目" />
-            {search && <Button type="button" variant="ghost" size="icon-sm" className="absolute right-4 top-1/2 -translate-y-1/2" onClick={() => { setSearch(""); setCommittedSearch(""); setPage(1) }}><X /></Button>}
+            <Input value={search} disabled={moving} onChange={(event) => setSearch(event.target.value)} className="pl-9 pr-9" placeholder="搜索项目" />
+            {search && <Button type="button" variant="ghost" size="icon-sm" className="absolute right-4 top-1/2 -translate-y-1/2" disabled={moving} onClick={() => { retainedProjectId.current = null; setSearch(""); setCommittedSearch(""); setPage(1) }}><X /></Button>}
           </form>
           <div className={cn("min-h-0 flex-1 overflow-y-auto", loading && "opacity-60")}>
-            {data.items.map((project) => <ProjectListItem key={project.id} project={project} selected={project.id === selectedId} onSelect={() => setSelectedId(project.id)} />)}
+            {data.items.map((project) => <ProjectListItem key={project.id} project={project} selected={project.id === selectedId} disabled={moving} onSelect={() => { retainedProjectId.current = null; setSelectedId(project.id) }} />)}
             {!loading && data.items.length === 0 && <div className="flex h-72 flex-col items-center justify-center gap-3 text-muted-foreground"><FolderKanban className="size-8" /><p className="text-sm">暂无项目</p></div>}
           </div>
-          <div className="flex h-12 shrink-0 items-center gap-2 border-t px-3"><span className="text-xs text-muted-foreground">共 {data.total} 个</span><div className="ml-auto flex items-center gap-2"><span className="text-xs tabular-nums">{data.page} / {pages}</span><Button variant="outline" size="icon-sm" disabled={page <= 1 || loading} onClick={() => setPage((value) => value - 1)}><ChevronLeft /></Button><Button variant="outline" size="icon-sm" disabled={page >= pages || loading} onClick={() => setPage((value) => value + 1)}><ChevronRight /></Button></div></div>
+          <div className="flex h-12 shrink-0 items-center gap-2 border-t px-3"><span className="text-xs text-muted-foreground">共 {data.total} 个</span><div className="ml-auto flex items-center gap-2"><span className="text-xs tabular-nums">{data.page} / {pages}</span><Button variant="outline" size="icon-sm" disabled={page <= 1 || loading || moving} onClick={() => { retainedProjectId.current = null; setPage((value) => value - 1) }}><ChevronLeft /></Button><Button variant="outline" size="icon-sm" disabled={page >= pages || loading || moving} onClick={() => { retainedProjectId.current = null; setPage((value) => value + 1) }}><ChevronRight /></Button></div></div>
         </aside>
         <main className="flex min-h-0 min-w-0 flex-col">
           {detail ? <>
             <div className="flex min-h-20 shrink-0 items-center gap-4 border-b px-6">
               <div className="min-w-0"><div className="flex items-center gap-2"><h2 className="truncate text-base font-semibold">{detail.name}</h2>{detail.archivedAt ? <Badge variant="secondary">已归档</Badge> : <StatusBadge project={detail} />}</div><p className="mt-1 text-xs text-muted-foreground">{detail.confirmedCount} / {detail.invoiceCount} 张已确认 · 实际金额 {formatMoney(detail.actualAmountFen)}{detail.archivedAt ? ` · 归档于 ${formatDateTime(detail.archivedAt)}` : ""}</p></div>
               <div className="ml-auto flex items-center gap-2">
-                {!detail.archivedAt && <Tooltip><TooltipTrigger render={<Button variant="outline" size="icon" aria-label="重命名项目" onClick={() => setEditing({ mode: "rename", name: detail.name })} />}><Pencil /></TooltipTrigger><TooltipContent>重命名项目</TooltipContent></Tooltip>}
-                {detail.archivedAt ? <Tooltip><TooltipTrigger render={<Button variant="outline" size="icon" aria-label="解除归档" disabled={archiving} onClick={() => void setArchived(false)} />}><ArchiveRestore /></TooltipTrigger><TooltipContent>解除归档</TooltipContent></Tooltip> : <Tooltip><TooltipTrigger render={<Button variant="outline" size="icon" aria-label="归档项目" onClick={() => setArchiveOpen(true)} />}><Archive /></TooltipTrigger><TooltipContent>归档项目</TooltipContent></Tooltip>}
-                <Tooltip><TooltipTrigger render={<Button variant="outline" size="icon" aria-label="删除项目" onClick={() => setDeleteOpen(true)} />}><Trash2 /></TooltipTrigger><TooltipContent>删除项目</TooltipContent></Tooltip>
+                {!detail.archivedAt && <Tooltip><TooltipTrigger render={<Button variant="outline" size="icon" aria-label="重命名项目" disabled={moving} onClick={() => setEditing({ mode: "rename", name: detail.name })} />}><Pencil /></TooltipTrigger><TooltipContent>重命名项目</TooltipContent></Tooltip>}
+                {detail.archivedAt ? <Tooltip><TooltipTrigger render={<Button variant="outline" size="icon" aria-label="解除归档" disabled={archiving || moving} onClick={() => void setArchived(false)} />}><ArchiveRestore /></TooltipTrigger><TooltipContent>解除归档</TooltipContent></Tooltip> : <Tooltip><TooltipTrigger render={<Button variant="outline" size="icon" aria-label="归档项目" disabled={moving} onClick={() => setArchiveOpen(true)} />}><Archive /></TooltipTrigger><TooltipContent>归档项目</TooltipContent></Tooltip>}
+                <Tooltip><TooltipTrigger render={<Button variant="outline" size="icon" aria-label="删除项目" disabled={moving} onClick={() => setDeleteOpen(true)} />}><Trash2 /></TooltipTrigger><TooltipContent>删除项目</TooltipContent></Tooltip>
                 <Button disabled={!detail.exportable || exporting} onClick={() => void chooseExportDirectory()}>{exporting ? <LoaderCircle className="animate-spin" /> : <Download />}导出材料包</Button>
               </div>
             </div>
             {detail.blockingReason && <div className="shrink-0 border-b px-6 py-3"><Alert variant={detail.exportable ? "default" : "destructive"}><AlertTriangle /><AlertTitle>当前不可导出</AlertTitle><AlertDescription>{detail.blockingReason}</AlertDescription></Alert></div>}
             {detail.summaryStatus !== "succeeded" && detail.summaryStatus !== "not_applicable" && <div className="shrink-0 border-b px-6 py-3"><Alert><Info /><AlertTitle>商品摘要：{summaryStatusLabel(detail.summaryStatus)}</AlertTitle><AlertDescription>未生成 {detail.summaryCounts.notGenerated} · 待生成 {detail.summaryCounts.pending} · 生成中 {detail.summaryCounts.processing} · 失败 {detail.summaryCounts.failed} · 已完成 {detail.summaryCounts.succeeded}。当前回退名称仍可用于材料包导出。</AlertDescription></Alert></div>}
-            {!detail.archivedAt && selectedInvoiceIds.length > 0 && <div className="flex h-11 shrink-0 items-center gap-3 border-b bg-zinc-50 px-6"><span className="text-xs">已选择 {selectedInvoiceIds.length} 张</span><Button variant="outline" size="sm" disabled={removing} onClick={() => setRemoveOpen(true)}><FolderMinus />移出项目</Button></div>}
+            {!detail.archivedAt && selectedInvoiceIds.length > 0 && <div className="flex h-11 shrink-0 items-center gap-3 border-b bg-zinc-50 px-6"><span className="text-xs">已选择 {selectedInvoiceIds.length} 张</span><Button variant="outline" size="sm" disabled={removing || moving} onClick={() => setRemoveOpen(true)}><FolderMinus />移出项目</Button><Button variant="outline" size="sm" disabled={moving || removing || reordering || detailLoading || detail.id !== selectedId} onClick={() => void openMoveDialog()}><FolderInput />移到别的项目</Button></div>}
             <div className={cn("min-h-0 flex-1 overflow-auto", detailLoading && "opacity-60")}>
-              <Table><TableHeader className="sticky top-0 z-10 bg-zinc-50"><TableRow>{!detail.archivedAt && <TableHead className="w-12"><Checkbox checked={allInvoicesSelected} indeterminate={someInvoicesSelected} disabled={detail.invoices.length === 0 || removing} aria-label="选择当前项目全部发票" onCheckedChange={(checked) => setSelectedInvoiceIds(checked === true ? detail.invoices.map((invoice) => invoice.id) : [])} /></TableHead>}<TableHead className="w-20">顺序</TableHead><TableHead>发票</TableHead><TableHead>销售方</TableHead><TableHead>订单组合</TableHead><TableHead>状态</TableHead><TableHead className="text-right">发票金额</TableHead><TableHead className="text-right">订单金额</TableHead><TableHead className="text-right">实际金额</TableHead></TableRow></TableHeader><TableBody>{detail.invoices.map((invoice, index) => <TableRow key={invoice.id} data-state={selectedInvoiceIds.includes(invoice.id) ? "selected" : undefined} className="h-16">{!detail.archivedAt && <TableCell><Checkbox checked={selectedInvoiceIds.includes(invoice.id)} disabled={removing} aria-label={`选择发票 ${invoice.invoiceNumber ?? invoice.id}`} onCheckedChange={(checked) => setSelectedInvoiceIds((current) => checked === true ? current.includes(invoice.id) ? current : [...current, invoice.id] : current.filter((invoiceId) => invoiceId !== invoice.id))} /></TableCell>}<TableCell><div className="flex items-center gap-1"><span className="w-6 text-xs tabular-nums text-muted-foreground">{index + 1}</span><Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`上移 ${invoice.invoiceNumber ?? invoice.id}`} disabled={Boolean(detail.archivedAt) || index === 0 || reordering || removing} onClick={() => void moveInvoice(index, -1)} />}><ArrowUp /></TooltipTrigger><TooltipContent>上移</TooltipContent></Tooltip><Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`下移 ${invoice.invoiceNumber ?? invoice.id}`} disabled={Boolean(detail.archivedAt) || index === detail.invoices.length - 1 || reordering || removing} onClick={() => void moveInvoice(index, 1)} />}><ArrowDown /></TooltipTrigger><TooltipContent>下移</TooltipContent></Tooltip></div></TableCell><TableCell><p className="font-medium">{invoice.invoiceNumber ?? "未识别号码"}</p><p className="mt-1 text-xs text-muted-foreground">{invoice.typeDescription} · {invoice.invoiceDate ?? "日期缺失"}</p></TableCell><TableCell className="max-w-44 truncate">{invoice.sellerName ?? "-"}</TableCell><TableCell className="max-w-72"><div className="flex items-center gap-1"><p className="truncate font-medium">{invoice.displayName}</p>{invoice.summaryStatus === "not_generated" && <Badge variant="outline">未生成</Badge>}{invoice.summaryStatus === "pending" && <Badge variant="secondary">待生成</Badge>}{invoice.summaryStatus === "processing" && <Badge variant="secondary"><LoaderCircle className="animate-spin" />生成中</Badge>}{invoice.summaryStatus === "succeeded" && <Badge variant="outline">{invoice.summarySource === "manual" ? "人工" : "已完成"}</Badge>}{invoice.summaryStatus === "failed" && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`重试商品摘要 ${invoice.invoiceNumber ?? invoice.id}`} onClick={() => void retrySummary(invoice.id)} />}><RefreshCw /></TooltipTrigger><TooltipContent>{invoice.summaryError ?? "商品摘要生成失败"}</TooltipContent></Tooltip>}</div><p className="mt-1 truncate text-xs text-muted-foreground">{invoice.orders.map((order) => order.externalOrderNumber ?? order.id).join("、") || "-"}</p></TableCell><TableCell>{invoice.blockingReason ? <Tooltip><TooltipTrigger render={<Badge variant="destructive" />}>异常</TooltipTrigger><TooltipContent>{invoice.blockingReason}</TooltipContent></Tooltip> : <Badge variant="outline">已确认</Badge>}</TableCell><MoneyCell value={invoice.invoiceAmountFen} /><MoneyCell value={invoice.orderAmountFen} /><MoneyCell value={invoice.actualAmountFen} strong /></TableRow>)}{detail.invoices.length === 0 && <TableRow><TableCell colSpan={detail.archivedAt ? 8 : 9} className="h-72 text-center text-sm text-muted-foreground">请在发票台账中选择发票并分配到此项目</TableCell></TableRow>}</TableBody></Table>
+              <Table><TableHeader className="sticky top-0 z-10 bg-zinc-50"><TableRow>{!detail.archivedAt && <TableHead className="w-12"><Checkbox checked={allInvoicesSelected} indeterminate={someInvoicesSelected} disabled={detail.invoices.length === 0 || removing || moving} aria-label="选择当前项目全部发票" onCheckedChange={(checked) => setSelectedInvoiceIds(checked === true ? detail.invoices.map((invoice) => invoice.id) : [])} /></TableHead>}<TableHead className="w-20">顺序</TableHead><TableHead>发票</TableHead><TableHead>销售方</TableHead><TableHead>订单组合</TableHead><TableHead>状态</TableHead><TableHead className="text-right">发票金额</TableHead><TableHead className="text-right">订单金额</TableHead><TableHead className="text-right">实际金额</TableHead></TableRow></TableHeader><TableBody>{detail.invoices.map((invoice, index) => <TableRow key={invoice.id} data-state={selectedInvoiceIds.includes(invoice.id) ? "selected" : undefined} className="h-16">{!detail.archivedAt && <TableCell><Checkbox checked={selectedInvoiceIds.includes(invoice.id)} disabled={removing || moving} aria-label={`选择发票 ${invoice.invoiceNumber ?? invoice.id}`} onCheckedChange={(checked) => setSelectedInvoiceIds((current) => checked === true ? current.includes(invoice.id) ? current : [...current, invoice.id] : current.filter((invoiceId) => invoiceId !== invoice.id))} /></TableCell>}<TableCell><div className="flex items-center gap-1"><span className="w-6 text-xs tabular-nums text-muted-foreground">{index + 1}</span><Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`上移 ${invoice.invoiceNumber ?? invoice.id}`} disabled={Boolean(detail.archivedAt) || index === 0 || reordering || removing || moving} onClick={() => void moveInvoice(index, -1)} />}><ArrowUp /></TooltipTrigger><TooltipContent>上移</TooltipContent></Tooltip><Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`下移 ${invoice.invoiceNumber ?? invoice.id}`} disabled={Boolean(detail.archivedAt) || index === detail.invoices.length - 1 || reordering || removing || moving} onClick={() => void moveInvoice(index, 1)} />}><ArrowDown /></TooltipTrigger><TooltipContent>下移</TooltipContent></Tooltip></div></TableCell><TableCell><p className="font-medium">{invoice.invoiceNumber ?? "未识别号码"}</p><p className="mt-1 text-xs text-muted-foreground">{invoice.typeDescription} · {invoice.invoiceDate ?? "日期缺失"}</p></TableCell><TableCell className="max-w-44 truncate">{invoice.sellerName ?? "-"}</TableCell><TableCell className="max-w-72"><div className="flex items-center gap-1"><p className="truncate font-medium">{invoice.displayName}</p>{invoice.summaryStatus === "not_generated" && <Badge variant="outline">未生成</Badge>}{invoice.summaryStatus === "pending" && <Badge variant="secondary">待生成</Badge>}{invoice.summaryStatus === "processing" && <Badge variant="secondary"><LoaderCircle className="animate-spin" />生成中</Badge>}{invoice.summaryStatus === "succeeded" && <Badge variant="outline">{invoice.summarySource === "manual" ? "人工" : "已完成"}</Badge>}{invoice.summaryStatus === "failed" && <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={`重试商品摘要 ${invoice.invoiceNumber ?? invoice.id}`} onClick={() => void retrySummary(invoice.id)} />}><RefreshCw /></TooltipTrigger><TooltipContent>{invoice.summaryError ?? "商品摘要生成失败"}</TooltipContent></Tooltip>}</div><p className="mt-1 truncate text-xs text-muted-foreground">{invoice.orders.map((order) => order.externalOrderNumber ?? order.id).join("、") || "-"}</p></TableCell><TableCell>{invoice.blockingReason ? <Tooltip><TooltipTrigger render={<Badge variant="destructive" />}>异常</TooltipTrigger><TooltipContent>{invoice.blockingReason}</TooltipContent></Tooltip> : <Badge variant="outline">已确认</Badge>}</TableCell><MoneyCell value={invoice.invoiceAmountFen} /><MoneyCell value={invoice.orderAmountFen} /><MoneyCell value={invoice.actualAmountFen} strong /></TableRow>)}{detail.invoices.length === 0 && <TableRow><TableCell colSpan={detail.archivedAt ? 8 : 9} className="h-72 text-center text-sm text-muted-foreground">请在发票台账中选择发票并分配到此项目</TableCell></TableRow>}</TableBody></Table>
             </div>
           </> : <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground"><FileArchive className="size-10" /><p className="text-sm">选择或创建一个项目</p></div>}
         </main>
@@ -302,13 +403,27 @@ export function ProjectsPage({ refreshToken }: { refreshToken: number }) {
       <Dialog open={deleteOpen} onOpenChange={(open) => !deleting && setDeleteOpen(open)}><DialogContent><DialogHeader><DialogTitle>删除项目？</DialogTitle><DialogDescription>将删除项目“{detail?.name}”并解除 {detail?.invoiceCount ?? 0} 张发票的项目归属。发票、订单、匹配关系和原文件都会保留。</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={deleting} onClick={() => setDeleteOpen(false)}>取消</Button><Button variant="destructive" disabled={deleting} onClick={() => void deleteProject()}>{deleting ? <LoaderCircle className="animate-spin" /> : <Trash2 />}确认删除</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={removeOpen} onOpenChange={(open) => !removing && setRemoveOpen(open)}><DialogContent><DialogHeader><DialogTitle>将发票移出项目？</DialogTitle><DialogDescription>将解除选中的 {selectedInvoiceIds.length} 张发票与项目“{detail?.name}”的归属关系。发票、订单、匹配关系、商品摘要和原文件都会保留。</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={removing} onClick={() => setRemoveOpen(false)}>取消</Button><Button disabled={removing} onClick={() => void removeSelectedInvoices()}>{removing ? <LoaderCircle className="animate-spin" /> : <FolderMinus />}确认移出</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={archiveOpen} onOpenChange={(open) => !archiving && setArchiveOpen(open)}><DialogContent><DialogHeader><DialogTitle>归档项目？</DialogTitle><DialogDescription>归档后，项目关联的订单和发票将退出日常工作台。项目、匹配关系和文件都会保留，仍可导出并随时解除归档。</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={archiving} onClick={() => setArchiveOpen(false)}>取消</Button><Button disabled={archiving} onClick={() => void setArchived(true)}>{archiving ? <LoaderCircle className="animate-spin" /> : <Archive />}确认归档</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={moveOpen} onOpenChange={(open) => !open && closeMoveDialog()}>
+        <DialogContent showCloseButton={!moving}>
+          <DialogHeader>
+            <DialogTitle>移到别的项目</DialogTitle>
+            <DialogDescription>将选中的 {selectedInvoiceIds.length} 张发票从项目「{detail?.name}」移到所选项目，并追加到目标项目末尾。订单组合、匹配关系、商品摘要和原文件都会保留。</DialogDescription>
+          </DialogHeader>
+          {moveProjectsLoading ? <p className="flex items-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在加载项目…</p> : moveProjectsError ? <div className="space-y-3"><Alert variant="destructive"><AlertDescription>{moveProjectsError}</AlertDescription></Alert><Button variant="outline" disabled={moving} onClick={() => void loadMoveProjects()}>重试</Button></div> : moveProjects.length === 0 ? <p className="text-sm text-muted-foreground">暂无其他进行中的项目，请先创建项目</p> : <Select value={moveProjectId} disabled={moving} onValueChange={(value) => setMoveProjectId(value ?? "")}><SelectTrigger aria-label="目标项目" className="w-full"><SelectValue placeholder="选择目标项目">{moveProjects.find((project) => project.id === moveProjectId)?.name}</SelectValue></SelectTrigger><SelectContent>{moveProjects.map((project) => <SelectItem key={project.id} value={project.id}>{project.name}</SelectItem>)}</SelectContent></Select>}
+          {moveError && <Alert variant="destructive"><AlertDescription>{moveError}</AlertDescription></Alert>}
+          <DialogFooter>
+            <Button variant="outline" disabled={moving} onClick={closeMoveDialog}>取消</Button>
+            <Button disabled={moving || moveProjectsLoading || Boolean(moveProjectsError) || !moveProjects.some((project) => project.id === moveProjectId) || !detail?.invoices.some((invoice) => selectedInvoiceIds.includes(invoice.id))} onClick={() => void moveSelectedInvoices()}>{moving ? <LoaderCircle className="animate-spin" /> : <FolderInput />}确认移动</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={Boolean(overwriteDirectory)} onOpenChange={(open) => !open && !exporting && setOverwriteDirectory(null)}><DialogContent><DialogHeader><DialogTitle>覆盖已有材料包？</DialogTitle><DialogDescription>所选目录中已有同名 ZIP。确认后将安全替换旧文件；生成失败时保留旧文件。</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={exporting} onClick={() => setOverwriteDirectory(null)}>取消</Button><Button disabled={exporting} onClick={() => overwriteDirectory && void runExport(overwriteDirectory, true)}>{exporting ? <LoaderCircle className="animate-spin" /> : <Download />}覆盖导出</Button></DialogFooter></DialogContent></Dialog>
     </div>
   )
 }
 
-function ProjectListItem({ project, selected, onSelect }: { project: ProjectSummary; selected: boolean; onSelect: () => void }) {
-  return <button type="button" className={cn("flex w-full flex-col gap-2 border-b px-4 py-3 text-left hover:bg-zinc-50", selected && "bg-zinc-100")} onClick={onSelect}><div className="flex w-full items-center gap-2"><span className="min-w-0 flex-1 truncate text-sm font-medium">{project.name}</span><SummaryProjectBadge status={project.summaryStatus} /><StatusBadge project={project} /></div><div className="flex items-center gap-3 text-xs text-muted-foreground"><span>{project.confirmedCount}/{project.invoiceCount} 张确认</span><span>摘要 {project.summaryCounts.succeeded}/{project.summaryCounts.total}</span>{project.summaryCounts.failed > 0 && <span className="text-red-600">失败 {project.summaryCounts.failed}</span>}<span className="ml-auto">{formatDateTime(project.updatedAt)}</span></div></button>
+function ProjectListItem({ project, selected, disabled = false, onSelect }: { project: ProjectSummary; selected: boolean; disabled?: boolean; onSelect: () => void }) {
+  return <button type="button" disabled={disabled} className={cn("flex w-full flex-col gap-2 border-b px-4 py-3 text-left hover:bg-zinc-50", selected && "bg-zinc-100", disabled && "cursor-not-allowed opacity-60")} onClick={onSelect}><div className="flex w-full items-center gap-2"><span className="min-w-0 flex-1 truncate text-sm font-medium">{project.name}</span><SummaryProjectBadge status={project.summaryStatus} /><StatusBadge project={project} /></div><div className="flex items-center gap-3 text-xs text-muted-foreground"><span>{project.confirmedCount}/{project.invoiceCount} 张确认</span><span>摘要 {project.summaryCounts.succeeded}/{project.summaryCounts.total}</span>{project.summaryCounts.failed > 0 && <span className="text-red-600">失败 {project.summaryCounts.failed}</span>}<span className="ml-auto">{formatDateTime(project.updatedAt)}</span></div></button>
 }
 
 function SummaryProjectBadge({ status }: { status: ProjectSummary["summaryStatus"] }) {
