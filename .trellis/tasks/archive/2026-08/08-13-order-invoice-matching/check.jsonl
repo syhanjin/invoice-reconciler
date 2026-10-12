@@ -1,2 +1,0 @@
-{"file":".trellis/spec/backend/order-invoice-matching-contract.md","reason":"复核金额与日期边界、全局冲突、二次确认和原子批量提交测试"}
-{"file":".trellis/spec/frontend/matching-workspace-contract.md","reason":"复核同步滚动、详情复用、响应式弹窗及前端交互测试"}

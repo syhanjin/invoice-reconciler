@@ -1,3 +1,0 @@
-{"file":".trellis/spec/backend/order-import-contract.md","reason":"Verify cross-layer signatures, queue limits, OCR behavior, and required tests"}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify SeaORM ownership, migrations, transactionality, and compensation"}
-{"file":".trellis/spec/frontend/application-contract.md","reason":"Verify typed invokes, event isolation, validation, and desktop UI checks"}

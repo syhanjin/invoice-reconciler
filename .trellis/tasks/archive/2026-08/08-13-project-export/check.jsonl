@@ -1,4 +1,0 @@
-{"file":".trellis/spec/backend/project-export-contract.md","reason":"Verify commands, eligibility blockers, package structure, page order, and failure preservation"}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify fresh/upgrade/interrupted migrations, constraints, cascades, and transactions"}
-{"file":".trellis/spec/frontend/project-workspace-contract.md","reason":"Verify CRUD, membership, filter, reorder, export, and overwrite component flows"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace SQLite to Rust models and Tauri API to React state and controls"}

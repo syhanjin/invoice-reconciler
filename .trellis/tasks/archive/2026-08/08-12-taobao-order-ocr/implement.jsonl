@@ -1,3 +1,0 @@
-{"file":".trellis/spec/backend/order-import-contract.md","reason":"Typed Tauri commands, OCR request, queue lifecycle, file compensation, and validation contract"}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"SeaORM entity, migration, transaction, duplicate, and persistence conventions"}
-{"file":".trellis/spec/frontend/application-contract.md","reason":"React/Tauri boundary, Jotai event state, forms, and UI conventions"}

@@ -1,7 +1,0 @@
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"Implement the summary schema, repeatable migration, transaction boundaries, and restart recovery using existing SeaORM patterns."}
-{"file":".trellis/spec/backend/order-import-contract.md","reason":"Promote provider settings to the shared LLM contract while preserving order queue behavior."}
-{"file":".trellis/spec/backend/order-invoice-matching-contract.md","reason":"Implement summary input, queue states, input-hash guards, retry, and edit-driven regeneration."}
-{"file":".trellis/spec/backend/project-export-contract.md","reason":"Use the backend displayName consistently in project projections and exports without changing eligibility."}
-{"file":".trellis/spec/frontend/application-contract.md","reason":"Implement typed API changes and authoritative invalidation reloads."}
-{"file":".trellis/spec/frontend/matching-workspace-contract.md","reason":"Render generated and fallback summary states in the matching workspace."}
-{"file":".trellis/spec/frontend/project-workspace-contract.md","reason":"Render non-blocking project summary states and retry controls."}

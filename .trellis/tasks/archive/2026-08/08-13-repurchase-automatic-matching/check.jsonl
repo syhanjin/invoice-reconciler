@@ -1,3 +1,0 @@
-{"file":".trellis/spec/backend/order-invoice-matching-contract.md","reason":"Verify matching behavior and repository test coverage."}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify query paging and persistence invariants."}
-{"file":".trellis/spec/frontend/matching-workspace-contract.md","reason":"Verify custom picker and conflict presentation behavior."}

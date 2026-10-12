@@ -1,3 +1,0 @@
-{"file":".trellis/spec/frontend/application-contract.md","reason":"Verify current-page selection boundaries, confirmation/partial-failure state, typed API usage, and required tests"}
-{"file":".trellis/spec/backend/order-import-contract.md","reason":"Verify delete_orders validation, ordered deduplication, structured per-ID results, and test assertions"}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify sequential compensated deletion, transactionality, duplicate recalculation, and image restoration"}
