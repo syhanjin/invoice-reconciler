@@ -20,5 +20,8 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
     css: true,
+    // Leaves room for several async queries at the 5 s testing-library budget
+    // (src/test/setup.ts) before vitest reports a generic test timeout.
+    testTimeout: 20000,
   },
 })
